@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use glob::Pattern;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleAction {
@@ -13,28 +13,14 @@ pub enum RuleAction {
 
 #[derive(Debug, Clone)]
 struct Rule {
-    matcher: Matcher,
     action: RuleAction,
 }
 
-#[derive(Debug, Clone)]
-enum Matcher {
-    LiteralPath(PathBuf),
-    Glob(Pattern),
-}
-
-impl Matcher {
-    fn matches(&self, path: &Path) -> bool {
-        match self {
-            Matcher::LiteralPath(prefix) => path == prefix || path.starts_with(prefix),
-            Matcher::Glob(pattern) => pattern.matches_path(path),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Profile {
     rules: Vec<Rule>,
+    globset: GlobSet,
+    glob_to_rule: Vec<usize>,
     implicit_visible_ancestors: BTreeSet<PathBuf>,
 }
 
@@ -51,6 +37,8 @@ impl Profile {
             .context("launch cwd for profile parsing must be an absolute normalized path")?;
 
         let mut rules = Vec::new();
+        let mut globset_builder = GlobSetBuilder::new();
+        let mut glob_to_rule = Vec::new();
         let mut implicit_visible_ancestors = BTreeSet::new();
 
         for (idx, line) in profile_src.lines().enumerate() {
@@ -72,28 +60,50 @@ impl Profile {
 
             let action = parse_action(action_token)
                 .with_context(|| format!("line {} has invalid action", idx + 1))?;
-            let matcher = parse_matcher(pattern_token, &cwd)
+            let pattern = normalize_pattern(pattern_token, &cwd)
                 .with_context(|| format!("line {} has invalid pattern", idx + 1))?;
 
             if action != RuleAction::Deny {
-                gather_implicit_ancestors(&matcher, &mut implicit_visible_ancestors);
+                gather_implicit_ancestors(&pattern, &mut implicit_visible_ancestors);
             }
 
-            rules.push(Rule { matcher, action });
+            let rule_idx = rules.len();
+            rules.push(Rule { action });
+
+            for glob_pattern in glob_patterns_for_rule(&pattern) {
+                let glob = Glob::new(&glob_pattern).with_context(|| {
+                    format!("line {} has invalid glob: {glob_pattern}", idx + 1)
+                })?;
+                globset_builder.add(glob);
+                glob_to_rule.push(rule_idx);
+            }
         }
+
+        let globset = globset_builder
+            .build()
+            .context("failed to build globset for profile")?;
 
         Ok(Self {
             rules,
+            globset,
+            glob_to_rule,
             implicit_visible_ancestors,
         })
     }
 
     pub fn first_match_action(&self, abs_path: &Path) -> Option<RuleAction> {
         let normalized = normalize_abs(abs_path).ok()?;
-        self.rules
-            .iter()
-            .find(|rule| rule.matcher.matches(&normalized))
-            .map(|rule| rule.action)
+        let matched = self.globset.matches(&normalized);
+
+        let mut first_rule_idx: Option<usize> = None;
+        for glob_idx in &matched {
+            let rule_idx = self.glob_to_rule[*glob_idx];
+            if first_rule_idx.is_none_or(|existing| rule_idx < existing) {
+                first_rule_idx = Some(rule_idx);
+            }
+        }
+
+        first_rule_idx.map(|rule_idx| self.rules[rule_idx].action)
     }
 
     pub fn visibility(&self, abs_path: &Path) -> Visibility {
@@ -122,7 +132,7 @@ fn parse_action(token: &str) -> Result<RuleAction> {
     }
 }
 
-fn parse_matcher(token: &str, cwd: &Path) -> Result<Matcher> {
+fn normalize_pattern(token: &str, cwd: &Path) -> Result<String> {
     let normalized = if token == "." {
         cwd.to_path_buf()
     } else {
@@ -136,23 +146,48 @@ fn parse_matcher(token: &str, cwd: &Path) -> Result<Matcher> {
         }
     };
 
-    let normalized_str = normalized
+    normalized
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("path pattern is not valid UTF-8"))?;
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("path pattern is not valid UTF-8"))
+}
 
-    if has_glob_syntax(normalized_str) {
-        let pattern = Pattern::new(normalized_str)
-            .with_context(|| format!("invalid glob pattern: {normalized_str}"))?;
-        Ok(Matcher::Glob(pattern))
+fn glob_patterns_for_rule(pattern: &str) -> Vec<String> {
+    let base = normalized_base_pattern(pattern);
+    let mut out = vec![base.to_string()];
+
+    if let Some(descendant) = descendant_glob(base) {
+        if descendant != base {
+            out.push(descendant);
+        }
+    }
+
+    out
+}
+
+fn normalized_base_pattern(pattern: &str) -> &str {
+    if pattern == "/" {
+        "/"
     } else {
-        Ok(Matcher::LiteralPath(normalized))
+        pattern.trim_end_matches('/')
     }
 }
 
-fn gather_implicit_ancestors(matcher: &Matcher, output: &mut BTreeSet<PathBuf>) {
-    let mut fixed_path = match matcher {
-        Matcher::LiteralPath(path) => path.clone(),
-        Matcher::Glob(pattern) => fixed_prefix(pattern.as_str()),
+fn descendant_glob(base: &str) -> Option<String> {
+    if base == "/**" || base.ends_with("/**") {
+        return None;
+    }
+    if base == "/" {
+        return Some("/**".to_string());
+    }
+    Some(format!("{base}/**"))
+}
+
+fn gather_implicit_ancestors(pattern: &str, output: &mut BTreeSet<PathBuf>) {
+    let mut fixed_path = if has_glob_syntax(pattern) {
+        fixed_prefix(pattern)
+    } else {
+        PathBuf::from(pattern)
     };
 
     while let Some(parent) = fixed_path.parent() {
@@ -278,6 +313,19 @@ mod tests {
         assert_eq!(
             profile.visibility(Path::new("/foo")),
             Visibility::Action(RuleAction::Deny)
+        );
+    }
+
+    #[test]
+    fn glob_rule_matches_descendants() {
+        let profile = parse(
+            r#"
+            /home/*/.ssh deny
+            "#,
+        );
+        assert_eq!(
+            profile.first_match_action(Path::new("/home/alice/.ssh/id_rsa")),
+            Some(RuleAction::Deny)
         );
     }
 }
