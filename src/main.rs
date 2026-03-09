@@ -1,4 +1,5 @@
 mod cli;
+mod op;
 mod profile;
 mod record;
 
@@ -169,13 +170,41 @@ fn flush_record(path: &Path, dry_run: bool) -> Result<FlushStats> {
             continue;
         }
 
+        let op: op::Operation = match record::decode_cbor(&frame) {
+            Ok(op) => op,
+            Err(_) => {
+                stats.skipped += 1;
+                continue;
+            }
+        };
+
         stats.pending += 1;
+        if !dry_run {
+            apply_operation(&op)?;
+        }
         if !dry_run && record::mark_flushed(path, frame.offset)? {
             stats.marked += 1;
         }
     }
 
     Ok(stats)
+}
+
+fn apply_operation(op: &op::Operation) -> Result<()> {
+    match op {
+        op::Operation::WriteFile { path, data } => {
+            if !path.is_absolute() {
+                bail!("operation path must be absolute: {}", path.display());
+            }
+            if let Some(parent) = path.parent() {
+                fs_err::create_dir_all(parent).with_context(|| {
+                    format!("failed to create parent directories for {}", path.display())
+                })?;
+            }
+            fs_err::write(path, data)
+                .with_context(|| format!("failed to write file from record: {}", path.display()))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -196,8 +225,12 @@ mod tests {
     fn flush_dry_run_does_not_mark() {
         let path = temp_record_path("dry-run");
         let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let op = op::Operation::WriteFile {
+            path: temp_record_path("target"),
+            data: b"hello".to_vec(),
+        };
         writer
-            .append_cbor(record::TAG_WRITE_OP, &1u32)
+            .append_cbor(record::TAG_WRITE_OP, &op)
             .expect("append");
         writer.sync().expect("sync");
 
@@ -213,15 +246,22 @@ mod tests {
     #[test]
     fn flush_marks_and_becomes_idempotent() {
         let path = temp_record_path("mark");
+        let out_path = temp_record_path("write-target");
         let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let op = op::Operation::WriteFile {
+            path: out_path.clone(),
+            data: b"world".to_vec(),
+        };
         writer
-            .append_cbor(record::TAG_WRITE_OP, &1u32)
+            .append_cbor(record::TAG_WRITE_OP, &op)
             .expect("append");
         writer.sync().expect("sync");
 
         let first = flush_record(&path, false).expect("first flush");
         assert_eq!(first.pending, 1);
         assert_eq!(first.marked, 1);
+        let bytes = fs_err::read(&out_path).expect("output should be written");
+        assert_eq!(bytes, b"world");
 
         let second = flush_record(&path, false).expect("second flush");
         assert_eq!(second.pending, 0);
