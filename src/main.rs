@@ -231,6 +231,18 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
                     .with_context(|| format!("failed to remove directory: {}", path.display())),
             }
         }
+        op::Operation::CreateSymlink { path, target } => {
+            validate_abs(path)?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create parent directories for symlink {}",
+                        path.display()
+                    )
+                })?;
+            }
+            create_symlink(path, target)
+        }
         op::Operation::Rename { from, to } => {
             validate_abs(from)?;
             validate_abs(to)?;
@@ -293,6 +305,47 @@ fn set_executable_bit(path: &Path, executable: bool) -> Result<()> {
 #[cfg(not(unix))]
 fn set_executable_bit(_path: &Path, _executable: bool) -> Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(path: &Path, target: &Path) -> Result<()> {
+    use std::os::unix::fs as unix_fs;
+
+    match unix_fs::symlink(target, path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read_link(path)
+                .with_context(|| format!("failed to read existing symlink {}", path.display()))?;
+            if existing == target {
+                return Ok(());
+            }
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace existing symlink {}", path.display()))?;
+            unix_fs::symlink(target, path).with_context(|| {
+                format!(
+                    "failed to create replacement symlink {} -> {}",
+                    path.display(),
+                    target.display()
+                )
+            })
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                path.display(),
+                target.display()
+            )
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_symlink(path: &Path, target: &Path) -> Result<()> {
+    bail!(
+        "symlink replay is only supported on unix targets ({} -> {})",
+        path.display(),
+        target.display()
+    )
 }
 
 #[cfg(test)]
@@ -462,5 +515,31 @@ mod tests {
             .permissions()
             .mode();
         assert_ne!(mode & 0o111, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flush_applies_symlink_creation() {
+        let path = temp_record_path("symlink-record");
+        let dir = temp_record_path("symlink-dir");
+        let target = dir.join("target.txt");
+        let link = dir.join("link.txt");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(&target, b"link-target").expect("seed target");
+
+        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let op = op::Operation::CreateSymlink {
+            path: link.clone(),
+            target: target.clone(),
+        };
+        writer
+            .append_cbor(record::TAG_WRITE_OP, &op)
+            .expect("append");
+        writer.sync().expect("sync");
+
+        let stats = flush_record(&path, false).expect("flush");
+        assert_eq!(stats.marked, 1);
+        let resolved = fs::read_link(&link).expect("read link");
+        assert_eq!(resolved, target);
     }
 }

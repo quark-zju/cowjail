@@ -13,6 +13,7 @@ pub enum Operation {
     CreateDir { path: PathBuf },
     RemoveFile { path: PathBuf },
     RemoveDir { path: PathBuf },
+    CreateSymlink { path: PathBuf, target: PathBuf },
     Rename { from: PathBuf, to: PathBuf },
     Truncate { path: PathBuf, size: u64 },
 }
