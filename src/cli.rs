@@ -34,6 +34,7 @@ pub struct MountCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlushCommand {
     pub record: Option<PathBuf>,
+    pub profile: Option<String>,
     pub dry_run: bool,
     pub verbose: bool,
 }
@@ -112,6 +113,7 @@ fn parse_mount(mut args: Arguments) -> Result<Command> {
 fn parse_flush(mut args: Arguments) -> Result<Command> {
     let verbose = args.contains(["-v", "--verbose"]);
     let dry_run = args.contains("--dry-run");
+    let profile = args.opt_value_from_str("--profile")?;
     let record = args.opt_value_from_os_str("--record", parse_pathbuf)?;
 
     let extra = args.finish();
@@ -121,6 +123,7 @@ fn parse_flush(mut args: Arguments) -> Result<Command> {
 
     Ok(Command::Flush(FlushCommand {
         record,
+        profile,
         dry_run,
         verbose,
     }))
@@ -168,6 +171,7 @@ mod tests {
         };
         assert!(flush.dry_run);
         assert!(!flush.verbose);
+        assert!(flush.profile.is_none());
         assert!(flush.record.is_none());
     }
 

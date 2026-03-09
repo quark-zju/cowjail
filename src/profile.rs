@@ -16,6 +16,12 @@ struct Rule {
     action: RuleAction,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedRuleLine {
+    pattern: String,
+    action: RuleAction,
+}
+
 #[derive(Debug)]
 pub struct Profile {
     rules: Vec<Rule>,
@@ -36,33 +42,15 @@ impl Profile {
         let cwd = normalize_abs(launch_cwd)
             .context("launch cwd for profile parsing must be an absolute normalized path")?;
 
+        let parsed = parse_lines(profile_src, &cwd)?;
         let mut rules = Vec::new();
         let mut globset_builder = GlobSetBuilder::new();
         let mut glob_to_rule = Vec::new();
         let mut implicit_visible_ancestors = BTreeSet::new();
 
-        for (idx, line) in profile_src.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-
-            let mut parts = trimmed.split_whitespace();
-            let pattern_token = parts
-                .next()
-                .with_context(|| format!("line {} missing pattern", idx + 1))?;
-            let action_token = parts
-                .next()
-                .with_context(|| format!("line {} missing action", idx + 1))?;
-            if parts.next().is_some() {
-                bail!("line {} has extra tokens", idx + 1);
-            }
-
-            let action = parse_action(action_token)
-                .with_context(|| format!("line {} has invalid action", idx + 1))?;
-            let pattern = normalize_pattern(pattern_token, &cwd)
-                .with_context(|| format!("line {} has invalid pattern", idx + 1))?;
-
+        for (idx, line) in parsed.iter().enumerate() {
+            let action = line.action;
+            let pattern = line.pattern.clone();
             if action != RuleAction::Deny {
                 gather_implicit_ancestors(&pattern, &mut implicit_visible_ancestors);
             }
@@ -123,6 +111,20 @@ impl Profile {
     }
 }
 
+pub fn normalize_source(profile_src: &str, launch_cwd: &Path) -> Result<String> {
+    let cwd = normalize_abs(launch_cwd)
+        .context("launch cwd for profile normalization must be an absolute normalized path")?;
+    let parsed = parse_lines(profile_src, &cwd)?;
+    let mut out = String::new();
+    for line in parsed {
+        out.push_str(&line.pattern);
+        out.push(' ');
+        out.push_str(action_to_str(line.action));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 fn parse_action(token: &str) -> Result<RuleAction> {
     match token {
         "ro" => Ok(RuleAction::ReadOnly),
@@ -130,6 +132,42 @@ fn parse_action(token: &str) -> Result<RuleAction> {
         "deny" => Ok(RuleAction::Deny),
         _ => bail!("action must be one of ro/rw/deny"),
     }
+}
+
+fn action_to_str(action: RuleAction) -> &'static str {
+    match action {
+        RuleAction::ReadOnly => "ro",
+        RuleAction::ReadWrite => "rw",
+        RuleAction::Deny => "deny",
+    }
+}
+
+fn parse_lines(profile_src: &str, cwd: &Path) -> Result<Vec<ParsedRuleLine>> {
+    let mut out = Vec::new();
+    for (idx, line) in profile_src.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let pattern_token = parts
+            .next()
+            .with_context(|| format!("line {} missing pattern", idx + 1))?;
+        let action_token = parts
+            .next()
+            .with_context(|| format!("line {} missing action", idx + 1))?;
+        if parts.next().is_some() {
+            bail!("line {} has extra tokens", idx + 1);
+        }
+
+        let action = parse_action(action_token)
+            .with_context(|| format!("line {} has invalid action", idx + 1))?;
+        let pattern = normalize_pattern(pattern_token, cwd)
+            .with_context(|| format!("line {} has invalid pattern", idx + 1))?;
+        out.push(ParsedRuleLine { pattern, action });
+    }
+    Ok(out)
 }
 
 fn normalize_pattern(token: &str, cwd: &Path) -> Result<String> {

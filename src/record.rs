@@ -13,6 +13,7 @@ use twox_hash::XxHash64;
 
 pub const HEADER_LEN: usize = 17;
 pub const TAG_WRITE_OP: u8 = 0x01;
+pub const TAG_PROFILE_HEADER: u8 = 0x02;
 pub const FLUSHED_BIT: u8 = 0x80;
 pub const AUTO_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -171,13 +172,7 @@ fn spawn_flusher(
 
 fn flush_inner(inner: &mut WriterInner, sync_data: bool) -> Result<()> {
     if !inner.dirty {
-        if sync_data {
-            inner
-                .buf
-                .get_ref()
-                .sync_data()
-                .context("failed to sync record file data")?;
-        }
+        let _ = sync_data;
         return Ok(());
     }
 
@@ -185,13 +180,6 @@ fn flush_inner(inner: &mut WriterInner, sync_data: bool) -> Result<()> {
         .buf
         .flush()
         .context("failed to flush buffered record writes")?;
-    if sync_data {
-        inner
-            .buf
-            .get_ref()
-            .sync_data()
-            .context("failed to sync record file data")?;
-    }
     inner.dirty = false;
     Ok(())
 }
@@ -299,12 +287,6 @@ pub fn mark_flushed(path: &Path, offset: u64) -> Result<bool> {
     })?;
     file.write_all(&tag)
         .with_context(|| format!("failed to rewrite tag at {} in {}", offset, path.display()))?;
-    file.sync_data().with_context(|| {
-        format!(
-            "failed to sync record file after mark_flushed: {}",
-            path.display()
-        )
-    })?;
     Ok(true)
 }
 
