@@ -1,4 +1,5 @@
 mod cli;
+mod profile;
 
 use anyhow::{Result, bail};
 

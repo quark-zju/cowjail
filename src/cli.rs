@@ -148,8 +148,7 @@ mod tests {
 
     #[test]
     fn parse_flush_dry_run() {
-        let cmd = parse_from(os(&["flush", "--dry-run"]))
-            .expect("flush should parse with dry-run");
+        let cmd = parse_from(os(&["flush", "--dry-run"])).expect("flush should parse with dry-run");
         let flush = match cmd {
             Command::Flush(flush) => flush,
             other => panic!("expected flush, got {other:?}"),
