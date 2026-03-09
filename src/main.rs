@@ -14,21 +14,30 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 fn main() {
-    if let Err(err) = try_main() {
+    match try_main() {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
         eprintln!("error: {err:#}");
         std::process::exit(1);
+        }
     }
 }
 
-fn try_main() -> Result<()> {
+fn try_main() -> Result<i32> {
     match cli::parse_env()? {
         Command::Run(run) => run_command(run),
-        Command::Mount(mount) => mount_command(mount),
-        Command::Flush(flush) => flush_command(flush),
+        Command::Mount(mount) => {
+            mount_command(mount)?;
+            Ok(0)
+        }
+        Command::Flush(flush) => {
+            flush_command(flush)?;
+            Ok(0)
+        }
     }
 }
 
-fn run_command(run: RunCommand) -> Result<()> {
+fn run_command(run: RunCommand) -> Result<i32> {
     let euid = unsafe { libc::geteuid() };
     if euid != 0 {
         bail!(
@@ -69,11 +78,7 @@ fn run_command(run: RunCommand) -> Result<()> {
     let _ = fs::remove_dir(&mountpoint);
 
     let status = status?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("command exited with status: {status}")
-    }
+    Ok(exit_code_from_status(status))
 }
 
 fn mount_command(mount: MountCommand) -> Result<()> {
@@ -113,6 +118,20 @@ fn run_child_in_chroot(
         .spawn()
         .context("failed to spawn child command in jail")?;
     child.wait().context("failed waiting for child command")
+}
+
+fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 fn flush_command(flush: FlushCommand) -> Result<()> {
