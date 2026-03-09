@@ -7,6 +7,7 @@ mod record;
 use anyhow::{Context, Result, bail};
 use cli::{Command, FlushCommand, MountCommand, RunCommand};
 use fs_err as fs;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
@@ -55,9 +56,10 @@ fn run_command(run: RunCommand) -> Result<i32> {
         .unwrap_or(default_record_path().context("failed to build default record path")?);
     ensure_record_parent_dir(&record_path)?;
 
+    let loaded = load_profile(Path::new(&run.profile))?;
     let writer = record::Writer::open_append(&record_path)?;
-    let profile = load_profile(Path::new(&run.profile))?;
-    let cowfs = cowfs::CowFs::new(profile, writer);
+    append_profile_header(&writer, &loaded.normalized_source)?;
+    let cowfs = cowfs::CowFs::new(loaded.profile, writer);
 
     let mountpoint = make_run_mountpoint()?;
     vlog(
@@ -108,11 +110,12 @@ fn run_command(run: RunCommand) -> Result<i32> {
 }
 
 fn mount_command(mount: MountCommand) -> Result<()> {
-    let profile = load_profile(Path::new(&mount.profile))?;
+    let loaded = load_profile(Path::new(&mount.profile))?;
     ensure_record_parent_dir(&mount.record)?;
     let writer = record::Writer::open_append(&mount.record)?;
+    append_profile_header(&writer, &loaded.normalized_source)?;
 
-    let fs = cowfs::CowFs::new(profile, writer);
+    let fs = cowfs::CowFs::new(loaded.profile, writer);
     vlog(
         mount.verbose,
         format!(
@@ -180,27 +183,29 @@ fn flush_command(flush: FlushCommand) -> Result<()> {
         })?
     };
 
-    let stats = flush_record(&record_path, flush.dry_run)?;
+    let stats = flush_record(&record_path, flush.dry_run, flush.profile.as_deref())?;
     vlog(
         flush.verbose,
         format!(
-            "flush: record={} total={} pending={} skipped={} optimized={} marked={} dry_run={}",
+            "flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
             record_path.display(),
             stats.total,
             stats.pending,
             stats.skipped,
             stats.optimized,
+            stats.blocked,
             stats.marked,
             flush.dry_run
         ),
     );
     println!(
-        "record: {} | total={} pending={} skipped={} optimized={} marked={} dry_run={}",
+        "record: {} | total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         record_path.display(),
         stats.total,
         stats.pending,
         stats.skipped,
         stats.optimized,
+        stats.blocked,
         stats.marked,
         flush.dry_run
     );
@@ -213,12 +218,44 @@ fn vlog(verbose: bool, msg: String) {
     }
 }
 
-fn load_profile(profile_path: &Path) -> Result<profile::Profile> {
+#[derive(Debug)]
+struct LoadedProfile {
+    profile: profile::Profile,
+    normalized_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileHeaderFrame {
+    normalized_profile: String,
+}
+
+fn append_profile_header(writer: &record::Writer, normalized_source: &str) -> Result<()> {
+    let header = ProfileHeaderFrame {
+        normalized_profile: normalized_source.to_string(),
+    };
+    writer
+        .append_cbor(record::TAG_PROFILE_HEADER, &header)
+        .map(|_| ())
+        .context("failed to append profile header frame")
+}
+
+fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
     let source = fs::read_to_string(profile_path)
         .with_context(|| format!("failed to read profile file: {}", profile_path.display()))?;
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    profile::Profile::parse(&source, &cwd)
-        .with_context(|| format!("failed to parse profile file: {}", profile_path.display()))
+    let profile = profile::Profile::parse(&source, &cwd)
+        .with_context(|| format!("failed to parse profile file: {}", profile_path.display()))?;
+    let normalized_source = profile::normalize_source(&source, &cwd)
+        .with_context(|| format!("failed to normalize profile file: {}", profile_path.display()))?;
+    Ok(LoadedProfile {
+        profile,
+        normalized_source,
+    })
+}
+
+fn parse_profile_from_normalized_source(source: &str) -> Result<profile::Profile> {
+    profile::Profile::parse(source, Path::new("/"))
+        .context("failed to parse normalized profile source from record")
 }
 
 fn default_record_dir() -> PathBuf {
@@ -291,11 +328,13 @@ struct FlushStats {
     pending: usize,
     skipped: usize,
     optimized: usize,
+    blocked: usize,
     marked: usize,
 }
 
-fn flush_record(path: &Path, dry_run: bool) -> Result<FlushStats> {
+fn flush_record(path: &Path, dry_run: bool, profile_override: Option<&str>) -> Result<FlushStats> {
     let frames = record::read_frames(path)?;
+    let replay_profile = resolve_flush_profile(profile_override, &frames)?;
     let mut stats = FlushStats {
         total: frames.len(),
         ..FlushStats::default()
@@ -332,6 +371,10 @@ fn flush_record(path: &Path, dry_run: bool) -> Result<FlushStats> {
 
     for item in pending {
         if !dry_run && apply_offsets.contains(&item.offset) {
+            if !op_allowed_by_profile(replay_profile.as_ref(), &item.op) {
+                stats.blocked += 1;
+                continue;
+            }
             apply_operation(&item.op)?;
         }
         if !dry_run && record::mark_flushed(path, item.offset)? {
@@ -340,6 +383,53 @@ fn flush_record(path: &Path, dry_run: bool) -> Result<FlushStats> {
     }
 
     Ok(stats)
+}
+
+fn resolve_flush_profile(
+    profile_override: Option<&str>,
+    frames: &[record::Frame],
+) -> Result<Option<profile::Profile>> {
+    if let Some(profile_path) = profile_override {
+        let loaded = load_profile(Path::new(profile_path))?;
+        return Ok(Some(loaded.profile));
+    }
+
+    for frame in frames.iter().rev() {
+        if frame.tag != record::TAG_PROFILE_HEADER {
+            continue;
+        }
+        let header: ProfileHeaderFrame = match record::decode_cbor(frame) {
+            Ok(header) => header,
+            Err(_) => continue,
+        };
+        return Ok(Some(parse_profile_from_normalized_source(
+            &header.normalized_profile,
+        )?));
+    }
+
+    Ok(None)
+}
+
+fn op_allowed_by_profile(policy: Option<&profile::Profile>, op: &op::Operation) -> bool {
+    let Some(policy) = policy else {
+        return true;
+    };
+    for path in op_paths(op) {
+        if policy.first_match_action(path) != Some(profile::RuleAction::ReadWrite) {
+            return false;
+        }
+    }
+    true
+}
+
+fn op_paths(op: &op::Operation) -> Vec<&Path> {
+    match op {
+        op::Operation::WriteFile { path, .. }
+        | op::Operation::CreateDir { path }
+        | op::Operation::RemoveDir { path }
+        | op::Operation::Truncate { path, .. } => vec![path.as_path()],
+        op::Operation::Rename { from, to } => vec![from.as_path(), to.as_path()],
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -562,6 +652,17 @@ mod tests {
         p
     }
 
+    fn temp_profile_path(name: &str, content: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        p.push(format!("cowjail-main-{name}-{now}.profile"));
+        fs::write(&p, content).expect("write profile");
+        p
+    }
+
     #[test]
     fn flush_dry_run_does_not_mark() {
         let path = temp_record_path("dry-run");
@@ -575,7 +676,7 @@ mod tests {
             .expect("append");
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, true).expect("flush dry-run");
+        let stats = flush_record(&path, true, None).expect("flush dry-run");
         assert_eq!(stats.total, 1);
         assert_eq!(stats.pending, 1);
         assert_eq!(stats.marked, 0);
@@ -598,13 +699,13 @@ mod tests {
             .expect("append");
         writer.sync().expect("sync");
 
-        let first = flush_record(&path, false).expect("first flush");
+        let first = flush_record(&path, false, None).expect("first flush");
         assert_eq!(first.pending, 1);
         assert_eq!(first.marked, 1);
         let bytes = fs::read(&out_path).expect("output should be written");
         assert_eq!(bytes, b"world");
 
-        let second = flush_record(&path, false).expect("second flush");
+        let second = flush_record(&path, false, None).expect("second flush");
         assert_eq!(second.pending, 0);
         assert_eq!(second.marked, 0);
         assert_eq!(second.skipped, 1);
@@ -627,7 +728,7 @@ mod tests {
             .expect("append");
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.marked, 1);
         assert!(!from.exists());
         let bytes = fs::read(&to).expect("renamed target");
@@ -650,7 +751,7 @@ mod tests {
             .expect("append");
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.marked, 1);
         let bytes = fs::read(&target).expect("truncated target");
         assert_eq!(bytes, b"abc");
@@ -682,7 +783,7 @@ mod tests {
         }
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.marked, 4);
         assert!(!file.exists());
         assert!(!dir.exists());
@@ -706,7 +807,7 @@ mod tests {
             .expect("append");
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.marked, 1);
 
         let mode = fs::metadata(&target)
@@ -736,7 +837,7 @@ mod tests {
             .expect("append");
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.marked, 1);
         let resolved = fs::read_link(&link).expect("read link");
         assert_eq!(resolved, target);
@@ -769,7 +870,7 @@ mod tests {
         }
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.pending, 3);
         assert_eq!(stats.optimized, 2);
         assert_eq!(stats.marked, 3);
@@ -808,11 +909,78 @@ mod tests {
         }
         writer.sync().expect("sync");
 
-        let stats = flush_record(&path, false).expect("flush");
+        let stats = flush_record(&path, false, None).expect("flush");
         assert_eq!(stats.pending, 4);
         assert_eq!(stats.optimized, 1);
         assert_eq!(stats.marked, 4);
         assert_eq!(fs::read(&b).expect("renamed content"), b"v2");
         assert_eq!(fs::read(&a).expect("post-rename write"), b"v3");
+    }
+
+    #[test]
+    fn flush_blocks_when_profile_header_disallows_write() {
+        let path = temp_record_path("profile-block-record");
+        let target = temp_record_path("profile-block-target");
+        let writer = record::Writer::open_append(&path).expect("writer open");
+
+        let header = ProfileHeaderFrame {
+            normalized_profile: format!("{} ro\n", target.display()),
+        };
+        writer
+            .append_cbor(record::TAG_PROFILE_HEADER, &header)
+            .expect("append header");
+        writer
+            .append_cbor(
+                record::TAG_WRITE_OP,
+                &op::Operation::WriteFile {
+                    path: target.clone(),
+                    state: op::FileState::Regular(b"blocked".to_vec()),
+                },
+            )
+            .expect("append write");
+        writer.sync().expect("sync");
+
+        let stats = flush_record(&path, false, None).expect("flush");
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.blocked, 1);
+        assert_eq!(stats.marked, 0);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn flush_profile_override_can_allow_previously_blocked_write() {
+        let path = temp_record_path("profile-override-record");
+        let target = temp_record_path("profile-override-target");
+        let writer = record::Writer::open_append(&path).expect("writer open");
+
+        let header = ProfileHeaderFrame {
+            normalized_profile: format!("{} ro\n", target.display()),
+        };
+        writer
+            .append_cbor(record::TAG_PROFILE_HEADER, &header)
+            .expect("append header");
+        writer
+            .append_cbor(
+                record::TAG_WRITE_OP,
+                &op::Operation::WriteFile {
+                    path: target.clone(),
+                    state: op::FileState::Regular(b"allowed".to_vec()),
+                },
+            )
+            .expect("append write");
+        writer.sync().expect("sync");
+
+        let first = flush_record(&path, false, None).expect("flush blocked");
+        assert_eq!(first.blocked, 1);
+        assert_eq!(first.marked, 0);
+
+        let override_profile =
+            temp_profile_path("profile-override", &format!("{} rw\n", target.display()));
+        let override_profile_str = override_profile.to_string_lossy().to_string();
+        let second =
+            flush_record(&path, false, Some(&override_profile_str)).expect("flush with override");
+        assert_eq!(second.blocked, 0);
+        assert_eq!(second.marked, 1);
+        assert_eq!(fs::read(&target).expect("read target"), b"allowed");
     }
 }
