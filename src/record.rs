@@ -1,0 +1,219 @@
+use std::hash::Hasher;
+use std::io::Write;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::Serialize;
+use twox_hash::XxHash64;
+
+pub const HEADER_LEN: usize = 17;
+pub const TAG_WRITE_OP: u8 = 0x01;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub offset: u64,
+    pub tag: u8,
+    pub payload: Vec<u8>,
+}
+
+pub struct Writer {
+    file: fs_err::File,
+}
+
+impl Writer {
+    pub fn open_append(path: &Path) -> Result<Self> {
+        let file = fs_err::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| {
+                format!("failed to open record file for append: {}", path.display())
+            })?;
+        Ok(Self { file })
+    }
+
+    pub fn append_cbor<T: Serialize>(&mut self, tag: u8, value: &T) -> Result<u64> {
+        let payload = serde_cbor::to_vec(value).context("failed to encode cbor payload")?;
+        self.append_payload(tag, &payload)
+    }
+
+    pub fn append_payload(&mut self, tag: u8, payload: &[u8]) -> Result<u64> {
+        let len = payload.len() as u64;
+        let checksum = checksum64(payload);
+        let mut header = [0u8; HEADER_LEN];
+        header[0] = tag;
+        header[1..9].copy_from_slice(&len.to_le_bytes());
+        header[9..17].copy_from_slice(&checksum.to_le_bytes());
+
+        let offset = self
+            .file
+            .metadata()
+            .context("failed to stat record file")?
+            .len();
+        self.file
+            .write_all(&header)
+            .context("failed to write record header")?;
+        self.file
+            .write_all(payload)
+            .context("failed to write record payload")?;
+        Ok(offset)
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        self.file
+            .sync_data()
+            .context("failed to sync record file data")
+    }
+}
+
+pub fn read_frames(path: &Path) -> Result<Vec<Frame>> {
+    let data = match fs_err::read(path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read record file: {}", path.display()));
+        }
+    };
+
+    Ok(read_frames_from_bytes(&data))
+}
+
+fn read_frames_from_bytes(data: &[u8]) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    let mut cursor: usize = 0;
+
+    while cursor < data.len() {
+        if data.len() - cursor < HEADER_LEN {
+            break;
+        }
+
+        let tag = data[cursor];
+        let len = u64::from_le_bytes(data[cursor + 1..cursor + 9].try_into().unwrap()) as usize;
+        let expected_checksum =
+            u64::from_le_bytes(data[cursor + 9..cursor + 17].try_into().unwrap());
+        cursor += HEADER_LEN;
+
+        if data.len() - cursor < len {
+            break;
+        }
+
+        let payload = &data[cursor..cursor + len];
+        if checksum64(payload) != expected_checksum {
+            break;
+        }
+
+        frames.push(Frame {
+            offset: (cursor - HEADER_LEN) as u64,
+            tag,
+            payload: payload.to_vec(),
+        });
+        cursor += len;
+    }
+
+    frames
+}
+
+fn checksum64(data: &[u8]) -> u64 {
+    let mut hasher = XxHash64::default();
+    hasher.write(data);
+    hasher.finish()
+}
+
+pub fn decode_cbor<T: serde::de::DeserializeOwned>(frame: &Frame) -> Result<T> {
+    serde_cbor::from_slice(&frame.payload).context("failed to decode cbor payload")
+}
+
+pub fn truncate_tail(path: &Path, keep_len: u64) -> Result<()> {
+    let file = fs_err::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "failed to open record file for truncate: {}",
+                path.display()
+            )
+        })?;
+    file.set_len(keep_len)
+        .with_context(|| format!("failed to truncate record file: {}", path.display()))
+}
+
+pub fn corrupt_byte(path: &Path, offset: u64, value: u8) -> Result<()> {
+    let mut data = fs_err::read(path).with_context(|| {
+        format!(
+            "failed to read record file for corruption: {}",
+            path.display()
+        )
+    })?;
+    if (offset as usize) < data.len() {
+        data[offset as usize] = value;
+    }
+    fs_err::write(path, data).with_context(|| {
+        format!(
+            "failed to rewrite corrupted record file: {}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_record_path(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        p.push(format!("cowjail-{name}-{now}.cjr"));
+        p
+    }
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let path = temp_record_path("roundtrip");
+        let mut writer = Writer::open_append(&path).expect("writer open");
+        writer
+            .append_cbor(TAG_WRITE_OP, &("path", 7u32))
+            .expect("append");
+        writer.sync().expect("sync");
+
+        let frames = read_frames(&path).expect("read frames");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].tag, TAG_WRITE_OP);
+        let payload: (String, u32) = decode_cbor(&frames[0]).expect("decode payload");
+        assert_eq!(payload.0, "path");
+        assert_eq!(payload.1, 7);
+    }
+
+    #[test]
+    fn partial_tail_is_ignored() {
+        let path = temp_record_path("partial");
+        let mut writer = Writer::open_append(&path).expect("writer open");
+        writer.append_cbor(TAG_WRITE_OP, &1u32).expect("append 1");
+        let second_offset = writer.append_cbor(TAG_WRITE_OP, &2u32).expect("append 2");
+        writer.sync().expect("sync");
+
+        truncate_tail(&path, second_offset + 5).expect("truncate");
+        let frames = read_frames(&path).expect("read frames");
+        assert_eq!(frames.len(), 1);
+        let v: u32 = decode_cbor(&frames[0]).expect("decode value");
+        assert_eq!(v, 1);
+    }
+
+    #[test]
+    fn checksum_failure_stops_iteration() {
+        let path = temp_record_path("checksum");
+        let mut writer = Writer::open_append(&path).expect("writer open");
+        writer.append_cbor(TAG_WRITE_OP, &1u32).expect("append 1");
+        let second_offset = writer.append_cbor(TAG_WRITE_OP, &2u32).expect("append 2");
+        writer.sync().expect("sync");
+
+        corrupt_byte(&path, second_offset + HEADER_LEN as u64, 0xFF).expect("corrupt");
+        let frames = read_frames(&path).expect("read frames");
+        assert_eq!(frames.len(), 1);
+        let v: u32 = decode_cbor(&frames[0]).expect("decode value");
+        assert_eq!(v, 1);
+    }
+}

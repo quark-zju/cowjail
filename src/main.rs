@@ -1,5 +1,6 @@
 mod cli;
 mod profile;
+mod record;
 
 use anyhow::{Context, Result, bail};
 use cli::{Command, FlushCommand, MountCommand, RunCommand};
