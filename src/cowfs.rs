@@ -12,7 +12,7 @@ use fuse::{
     self, FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use libc::{EACCES, EEXIST, EIO, ENOENT, ENOSYS};
+use libc::{EACCES, EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ENOTEMPTY};
 
 use crate::op::{FileState, Operation};
 use crate::profile::{Profile, RuleAction, Visibility};
@@ -278,6 +278,87 @@ impl CowFs {
             Some(OverlayNode::Deleted) | None => Ok(None),
             _ => Err(EIO),
         }
+    }
+
+    fn apply_rename_paths(&mut self, from: &Path, to: &Path) -> Result<(), i32> {
+        if from == to {
+            return Ok(());
+        }
+        let Some(src_node) = self.snapshot_node(from)? else {
+            return Err(ENOENT);
+        };
+        let src_is_dir = matches!(src_node, OverlayNode::Dir);
+        if src_is_dir && is_strict_descendant(from, to) {
+            return Err(EINVAL);
+        }
+
+        if let Some(dst_node) = self.snapshot_node(to)? {
+            let dst_is_dir = matches!(dst_node, OverlayNode::Dir);
+            if src_is_dir && !dst_is_dir {
+                return Err(ENOTDIR);
+            }
+            if !src_is_dir && dst_is_dir {
+                return Err(EISDIR);
+            }
+            if dst_is_dir && !self.list_children(to)?.is_empty() {
+                return Err(ENOTEMPTY);
+            }
+            self.clear_overlay_subtree(to);
+            self.overlay.insert(to.to_path_buf(), OverlayNode::Deleted);
+        }
+
+        if src_is_dir {
+            let moved = self.move_overlay_subtree(from, to);
+            if !moved {
+                self.overlay.insert(to.to_path_buf(), OverlayNode::Dir);
+            }
+        } else {
+            self.overlay.insert(to.to_path_buf(), src_node);
+        }
+        self.overlay.insert(from.to_path_buf(), OverlayNode::Deleted);
+        Ok(())
+    }
+
+    fn clear_overlay_subtree(&mut self, root: &Path) {
+        let keys: Vec<PathBuf> = self
+            .overlay
+            .keys()
+            .filter(|k| **k == root || is_strict_descendant(root, k))
+            .cloned()
+            .collect();
+        for key in keys {
+            self.overlay.remove(&key);
+        }
+    }
+
+    fn move_overlay_subtree(&mut self, from: &Path, to: &Path) -> bool {
+        let entries: Vec<(PathBuf, OverlayNode)> = self
+            .overlay
+            .iter()
+            .filter_map(|(p, n)| {
+                if *p == from || is_strict_descendant(from, p) {
+                    Some((p.clone(), n.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if entries.is_empty() {
+            return false;
+        }
+        for (old, _) in &entries {
+            self.overlay.remove(old);
+        }
+        for (old, node) in entries {
+            let suffix = old.strip_prefix(from).unwrap_or(Path::new(""));
+            let new_path = if suffix.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(suffix)
+            };
+            self.overlay.insert(new_path, node);
+        }
+        true
     }
 }
 
@@ -812,18 +893,10 @@ impl Filesystem for CowFs {
             reply.error(EACCES);
             return;
         }
-        let Some(node) = (match self.snapshot_node(&from) {
-            Ok(v) => v,
-            Err(code) => {
-                reply.error(code);
-                return;
-            }
-        }) else {
-            reply.error(ENOENT);
+        if let Err(code) = self.apply_rename_paths(&from, &to) {
+            reply.error(code);
             return;
-        };
-        self.overlay.insert(from.clone(), OverlayNode::Deleted);
-        self.overlay.insert(to.clone(), node);
+        }
         if self.append_record(&Operation::Rename { from, to }).is_err() {
             reply.error(EIO);
             return;
@@ -933,6 +1006,10 @@ fn system_time_from_unix(sec: i64, nsec: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::new(sec as u64, nsec as u32)
 }
 
+fn is_strict_descendant(parent: &Path, child: &Path) -> bool {
+    child != parent && child.starts_with(parent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,5 +1101,44 @@ mod tests {
                 .any(|(_, _, name)| name == &std::ffi::OsString::from("overlay-link"))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_moves_overlay_subtree() {
+        let mut fs = test_fs("/tmp/** rw");
+        let from = PathBuf::from("/tmp/cowjail-rename-from");
+        let to = PathBuf::from("/tmp/cowjail-rename-to");
+        let child = from.join("child.txt");
+        fs.overlay_set(from.clone(), OverlayNode::Dir);
+        fs.overlay_set(
+            child.clone(),
+            OverlayNode::Regular {
+                data: b"x".to_vec(),
+                executable: false,
+            },
+        );
+
+        fs.apply_rename_paths(&from, &to).expect("rename should succeed");
+        assert!(matches!(
+            fs.overlay.get(&from),
+            Some(OverlayNode::Deleted)
+        ));
+        assert!(matches!(fs.overlay.get(&to), Some(OverlayNode::Dir)));
+        assert!(matches!(
+            fs.overlay.get(&to.join("child.txt")),
+            Some(OverlayNode::Regular { .. })
+        ));
+    }
+
+    #[test]
+    fn rename_dir_into_own_subpath_fails() {
+        let mut fs = test_fs("/tmp/** rw");
+        let from = PathBuf::from("/tmp/cowjail-self-rename");
+        let to = from.join("sub");
+        fs.overlay_set(from.clone(), OverlayNode::Dir);
+        let err = fs
+            .apply_rename_paths(&from, &to)
+            .expect_err("rename to own subpath should fail");
+        assert_eq!(err, EINVAL);
     }
 }
