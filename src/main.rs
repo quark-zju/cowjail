@@ -53,9 +53,9 @@ fn run_command(run: RunCommand) -> Result<()> {
 fn mount_command(mount: MountCommand) -> Result<()> {
     let profile = load_profile(Path::new(&mount.profile))?;
     ensure_record_parent_dir(&mount.record)?;
-    let _writer = record::Writer::open_append(&mount.record)?;
+    let writer = record::Writer::open_append(&mount.record)?;
 
-    let fs = cowfs::CowFs::new(profile);
+    let fs = cowfs::CowFs::new(profile, writer);
     fs.mount(&mount.path)
 }
 

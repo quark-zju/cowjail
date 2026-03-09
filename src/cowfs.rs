@@ -2,25 +2,28 @@ use std::ffi::OsStr;
 use std::fs::Metadata;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use fs_err as fs;
 use fuse::{
-    self, FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyOpen, Request,
+    self, FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use libc::{EACCES, EIO, ENOENT};
+use libc::{EACCES, EEXIST, EIO, ENOENT, ENOSYS};
 
+use crate::op::{FileState, Operation};
 use crate::profile::{Profile, RuleAction, Visibility};
+use crate::record;
 
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
 
 pub struct CowFs {
     profile: Profile,
+    record: record::Writer,
     next_ino: u64,
     ino_to_path: std::collections::HashMap<u64, PathBuf>,
     path_to_ino: std::collections::HashMap<PathBuf, u64>,
@@ -36,7 +39,7 @@ enum OverlayNode {
 }
 
 impl CowFs {
-    pub fn new(profile: Profile) -> Self {
+    pub fn new(profile: Profile, record: record::Writer) -> Self {
         let mut ino_to_path = std::collections::HashMap::new();
         let mut path_to_ino = std::collections::HashMap::new();
         ino_to_path.insert(ROOT_INO, std::path::PathBuf::from("/"));
@@ -44,6 +47,7 @@ impl CowFs {
 
         Self {
             profile,
+            record,
             next_ino: ROOT_INO + 1,
             ino_to_path,
             path_to_ino,
@@ -87,6 +91,10 @@ impl CowFs {
             self.profile.visibility(path),
             Visibility::Hidden | Visibility::Action(RuleAction::Deny)
         )
+    }
+
+    fn is_rw(&self, path: &Path) -> bool {
+        self.profile.first_match_action(path) == Some(RuleAction::ReadWrite)
     }
 
     fn attr_for_path(&mut self, path: &Path, metadata: &Metadata) -> FileAttr {
@@ -228,6 +236,48 @@ impl CowFs {
     #[cfg(test)]
     fn overlay_set(&mut self, path: PathBuf, node: OverlayNode) {
         self.overlay.insert(path, node);
+    }
+
+    fn append_record(&self, op: &Operation) -> Result<(), i32> {
+        self.record
+            .append_cbor(record::TAG_WRITE_OP, op)
+            .map(|_| ())
+            .map_err(|_| EIO)
+    }
+
+    fn snapshot_node(&self, path: &Path) -> Result<Option<OverlayNode>, i32> {
+        if let Some(node) = self.overlay.get(path) {
+            return Ok(match node {
+                OverlayNode::Deleted => None,
+                other => Some(other.clone()),
+            });
+        }
+        let meta = match fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(EIO),
+        };
+        if meta.file_type().is_dir() {
+            return Ok(Some(OverlayNode::Dir));
+        }
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(path).map_err(|_| EIO)?;
+            return Ok(Some(OverlayNode::Symlink { target }));
+        }
+        if meta.file_type().is_file() {
+            let data = fs::read(path).map_err(|_| EIO)?;
+            let executable = meta.permissions().mode() & 0o111 != 0;
+            return Ok(Some(OverlayNode::Regular { data, executable }));
+        }
+        Ok(None)
+    }
+
+    fn current_regular(&self, path: &Path) -> Result<Option<(Vec<u8>, bool)>, i32> {
+        match self.snapshot_node(path)? {
+            Some(OverlayNode::Regular { data, executable }) => Ok(Some((data, executable))),
+            Some(OverlayNode::Deleted) | None => Ok(None),
+            _ => Err(EIO),
+        }
     }
 }
 
@@ -478,6 +528,372 @@ impl Filesystem for CowFs {
             Err(_) => reply.error(EIO),
         }
     }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _flags: u32,
+        reply: ReplyCreate,
+    ) {
+        let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let path = parent_path.join(name);
+        if !self.is_visible(&path) {
+            reply.error(ENOENT);
+            return;
+        }
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        match self.snapshot_node(&path) {
+            Ok(Some(_)) => {
+                reply.error(EEXIST);
+                return;
+            }
+            Ok(None) => {}
+            Err(code) => {
+                reply.error(code);
+                return;
+            }
+        }
+        let node = OverlayNode::Regular {
+            data: Vec::new(),
+            executable: false,
+        };
+        self.overlay.insert(path.clone(), node.clone());
+        if self
+            .append_record(&Operation::WriteFile {
+                path: path.clone(),
+                state: FileState::Regular(Vec::new()),
+            })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+        let attr = self.attr_for_overlay(&path, &node);
+        reply.created(&TTL, &attr, 0, 0, 0);
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _flags: u32,
+        reply: ReplyWrite,
+    ) {
+        let Some(path) = self.path_for_ino(ino).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        if offset < 0 {
+            reply.error(EIO);
+            return;
+        }
+        let (mut content, executable) = match self.current_regular(&path) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                reply.error(ENOENT);
+                return;
+            }
+            Err(code) => {
+                reply.error(code);
+                return;
+            }
+        };
+        let off = offset as usize;
+        if content.len() < off {
+            content.resize(off, 0);
+        }
+        if content.len() < off + data.len() {
+            content.resize(off + data.len(), 0);
+        }
+        content[off..off + data.len()].copy_from_slice(data);
+
+        self.overlay.insert(
+            path.clone(),
+            OverlayNode::Regular {
+                data: content.clone(),
+                executable,
+            },
+        );
+        if self
+            .append_record(&Operation::WriteFile {
+                path,
+                state: if executable {
+                    FileState::Executable(content)
+                } else {
+                    FileState::Regular(content)
+                },
+            })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+        reply.written(data.len() as u32);
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let path = parent_path.join(name);
+        if !self.is_visible(&path) {
+            reply.error(ENOENT);
+            return;
+        }
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        self.overlay.insert(path.clone(), OverlayNode::Deleted);
+        if self
+            .append_record(&Operation::WriteFile {
+                path,
+                state: FileState::Deleted,
+            })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+        reply.ok();
+    }
+
+    fn mkdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, _mode: u32, reply: ReplyEntry) {
+        let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let path = parent_path.join(name);
+        if !self.is_visible(&path) {
+            reply.error(ENOENT);
+            return;
+        }
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        match self.snapshot_node(&path) {
+            Ok(Some(_)) => {
+                reply.error(EEXIST);
+                return;
+            }
+            Ok(None) => {}
+            Err(code) => {
+                reply.error(code);
+                return;
+            }
+        }
+        let node = OverlayNode::Dir;
+        self.overlay.insert(path.clone(), node.clone());
+        if self
+            .append_record(&Operation::CreateDir { path: path.clone() })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+        let attr = self.attr_for_overlay(&path, &node);
+        reply.entry(&TTL, &attr, 0);
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let path = parent_path.join(name);
+        if !self.is_visible(&path) {
+            reply.error(ENOENT);
+            return;
+        }
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        self.overlay.insert(path.clone(), OverlayNode::Deleted);
+        if self.append_record(&Operation::RemoveDir { path }).is_err() {
+            reply.error(EIO);
+            return;
+        }
+        reply.ok();
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        link: &Path,
+        reply: ReplyEntry,
+    ) {
+        let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let path = parent_path.join(name);
+        if !self.is_visible(&path) {
+            reply.error(ENOENT);
+            return;
+        }
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        match self.snapshot_node(&path) {
+            Ok(Some(_)) => {
+                reply.error(EEXIST);
+                return;
+            }
+            Ok(None) => {}
+            Err(code) => {
+                reply.error(code);
+                return;
+            }
+        }
+        let node = OverlayNode::Symlink {
+            target: link.to_path_buf(),
+        };
+        self.overlay.insert(path.clone(), node.clone());
+        if self
+            .append_record(&Operation::WriteFile {
+                path: path.clone(),
+                state: FileState::Symlink(link.to_path_buf()),
+            })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+        let attr = self.attr_for_overlay(&path, &node);
+        reply.entry(&TTL, &attr, 0);
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let Some(newparent_path) = self.path_for_ino(newparent).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        let from = parent_path.join(name);
+        let to = newparent_path.join(newname);
+        if !self.is_visible(&from) || !self.is_visible(&to) {
+            reply.error(ENOENT);
+            return;
+        }
+        if !self.is_rw(&from) || !self.is_rw(&to) {
+            reply.error(EACCES);
+            return;
+        }
+        let Some(node) = (match self.snapshot_node(&from) {
+            Ok(v) => v,
+            Err(code) => {
+                reply.error(code);
+                return;
+            }
+        }) else {
+            reply.error(ENOENT);
+            return;
+        };
+        self.overlay.insert(from.clone(), OverlayNode::Deleted);
+        self.overlay.insert(to.clone(), node);
+        if self.append_record(&Operation::Rename { from, to }).is_err() {
+            reply.error(EIO);
+            return;
+        }
+        reply.ok();
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<SystemTime>,
+        _mtime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let Some(size) = size else {
+            reply.error(ENOSYS);
+            return;
+        };
+        let Some(path) = self.path_for_ino(ino).map(ToOwned::to_owned) else {
+            reply.error(ENOENT);
+            return;
+        };
+        if !self.is_rw(&path) {
+            reply.error(EACCES);
+            return;
+        }
+        let (mut data, executable) = match self.current_regular(&path) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                reply.error(ENOENT);
+                return;
+            }
+            Err(code) => {
+                reply.error(code);
+                return;
+            }
+        };
+        data.resize(size as usize, 0);
+        let node = OverlayNode::Regular {
+            data: data.clone(),
+            executable,
+        };
+        self.overlay.insert(path.clone(), node.clone());
+        if self
+            .append_record(&Operation::WriteFile {
+                path: path.clone(),
+                state: if executable {
+                    FileState::Executable(data)
+                } else {
+                    FileState::Regular(data)
+                },
+            })
+            .is_err()
+        {
+            reply.error(EIO);
+            return;
+        }
+        let attr = self.attr_for_overlay(&path, &node);
+        reply.attr(&TTL, &attr);
+    }
 }
 
 fn filetype_from_metadata(metadata: &Metadata) -> FileType {
@@ -525,9 +941,20 @@ mod tests {
         Profile::parse(src, Path::new("/")).expect("profile parse")
     }
 
+    fn test_fs(profile_src: &str) -> CowFs {
+        let mut record_path = std::env::temp_dir();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("monotonic clock")
+            .as_nanos();
+        record_path.push(format!("cowjail-cowfs-test-{now}.cjr"));
+        let writer = record::Writer::open_append(&record_path).expect("open record writer");
+        CowFs::new(parse_profile(profile_src), writer)
+    }
+
     #[test]
     fn overlay_deleted_hides_host_file() {
-        let mut fs = CowFs::new(parse_profile("/tmp/** rw"));
+        let mut fs = test_fs("/tmp/** rw");
         let path = PathBuf::from("/tmp/cowjail-overlay-deleted");
         std::fs::write(&path, b"host").expect("seed host");
         fs.overlay_set(path.clone(), OverlayNode::Deleted);
@@ -538,7 +965,7 @@ mod tests {
 
     #[test]
     fn overlay_regular_overrides_host_file() {
-        let mut fs = CowFs::new(parse_profile("/tmp/** rw"));
+        let mut fs = test_fs("/tmp/** rw");
         let path = PathBuf::from("/tmp/cowjail-overlay-regular");
         std::fs::write(&path, b"host").expect("seed host");
         fs.overlay_set(
@@ -560,7 +987,7 @@ mod tests {
 
     #[test]
     fn overlay_readdir_includes_new_children() {
-        let mut fs = CowFs::new(parse_profile("/tmp/** rw"));
+        let mut fs = test_fs("/tmp/** rw");
         let dir = PathBuf::from("/tmp/cowjail-overlay-dir");
         let _ = std::fs::create_dir_all(&dir);
         let new_file = dir.join("from-overlay");
