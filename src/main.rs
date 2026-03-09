@@ -60,6 +60,10 @@ fn run_command(run: RunCommand) -> Result<i32> {
     let cowfs = cowfs::CowFs::new(profile, writer);
 
     let mountpoint = make_run_mountpoint()?;
+    vlog(
+        run.verbose,
+        format!("run: creating temporary mountpoint {}", mountpoint.display()),
+    );
     fs::create_dir_all(&mountpoint).with_context(|| {
         format!(
             "failed to create run mountpoint directory: {}",
@@ -69,13 +73,35 @@ fn run_command(run: RunCommand) -> Result<i32> {
 
     let bg = {
         // SAFETY: session object is held until command exits; drop unmounts after wait.
+        vlog(
+            run.verbose,
+            format!("run: mounting fuse filesystem at {}", mountpoint.display()),
+        );
         unsafe { cowfs.mount_background(&mountpoint) }?
     };
 
+    vlog(
+        run.verbose,
+        format!(
+            "run: preparing child chroot to {} then chdir to {}",
+            mountpoint.display(),
+            cwd.display()
+        ),
+    );
     let status = run_child_in_chroot(&run, &mountpoint, &cwd);
 
+    vlog(run.verbose, "run: waiting for child completion done".to_string());
+    vlog(
+        run.verbose,
+        format!("run: unmounting fuse mount {}", mountpoint.display()),
+    );
     drop(bg);
+    vlog(
+        run.verbose,
+        format!("run: removing temporary mountpoint {}", mountpoint.display()),
+    );
     let _ = fs::remove_dir(&mountpoint);
+    vlog(run.verbose, "run: cleanup complete".to_string());
 
     let status = status?;
     Ok(exit_code_from_status(status))
@@ -87,6 +113,14 @@ fn mount_command(mount: MountCommand) -> Result<()> {
     let writer = record::Writer::open_append(&mount.record)?;
 
     let fs = cowfs::CowFs::new(profile, writer);
+    vlog(
+        mount.verbose,
+        format!(
+            "mount: mounting fuse at {} with record {}",
+            mount.path.display(),
+            mount.record.display()
+        ),
+    );
     fs.mount(&mount.path)
 }
 
@@ -147,6 +181,19 @@ fn flush_command(flush: FlushCommand) -> Result<()> {
     };
 
     let stats = flush_record(&record_path, flush.dry_run)?;
+    vlog(
+        flush.verbose,
+        format!(
+            "flush: record={} total={} pending={} skipped={} optimized={} marked={} dry_run={}",
+            record_path.display(),
+            stats.total,
+            stats.pending,
+            stats.skipped,
+            stats.optimized,
+            stats.marked,
+            flush.dry_run
+        ),
+    );
     println!(
         "record: {} | total={} pending={} skipped={} optimized={} marked={} dry_run={}",
         record_path.display(),
@@ -158,6 +205,12 @@ fn flush_command(flush: FlushCommand) -> Result<()> {
         flush.dry_run
     );
     Ok(())
+}
+
+fn vlog(verbose: bool, msg: String) {
+    if verbose {
+        eprintln!("{msg}");
+    }
 }
 
 fn load_profile(profile_path: &Path) -> Result<profile::Profile> {

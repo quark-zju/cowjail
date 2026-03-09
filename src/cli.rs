@@ -18,6 +18,7 @@ pub enum Command {
 pub struct RunCommand {
     pub profile: String,
     pub record: Option<PathBuf>,
+    pub verbose: bool,
     pub program: OsString,
     pub args: Vec<OsString>,
 }
@@ -26,6 +27,7 @@ pub struct RunCommand {
 pub struct MountCommand {
     pub profile: String,
     pub record: PathBuf,
+    pub verbose: bool,
     pub path: PathBuf,
 }
 
@@ -33,6 +35,7 @@ pub struct MountCommand {
 pub struct FlushCommand {
     pub record: Option<PathBuf>,
     pub dry_run: bool,
+    pub verbose: bool,
 }
 
 pub fn parse_from<I>(argv: I) -> Result<Command>
@@ -60,6 +63,7 @@ pub fn parse_env() -> Result<Command> {
 }
 
 fn parse_run(mut args: Arguments) -> Result<Command> {
+    let verbose = args.contains(["-v", "--verbose"]);
     let profile = args
         .opt_value_from_str("--profile")?
         .unwrap_or_else(|| DEFAULT_PROFILE.to_string());
@@ -74,12 +78,14 @@ fn parse_run(mut args: Arguments) -> Result<Command> {
     Ok(Command::Run(RunCommand {
         profile,
         record,
+        verbose,
         program,
         args: trailing,
     }))
 }
 
 fn parse_mount(mut args: Arguments) -> Result<Command> {
+    let verbose = args.contains(["-v", "--verbose"]);
     let profile = args
         .value_from_str("--profile")
         .context("mount requires --profile <profile>")?;
@@ -98,11 +104,13 @@ fn parse_mount(mut args: Arguments) -> Result<Command> {
     Ok(Command::Mount(MountCommand {
         profile,
         record,
+        verbose,
         path,
     }))
 }
 
 fn parse_flush(mut args: Arguments) -> Result<Command> {
+    let verbose = args.contains(["-v", "--verbose"]);
     let dry_run = args.contains("--dry-run");
     let record = args.opt_value_from_os_str("--record", parse_pathbuf)?;
 
@@ -111,7 +119,11 @@ fn parse_flush(mut args: Arguments) -> Result<Command> {
         bail!("flush got unexpected trailing arguments");
     }
 
-    Ok(Command::Flush(FlushCommand { record, dry_run }))
+    Ok(Command::Flush(FlushCommand {
+        record,
+        dry_run,
+        verbose,
+    }))
 }
 
 fn parse_pathbuf(raw: &std::ffi::OsStr) -> Result<PathBuf, Infallible> {
@@ -135,6 +147,7 @@ mod tests {
             other => panic!("expected run, got {other:?}"),
         };
         assert_eq!(run.profile, DEFAULT_PROFILE);
+        assert!(!run.verbose);
         assert_eq!(run.program, OsString::from("echo"));
         assert_eq!(run.args, vec![OsString::from("hi")]);
     }
@@ -154,6 +167,17 @@ mod tests {
             other => panic!("expected flush, got {other:?}"),
         };
         assert!(flush.dry_run);
+        assert!(!flush.verbose);
         assert!(flush.record.is_none());
+    }
+
+    #[test]
+    fn parse_verbose_short_flag() {
+        let cmd = parse_from(os(&["run", "-v", "echo"])).expect("run should parse verbose");
+        let run = match cmd {
+            Command::Run(run) => run,
+            other => panic!("expected run, got {other:?}"),
+        };
+        assert!(run.verbose);
     }
 }
