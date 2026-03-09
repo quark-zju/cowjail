@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use fs_err as fs;
 use serde::Serialize;
 use twox_hash::XxHash64;
 
@@ -19,12 +20,12 @@ pub struct Frame {
 }
 
 pub struct Writer {
-    file: fs_err::File,
+    file: fs::File,
 }
 
 impl Writer {
     pub fn open_append(path: &Path) -> Result<Self> {
-        let file = fs_err::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
@@ -73,7 +74,7 @@ impl Writer {
 }
 
 pub fn read_frames(path: &Path) -> Result<Vec<Frame>> {
-    let data = match fs_err::read(path) {
+    let data = match fs::read(path) {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
@@ -134,7 +135,7 @@ pub fn decode_cbor<T: serde::de::DeserializeOwned>(frame: &Frame) -> Result<T> {
 }
 
 pub fn mark_flushed(path: &Path, offset: u64) -> Result<bool> {
-    let mut file = fs_err::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
@@ -185,7 +186,7 @@ pub fn mark_flushed(path: &Path, offset: u64) -> Result<bool> {
 }
 
 pub fn truncate_tail(path: &Path, keep_len: u64) -> Result<()> {
-    let file = fs_err::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .write(true)
         .open(path)
         .with_context(|| {
@@ -199,7 +200,7 @@ pub fn truncate_tail(path: &Path, keep_len: u64) -> Result<()> {
 }
 
 pub fn corrupt_byte(path: &Path, offset: u64, value: u8) -> Result<()> {
-    let mut data = fs_err::read(path).with_context(|| {
+    let mut data = fs::read(path).with_context(|| {
         format!(
             "failed to read record file for corruption: {}",
             path.display()
@@ -208,7 +209,7 @@ pub fn corrupt_byte(path: &Path, offset: u64, value: u8) -> Result<()> {
     if (offset as usize) < data.len() {
         data[offset as usize] = value;
     }
-    fs_err::write(path, data).with_context(|| {
+    fs::write(path, data).with_context(|| {
         format!(
             "failed to rewrite corrupted record file: {}",
             path.display()

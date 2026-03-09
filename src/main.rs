@@ -5,6 +5,7 @@ mod record;
 
 use anyhow::{Context, Result, bail};
 use cli::{Command, FlushCommand, MountCommand, RunCommand};
+use fs_err as fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -83,7 +84,7 @@ fn flush_command(flush: FlushCommand) -> Result<()> {
 }
 
 fn load_profile(profile_path: &Path) -> Result<profile::Profile> {
-    let source = fs_err::read_to_string(profile_path)
+    let source = fs::read_to_string(profile_path)
         .with_context(|| format!("failed to read profile file: {}", profile_path.display()))?;
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     profile::Profile::parse(&source, &cwd)
@@ -104,7 +105,7 @@ fn default_record_path() -> Result<PathBuf> {
 
 fn ensure_record_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs_err::create_dir_all(parent)
+        fs::create_dir_all(parent)
             .with_context(|| format!("failed to create record directory: {}", parent.display()))?;
     }
     Ok(())
@@ -117,7 +118,7 @@ fn newest_record_path() -> Result<Option<PathBuf>> {
     }
 
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs_err::read_dir(&dir)
+    for entry in fs::read_dir(&dir)
         .with_context(|| format!("failed to list record directory: {}", dir.display()))?
     {
         let entry =
@@ -197,11 +198,11 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
                 bail!("operation path must be absolute: {}", path.display());
             }
             if let Some(parent) = path.parent() {
-                fs_err::create_dir_all(parent).with_context(|| {
+                fs::create_dir_all(parent).with_context(|| {
                     format!("failed to create parent directories for {}", path.display())
                 })?;
             }
-            fs_err::write(path, data)
+            fs::write(path, data)
                 .with_context(|| format!("failed to write file from record: {}", path.display()))
         }
     }
@@ -260,7 +261,7 @@ mod tests {
         let first = flush_record(&path, false).expect("first flush");
         assert_eq!(first.pending, 1);
         assert_eq!(first.marked, 1);
-        let bytes = fs_err::read(&out_path).expect("output should be written");
+        let bytes = fs::read(&out_path).expect("output should be written");
         assert_eq!(bytes, b"world");
 
         let second = flush_record(&path, false).expect("second flush");
