@@ -1,6 +1,9 @@
 use std::hash::Hasher;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex, Weak};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
@@ -10,6 +13,7 @@ use twox_hash::XxHash64;
 pub const HEADER_LEN: usize = 17;
 pub const TAG_WRITE_OP: u8 = 0x01;
 pub const FLUSHED_BIT: u8 = 0x80;
+pub const AUTO_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -20,8 +24,16 @@ pub struct Frame {
 }
 
 pub struct Writer {
+    inner: Arc<Mutex<WriterInner>>,
+    flusher_thread: thread::Thread,
+}
+
+struct WriterInner {
     buf: BufWriter<fs::File>,
     next_offset: u64,
+    dirty: bool,
+    last_write: Option<Instant>,
+    background_error: Option<String>,
 }
 
 impl Writer {
@@ -37,20 +49,33 @@ impl Writer {
             .metadata()
             .with_context(|| format!("failed to stat record file: {}", path.display()))?
             .len();
-        Ok(Self {
+        let inner = Arc::new(Mutex::new(WriterInner {
             buf: BufWriter::new(file),
             next_offset,
+            dirty: false,
+            last_write: None,
+            background_error: None,
+        }));
+
+        let flusher_thread = spawn_flusher(Arc::downgrade(&inner));
+        Ok(Self {
+            inner,
+            flusher_thread,
         })
     }
 
-    pub fn append_cbor<T: Serialize>(&mut self, tag: u8, value: &T) -> Result<u64> {
+    pub fn append_cbor<T: Serialize>(&self, tag: u8, value: &T) -> Result<u64> {
         let payload = serde_cbor::to_vec(value).context("failed to encode cbor payload")?;
         self.append_payload(tag, &payload)
     }
 
-    pub fn append_payload(&mut self, tag: u8, payload: &[u8]) -> Result<u64> {
+    pub fn append_payload(&self, tag: u8, payload: &[u8]) -> Result<u64> {
         if tag & FLUSHED_BIT != 0 {
             bail!("invalid record tag {tag:#x}: high bit is reserved for flush marker");
+        }
+        let mut inner = self.lock_inner()?;
+        if let Some(err) = inner.background_error.take() {
+            bail!("background record flush failed previously: {err}");
         }
 
         let len = payload.len() as u64;
@@ -60,26 +85,101 @@ impl Writer {
         header[1..9].copy_from_slice(&len.to_le_bytes());
         header[9..17].copy_from_slice(&checksum.to_le_bytes());
 
-        let offset = self.next_offset;
-        self.buf
+        let offset = inner.next_offset;
+        inner
+            .buf
             .write_all(&header)
             .context("failed to write record header")?;
-        self.buf
+        inner
+            .buf
             .write_all(payload)
             .context("failed to write record payload")?;
-        self.next_offset += HEADER_LEN as u64 + len;
+        inner.next_offset += HEADER_LEN as u64 + len;
+        inner.dirty = true;
+        inner.last_write = Some(Instant::now());
+        self.flusher_thread.unpark();
         Ok(offset)
     }
 
-    pub fn sync(&mut self) -> Result<()> {
-        self.buf
-            .flush()
-            .context("failed to flush buffered record writes")?;
-        self.buf
+    pub fn sync(&self) -> Result<()> {
+        let mut inner = self.lock_inner()?;
+        if let Some(err) = inner.background_error.take() {
+            bail!("background record flush failed previously: {err}");
+        }
+        flush_inner(&mut inner, true)
+    }
+
+    fn lock_inner(&self) -> Result<std::sync::MutexGuard<'_, WriterInner>> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("record writer mutex poisoned"))
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) != 1 {
+            return;
+        }
+        if let Ok(mut inner) = self.inner.lock() {
+            let _ = flush_inner(&mut inner, true);
+        }
+    }
+}
+
+fn spawn_flusher(inner: Weak<Mutex<WriterInner>>) -> thread::Thread {
+    let handle = thread::spawn(move || {
+        loop {
+            thread::park_timeout(AUTO_FLUSH_INTERVAL);
+            let Some(shared) = inner.upgrade() else {
+                break;
+            };
+            let mut guard = match shared.lock() {
+                Ok(guard) => guard,
+                Err(_) => break,
+            };
+            if !guard.dirty {
+                continue;
+            }
+            let should_flush = guard
+                .last_write
+                .is_some_and(|last| last.elapsed() >= AUTO_FLUSH_INTERVAL);
+            if !should_flush {
+                continue;
+            }
+            if let Err(err) = flush_inner(&mut guard, false) {
+                guard.background_error = Some(format!("{err:#}"));
+            }
+        }
+    });
+    handle.thread().clone()
+}
+
+fn flush_inner(inner: &mut WriterInner, sync_data: bool) -> Result<()> {
+    if !inner.dirty {
+        if sync_data {
+            inner
+                .buf
+                .get_ref()
+                .sync_data()
+                .context("failed to sync record file data")?;
+        }
+        return Ok(());
+    }
+
+    inner
+        .buf
+        .flush()
+        .context("failed to flush buffered record writes")?;
+    if sync_data {
+        inner
+            .buf
             .get_ref()
             .sync_data()
-            .context("failed to sync record file data")
+            .context("failed to sync record file data")?;
     }
+    inner.dirty = false;
+    Ok(())
 }
 
 pub fn read_frames(path: &Path) -> Result<Vec<Frame>> {
@@ -243,7 +343,7 @@ mod tests {
     #[test]
     fn write_then_read_roundtrip() {
         let path = temp_record_path("roundtrip");
-        let mut writer = Writer::open_append(&path).expect("writer open");
+        let writer = Writer::open_append(&path).expect("writer open");
         writer
             .append_cbor(TAG_WRITE_OP, &("path", 7u32))
             .expect("append");
@@ -261,7 +361,7 @@ mod tests {
     #[test]
     fn partial_tail_is_ignored() {
         let path = temp_record_path("partial");
-        let mut writer = Writer::open_append(&path).expect("writer open");
+        let writer = Writer::open_append(&path).expect("writer open");
         writer.append_cbor(TAG_WRITE_OP, &1u32).expect("append 1");
         let second_offset = writer.append_cbor(TAG_WRITE_OP, &2u32).expect("append 2");
         writer.sync().expect("sync");
@@ -276,7 +376,7 @@ mod tests {
     #[test]
     fn checksum_failure_stops_iteration() {
         let path = temp_record_path("checksum");
-        let mut writer = Writer::open_append(&path).expect("writer open");
+        let writer = Writer::open_append(&path).expect("writer open");
         writer.append_cbor(TAG_WRITE_OP, &1u32).expect("append 1");
         let second_offset = writer.append_cbor(TAG_WRITE_OP, &2u32).expect("append 2");
         writer.sync().expect("sync");
@@ -291,7 +391,7 @@ mod tests {
     #[test]
     fn mark_flushed_is_idempotent() {
         let path = temp_record_path("mark-flushed");
-        let mut writer = Writer::open_append(&path).expect("writer open");
+        let writer = Writer::open_append(&path).expect("writer open");
         let offset = writer.append_cbor(TAG_WRITE_OP, &123u32).expect("append");
         writer.sync().expect("sync");
 

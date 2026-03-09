@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn flush_dry_run_does_not_mark() {
         let path = temp_record_path("dry-run");
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
         let op = op::Operation::WriteFile {
             path: temp_record_path("target"),
             state: op::FileState::Regular(b"hello".to_vec()),
@@ -445,7 +445,7 @@ mod tests {
     fn flush_marks_and_becomes_idempotent() {
         let path = temp_record_path("mark");
         let out_path = temp_record_path("write-target");
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
         let op = op::Operation::WriteFile {
             path: out_path.clone(),
             state: op::FileState::Regular(b"world".to_vec()),
@@ -474,7 +474,7 @@ mod tests {
         let to = temp_record_path("rename-to");
         fs::write(&from, b"rename-me").expect("seed source");
 
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
         let op = op::Operation::Rename {
             from: from.clone(),
             to: to.clone(),
@@ -497,7 +497,7 @@ mod tests {
         let target = temp_record_path("truncate-target");
         fs::write(&target, b"abcdef").expect("seed target");
 
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
         let op = op::Operation::Truncate {
             path: target.clone(),
             size: 3,
@@ -519,7 +519,7 @@ mod tests {
         let dir = temp_record_path("ops-dir");
         let file = dir.join("f.txt");
 
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
         let ops = [
             op::Operation::CreateDir { path: dir.clone() },
             op::Operation::WriteFile {
@@ -552,7 +552,7 @@ mod tests {
 
         let path = temp_record_path("chmod-record");
         let target = temp_record_path("chmod-target");
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
 
         let op = op::Operation::WriteFile {
             path: target.clone(),
@@ -583,7 +583,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("mkdir");
         fs::write(&target, b"link-target").expect("seed target");
 
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
         let op = op::Operation::WriteFile {
             path: link.clone(),
             state: op::FileState::Symlink(target.clone()),
@@ -603,7 +603,7 @@ mod tests {
     fn flush_compacts_multiple_writes_then_delete() {
         let path = temp_record_path("compact-delete-record");
         let target = temp_record_path("compact-delete-target");
-        let mut writer = record::Writer::open_append(&path).expect("writer open");
+        let writer = record::Writer::open_append(&path).expect("writer open");
 
         let ops = [
             op::Operation::WriteFile {
