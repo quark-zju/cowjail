@@ -212,26 +212,32 @@ struct PendingOp {
 }
 
 fn plan_apply_offsets(items: &[PendingOp]) -> HashSet<u64> {
-    if items
-        .iter()
-        .any(|item| matches!(item.op, op::Operation::Rename { .. }))
-    {
-        return items.iter().map(|item| item.offset).collect();
-    }
+    let mut keep = HashSet::new();
+    let mut segment_start = 0usize;
 
+    for (idx, item) in items.iter().enumerate() {
+        if matches!(item.op, op::Operation::Rename { .. }) {
+            keep.extend(compact_segment_offsets(&items[segment_start..idx]));
+            keep.insert(item.offset);
+            segment_start = idx + 1;
+        }
+    }
+    keep.extend(compact_segment_offsets(&items[segment_start..]));
+    keep
+}
+
+fn compact_segment_offsets(items: &[PendingOp]) -> HashSet<u64> {
     let mut by_path: HashMap<&Path, u64> = HashMap::new();
-    let mut without_path: HashSet<u64> = HashSet::new();
+    let mut keep: HashSet<u64> = HashSet::new();
     for item in items {
         if let Some(path) = op_primary_path(&item.op) {
             by_path.insert(path, item.offset);
         } else {
-            without_path.insert(item.offset);
+            keep.insert(item.offset);
         }
     }
-
-    let mut out: HashSet<u64> = by_path.into_values().collect();
-    out.extend(without_path);
-    out
+    keep.extend(by_path.into_values());
+    keep
 }
 
 fn op_primary_path(op: &op::Operation) -> Option<&Path> {
@@ -631,5 +637,45 @@ mod tests {
         assert_eq!(stats.optimized, 2);
         assert_eq!(stats.marked, 3);
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn flush_compaction_respects_rename_boundaries() {
+        let path = temp_record_path("compact-rename-boundary-record");
+        let a = temp_record_path("compact-rename-a");
+        let b = temp_record_path("compact-rename-b");
+        let writer = record::Writer::open_append(&path).expect("writer open");
+
+        let ops = [
+            op::Operation::WriteFile {
+                path: a.clone(),
+                state: op::FileState::Regular(b"v1".to_vec()),
+            },
+            op::Operation::WriteFile {
+                path: a.clone(),
+                state: op::FileState::Regular(b"v2".to_vec()),
+            },
+            op::Operation::Rename {
+                from: a.clone(),
+                to: b.clone(),
+            },
+            op::Operation::WriteFile {
+                path: a.clone(),
+                state: op::FileState::Regular(b"v3".to_vec()),
+            },
+        ];
+        for op in ops {
+            writer
+                .append_cbor(record::TAG_WRITE_OP, &op)
+                .expect("append op");
+        }
+        writer.sync().expect("sync");
+
+        let stats = flush_record(&path, false).expect("flush");
+        assert_eq!(stats.pending, 4);
+        assert_eq!(stats.optimized, 1);
+        assert_eq!(stats.marked, 4);
+        assert_eq!(fs::read(&b).expect("renamed content"), b"v2");
+        assert_eq!(fs::read(&a).expect("post-rename write"), b"v3");
     }
 }
