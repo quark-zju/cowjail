@@ -1,4 +1,5 @@
 mod cli;
+mod cowfs;
 mod op;
 mod profile;
 mod record;
@@ -50,13 +51,12 @@ fn run_command(run: RunCommand) -> Result<()> {
 }
 
 fn mount_command(mount: MountCommand) -> Result<()> {
-    let _profile = load_profile(Path::new(&mount.profile))?;
+    let profile = load_profile(Path::new(&mount.profile))?;
     ensure_record_parent_dir(&mount.record)?;
     let _writer = record::Writer::open_append(&mount.record)?;
-    bail!(
-        "mount is not implemented yet (profile ok, record path: {})",
-        mount.record.display()
-    )
+
+    let fs = cowfs::CowFs::new(profile);
+    fs.mount(&mount.path)
 }
 
 fn flush_command(flush: FlushCommand) -> Result<()> {
@@ -212,7 +212,10 @@ struct PendingOp {
 }
 
 fn plan_apply_offsets(items: &[PendingOp]) -> HashSet<u64> {
-    if items.iter().any(|item| matches!(item.op, op::Operation::Rename { .. })) {
+    if items
+        .iter()
+        .any(|item| matches!(item.op, op::Operation::Rename { .. }))
+    {
         return items.iter().map(|item| item.offset).collect();
     }
 
@@ -249,9 +252,8 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
                 op::FileState::Deleted => match fs::remove_file(path) {
                     Ok(()) => Ok(()),
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(err) => {
-                        Err(err).with_context(|| format!("failed to remove file: {}", path.display()))
-                    }
+                    Err(err) => Err(err)
+                        .with_context(|| format!("failed to remove file: {}", path.display())),
                 },
                 op::FileState::Regular(data) => {
                     if let Some(parent) = path.parent() {
@@ -313,13 +315,8 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
                     )
                 })?;
             }
-            fs::rename(from, to).with_context(|| {
-                format!(
-                    "failed to rename {} -> {}",
-                    from.display(),
-                    to.display()
-                )
-            })
+            fs::rename(from, to)
+                .with_context(|| format!("failed to rename {} -> {}", from.display(), to.display()))
         }
         op::Operation::Truncate { path, size } => {
             validate_abs(path)?;
@@ -378,8 +375,9 @@ fn create_symlink(path: &Path, target: &Path) -> Result<()> {
             if existing == target {
                 return Ok(());
             }
-            fs::remove_file(path)
-                .with_context(|| format!("failed to replace existing symlink {}", path.display()))?;
+            fs::remove_file(path).with_context(|| {
+                format!("failed to replace existing symlink {}", path.display())
+            })?;
             unix_fs::symlink(target, path).with_context(|| {
                 format!(
                     "failed to create replacement symlink {} -> {}",
