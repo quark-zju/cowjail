@@ -36,7 +36,7 @@ pub struct Request<'a> {
     /// Channel sender for sending the reply
     ch: ChannelSender,
     /// Request raw data
-    data: &'a [u8],
+    _data: &'a [u8],
     /// Parsed request
     request: ll::Request<'a>,
 }
@@ -53,7 +53,11 @@ impl<'a> Request<'a> {
             }
         };
 
-        Some(Self { ch, data, request})
+        Some(Self {
+            ch,
+            _data: data,
+            request,
+        })
     }
 
     /// Dispatch request to the given filesystem.
