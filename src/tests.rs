@@ -1,28 +1,51 @@
 use super::{cli, cmd_flush, jail, ns_runtime, op, profile, profile_loader, record};
 use crate::profile_loader::ProfileHeaderFrame;
 use fs_err as fs;
-use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
-fn temp_roots() -> &'static Mutex<Vec<tempfile::TempDir>> {
-    static TEMP_ROOTS: OnceLock<Mutex<Vec<tempfile::TempDir>>> = OnceLock::new();
-    TEMP_ROOTS.get_or_init(|| Mutex::new(Vec::new()))
+struct TempPath {
+    path: PathBuf,
+    _root: tempfile::TempDir,
 }
 
-fn temp_record_path(name: &str) -> std::path::PathBuf {
+impl TempPath {
+    fn to_path_buf(&self) -> PathBuf {
+        self.path.clone()
+    }
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.path.as_path()
+    }
+}
+
+impl AsRef<Path> for TempPath {
+    fn as_ref(&self) -> &Path {
+        self.path.as_path()
+    }
+}
+
+fn temp_record_path(name: &str) -> TempPath {
     let root = tempdir().expect("tempdir for record path");
     let p = root.path().join(format!("cowjail-main-{name}.cjr"));
-    temp_roots().lock().expect("temp roots mutex").push(root);
-    p
+    TempPath {
+        path: p,
+        _root: root,
+    }
 }
 
-fn temp_profile_path(name: &str, content: &str) -> std::path::PathBuf {
+fn temp_profile_path(name: &str, content: &str) -> TempPath {
     let root = tempdir().expect("tempdir for profile path");
     let p = root.path().join(format!("cowjail-main-{name}.profile"));
     fs::write(&p, content).expect("write profile");
-    temp_roots().lock().expect("temp roots mutex").push(root);
-    p
+    TempPath {
+        path: p,
+        _root: root,
+    }
 }
 
 #[test]
@@ -436,7 +459,7 @@ fn flush_dry_run_does_not_mark() {
     let path = temp_record_path("dry-run");
     let writer = record::Writer::open_append(&path).expect("writer open");
     let op = op::Operation::WriteFile {
-        path: temp_record_path("target"),
+        path: temp_record_path("target").to_path_buf(),
         state: op::FileState::Regular(b"hello".to_vec()),
     };
     writer
@@ -459,7 +482,7 @@ fn flush_marks_and_becomes_idempotent() {
     let out_path = temp_record_path("write-target");
     let writer = record::Writer::open_append(&path).expect("writer open");
     let op = op::Operation::WriteFile {
-        path: out_path.clone(),
+        path: out_path.to_path_buf(),
         state: op::FileState::Regular(b"world".to_vec()),
     };
     writer
@@ -488,8 +511,8 @@ fn flush_applies_rename() {
 
     let writer = record::Writer::open_append(&path).expect("writer open");
     let op = op::Operation::Rename {
-        from: from.clone(),
-        to: to.clone(),
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
     };
     writer
         .append_cbor(record::TAG_WRITE_OP, &op)
@@ -511,7 +534,7 @@ fn flush_applies_truncate() {
 
     let writer = record::Writer::open_append(&path).expect("writer open");
     let op = op::Operation::Truncate {
-        path: target.clone(),
+        path: target.to_path_buf(),
         size: 3,
     };
     writer
@@ -533,7 +556,9 @@ fn flush_applies_create_and_remove_ops() {
 
     let writer = record::Writer::open_append(&path).expect("writer open");
     let ops = [
-        op::Operation::CreateDir { path: dir.clone() },
+        op::Operation::CreateDir {
+            path: dir.to_path_buf(),
+        },
         op::Operation::WriteFile {
             path: file.clone(),
             state: op::FileState::Regular(b"x".to_vec()),
@@ -542,7 +567,9 @@ fn flush_applies_create_and_remove_ops() {
             path: file.clone(),
             state: op::FileState::Deleted,
         },
-        op::Operation::RemoveDir { path: dir.clone() },
+        op::Operation::RemoveDir {
+            path: dir.to_path_buf(),
+        },
     ];
     for op in ops {
         writer
@@ -567,7 +594,7 @@ fn flush_applies_executable_bit() {
     let writer = record::Writer::open_append(&path).expect("writer open");
 
     let op = op::Operation::WriteFile {
-        path: target.clone(),
+        path: target.to_path_buf(),
         state: op::FileState::Executable(b"#!/bin/sh\necho hi\n".to_vec()),
     };
     writer
@@ -619,15 +646,15 @@ fn flush_compacts_multiple_writes_then_delete() {
 
     let ops = [
         op::Operation::WriteFile {
-            path: target.clone(),
+            path: target.to_path_buf(),
             state: op::FileState::Regular(b"v1".to_vec()),
         },
         op::Operation::WriteFile {
-            path: target.clone(),
+            path: target.to_path_buf(),
             state: op::FileState::Regular(b"v2".to_vec()),
         },
         op::Operation::WriteFile {
-            path: target.clone(),
+            path: target.to_path_buf(),
             state: op::FileState::Deleted,
         },
     ];
@@ -654,19 +681,19 @@ fn flush_compaction_respects_rename_boundaries() {
 
     let ops = [
         op::Operation::WriteFile {
-            path: a.clone(),
+            path: a.to_path_buf(),
             state: op::FileState::Regular(b"v1".to_vec()),
         },
         op::Operation::WriteFile {
-            path: a.clone(),
+            path: a.to_path_buf(),
             state: op::FileState::Regular(b"v2".to_vec()),
         },
         op::Operation::Rename {
-            from: a.clone(),
-            to: b.clone(),
+            from: a.to_path_buf(),
+            to: b.to_path_buf(),
         },
         op::Operation::WriteFile {
-            path: a.clone(),
+            path: a.to_path_buf(),
             state: op::FileState::Regular(b"v3".to_vec()),
         },
     ];
@@ -701,7 +728,7 @@ fn flush_blocks_when_profile_header_disallows_write() {
         .append_cbor(
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
-                path: target.clone(),
+                path: target.to_path_buf(),
                 state: op::FileState::Regular(b"blocked".to_vec()),
             },
         )
@@ -731,7 +758,7 @@ fn flush_profile_override_can_allow_previously_blocked_write() {
         .append_cbor(
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
-                path: target.clone(),
+                path: target.to_path_buf(),
                 state: op::FileState::Regular(b"allowed".to_vec()),
             },
         )
