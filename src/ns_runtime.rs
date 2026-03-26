@@ -22,6 +22,14 @@ pub(crate) struct RuntimeStatus {
     pub(crate) lock_exists: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeState {
+    Missing,
+    SkeletonOnly,
+    Ready,
+    PartialHandles,
+}
+
 #[derive(Debug)]
 pub(crate) struct RuntimeLock {
     file: fs::File,
@@ -95,6 +103,27 @@ pub(crate) fn inspect(jail: &JailPaths) -> Result<RuntimeStatus> {
         ipcns_exists: exists_file(&paths.ipcns_path)?,
         lock_exists: exists_file(&paths.lock_path)?,
     })
+}
+
+pub(crate) fn classify(status: &RuntimeStatus) -> RuntimeState {
+    match (
+        status.runtime_dir_exists,
+        status.lock_exists,
+        status.mntns_exists,
+        status.ipcns_exists,
+    ) {
+        (false, false, false, false) => RuntimeState::Missing,
+        (true, true, false, false) => RuntimeState::SkeletonOnly,
+        (_, _, true, true) => RuntimeState::Ready,
+        _ => RuntimeState::PartialHandles,
+    }
+}
+
+pub(crate) fn ensure_runtime_skeleton(jail: &JailPaths) -> Result<RuntimeStatus> {
+    let lock = open_lock(jail)?;
+    let status = inspect(jail)?;
+    drop(lock);
+    Ok(status)
 }
 
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {

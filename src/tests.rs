@@ -191,6 +191,10 @@ fn ns_runtime_helpers_manage_temp_runtime_dir() {
     assert!(!before.mntns_exists);
     assert!(!before.ipcns_exists);
     assert!(!before.lock_exists);
+    assert_eq!(
+        ns_runtime::classify(&before),
+        ns_runtime::RuntimeState::Missing
+    );
 
     let runtime = ns_runtime::ensure_runtime_dir(&jail_paths).expect("ensure runtime dir");
     assert!(runtime.runtime_dir.exists());
@@ -201,6 +205,10 @@ fn ns_runtime_helpers_manage_temp_runtime_dir() {
     assert!(after.lock_exists);
     assert!(!after.mntns_exists);
     assert!(!after.ipcns_exists);
+    assert_eq!(
+        ns_runtime::classify(&after),
+        ns_runtime::RuntimeState::SkeletonOnly
+    );
     assert_eq!(lock.path(), runtime.lock_path.as_path());
 
     drop(lock);
@@ -208,6 +216,10 @@ fn ns_runtime_helpers_manage_temp_runtime_dir() {
     let removed = ns_runtime::inspect(&jail_paths).expect("inspect removed");
     assert!(!removed.runtime_dir_exists);
     assert!(!removed.lock_exists);
+    assert_eq!(
+        ns_runtime::classify(&removed),
+        ns_runtime::RuntimeState::Missing
+    );
 }
 
 #[test]
@@ -225,6 +237,47 @@ fn ns_runtime_lock_is_exclusive() {
 
     let third = ns_runtime::try_open_lock(&jail_paths).expect("third open");
     assert!(third.is_some());
+}
+
+#[test]
+fn ns_runtime_ensure_skeleton_creates_runtime_dir_and_lock() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let jail_paths = jail::jail_paths_in(&layout, "demo");
+
+    let status = ns_runtime::ensure_runtime_skeleton(&jail_paths).expect("ensure skeleton");
+    assert!(status.runtime_dir_exists);
+    assert!(status.lock_exists);
+    assert!(!status.mntns_exists);
+    assert!(!status.ipcns_exists);
+    assert_eq!(
+        ns_runtime::classify(&status),
+        ns_runtime::RuntimeState::SkeletonOnly
+    );
+}
+
+#[test]
+fn ns_runtime_classify_detects_partial_and_ready_handles() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let jail_paths = jail::jail_paths_in(&layout, "demo");
+
+    let _lock = ns_runtime::open_lock(&jail_paths).expect("open lock");
+    fs::write(&jail_paths.mntns_path, b"mnt").expect("write mntns placeholder");
+    let partial = ns_runtime::inspect(&jail_paths).expect("inspect partial");
+    assert_eq!(
+        ns_runtime::classify(&partial),
+        ns_runtime::RuntimeState::PartialHandles
+    );
+
+    fs::write(&jail_paths.ipcns_path, b"ipc").expect("write ipcns placeholder");
+    let ready = ns_runtime::inspect(&jail_paths).expect("inspect ready");
+    assert_eq!(
+        ns_runtime::classify(&ready),
+        ns_runtime::RuntimeState::Ready
+    );
 }
 
 #[test]
