@@ -281,6 +281,84 @@ fn ns_runtime_classify_detects_partial_and_ready_handles() {
 }
 
 #[test]
+fn ns_runtime_ensure_runtime_with_builds_missing_runtime() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let jail_paths = jail::jail_paths_in(&layout, "demo");
+
+    let ensured = ns_runtime::ensure_runtime_with(&jail_paths, |paths| {
+        fs::write(&paths.mntns_path, b"mnt").expect("write mntns");
+        fs::write(&paths.ipcns_path, b"ipc").expect("write ipcns");
+        Ok(())
+    })
+    .expect("ensure runtime");
+
+    assert_eq!(ensured.state_before, ns_runtime::RuntimeState::SkeletonOnly);
+    assert_eq!(ensured.state_after, ns_runtime::RuntimeState::Ready);
+    assert!(ensured.rebuilt);
+}
+
+#[test]
+fn ns_runtime_ensure_runtime_with_reuses_ready_runtime() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let jail_paths = jail::jail_paths_in(&layout, "demo");
+
+    let first = ns_runtime::ensure_runtime_with(&jail_paths, |paths| {
+        fs::write(&paths.mntns_path, b"mnt").expect("write mntns");
+        fs::write(&paths.ipcns_path, b"ipc").expect("write ipcns");
+        Ok(())
+    })
+    .expect("first ensure");
+    assert_eq!(first.state_after, ns_runtime::RuntimeState::Ready);
+
+    let mut called = false;
+    let second = ns_runtime::ensure_runtime_with(&jail_paths, |_| {
+        called = true;
+        Ok(())
+    })
+    .expect("second ensure");
+
+    assert_eq!(second.state_before, ns_runtime::RuntimeState::Ready);
+    assert_eq!(second.state_after, ns_runtime::RuntimeState::Ready);
+    assert!(!second.rebuilt);
+    assert!(!called);
+}
+
+#[test]
+fn ns_runtime_ensure_runtime_with_repairs_partial_runtime() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let jail_paths = jail::jail_paths_in(&layout, "demo");
+
+    let _ = ns_runtime::ensure_runtime_skeleton(&jail_paths).expect("ensure skeleton");
+    fs::write(&jail_paths.mntns_path, b"stale-mnt").expect("write stale mntns");
+
+    let ensured = ns_runtime::ensure_runtime_with(&jail_paths, |paths| {
+        let mnt_before = fs::read(&paths.mntns_path).ok();
+        assert!(mnt_before.is_none());
+        fs::write(&paths.mntns_path, b"fresh-mnt").expect("write fresh mntns");
+        fs::write(&paths.ipcns_path, b"fresh-ipc").expect("write fresh ipcns");
+        Ok(())
+    })
+    .expect("repair runtime");
+
+    assert_eq!(
+        ensured.state_before,
+        ns_runtime::RuntimeState::PartialHandles
+    );
+    assert_eq!(ensured.state_after, ns_runtime::RuntimeState::Ready);
+    assert!(ensured.rebuilt);
+    assert_eq!(
+        fs::read(&jail_paths.mntns_path).expect("read repaired mntns"),
+        b"fresh-mnt"
+    );
+}
+
+#[test]
 fn flush_dry_run_does_not_mark() {
     let path = temp_record_path("dry-run");
     let writer = record::Writer::open_append(&path).expect("writer open");

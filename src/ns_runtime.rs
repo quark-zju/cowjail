@@ -36,6 +36,14 @@ pub(crate) struct RuntimeLock {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnsuredRuntime {
+    pub(crate) paths: NsRuntimePaths,
+    pub(crate) state_before: RuntimeState,
+    pub(crate) state_after: RuntimeState,
+    pub(crate) rebuilt: bool,
+}
+
 pub(crate) fn paths_for(jail: &JailPaths) -> NsRuntimePaths {
     NsRuntimePaths {
         runtime_dir: jail.runtime_dir.clone(),
@@ -126,6 +134,43 @@ pub(crate) fn ensure_runtime_skeleton(jail: &JailPaths) -> Result<RuntimeStatus>
     Ok(status)
 }
 
+pub(crate) fn ensure_runtime_with<F>(
+    jail: &JailPaths,
+    mut build_handles: F,
+) -> Result<EnsuredRuntime>
+where
+    F: FnMut(&NsRuntimePaths) -> Result<()>,
+{
+    let _lock = open_lock(jail)?;
+    let paths = paths_for(jail);
+    let initial_status = inspect(jail)?;
+    let state_before = classify(&initial_status);
+    let rebuilt = matches!(
+        state_before,
+        RuntimeState::Missing | RuntimeState::SkeletonOnly | RuntimeState::PartialHandles
+    );
+
+    match state_before {
+        RuntimeState::Ready => {}
+        RuntimeState::Missing | RuntimeState::SkeletonOnly => {
+            build_handles(&paths)?;
+        }
+        RuntimeState::PartialHandles => {
+            reset_to_skeleton(&paths)?;
+            build_handles(&paths)?;
+        }
+    }
+
+    let final_status = inspect(jail)?;
+    let state_after = classify(&final_status);
+    Ok(EnsuredRuntime {
+        paths,
+        state_before,
+        state_after,
+        rebuilt,
+    })
+}
+
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
     let paths = paths_for(jail);
     match fs::remove_dir_all(&paths.runtime_dir) {
@@ -145,6 +190,20 @@ fn exists_file(path: &Path) -> Result<bool> {
         Ok(_) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn reset_to_skeleton(paths: &NsRuntimePaths) -> Result<()> {
+    remove_if_present(&paths.mntns_path)?;
+    remove_if_present(&paths.ipcns_path)?;
+    Ok(())
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
     }
 }
 
