@@ -10,9 +10,11 @@ use fs_err as fs;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::hash::Hasher;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use twox_hash::XxHash64;
 
 const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 . rw
@@ -70,14 +72,13 @@ fn run_command(run: RunCommand) -> Result<i32> {
     let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
     let ruid = unsafe { libc::getuid() };
     let rgid = unsafe { libc::getgid() };
-    let record_path = run
-        .record
-        .clone()
-        .unwrap_or(default_record_path().context("failed to build default record path")?);
-    ensure_record_parent_dir(&record_path)?;
-
     let loaded = load_profile(Path::new(&run.profile))
         .with_context(|| format!("failed to load run profile '{}'", run.profile))?;
+    let record_path = run.record.clone().unwrap_or(
+        default_record_path(&loaded.normalized_source, &cwd)
+            .context("failed to build default record path")?,
+    );
+    ensure_record_parent_dir(&record_path)?;
     let writer = record::Writer::open_append(&record_path).with_context(|| {
         format!(
             "failed to open run record writer at {}",
@@ -373,12 +374,21 @@ fn make_run_mountpoint() -> Result<PathBuf> {
     Ok(PathBuf::from(format!("/tmp/cowjail-run-{pid}-{nanos}")))
 }
 
-fn default_record_path() -> Result<PathBuf> {
+fn default_record_path(normalized_profile: &str, cwd: &Path) -> Result<PathBuf> {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("system clock is before unix epoch")?
         .as_millis();
-    Ok(default_record_dir()?.join(format!("{millis}.cjr")))
+    let context_hash = record_context_hash(normalized_profile, cwd);
+    Ok(default_record_dir()?.join(format!("{context_hash:016x}-{millis}.cjr")))
+}
+
+fn record_context_hash(normalized_profile: &str, cwd: &Path) -> u64 {
+    let mut hasher = XxHash64::default();
+    hasher.write(cwd.as_os_str().as_encoded_bytes());
+    hasher.write_u8(0);
+    hasher.write(normalized_profile.as_bytes());
+    hasher.finish()
 }
 
 fn ensure_record_parent_dir(path: &Path) -> Result<()> {
