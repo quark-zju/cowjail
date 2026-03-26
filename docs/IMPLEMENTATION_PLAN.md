@@ -1,165 +1,310 @@
-# cowjail Implementation Plan (Atomic Commits)
+# cowjail Implementation Plan
 
-This document breaks down the `cowjail` project into small, reviewable, and runnable commits.
+This document replaces the old single-process `run + temporary chroot` plan with a named-jail design.
 
-## Dependency Constraints
+The new direction is:
 
-- CLI parsing: use `pico-args` (or manual parsing), not `clap`.
-- Error handling: use `anyhow` (`bail!` etc.), not `thiserror`.
-- Paths: use `std::path` and `fs-err`, not `camino`.
-- Async runtime: do not add `tokio` unless discussed first.
+- jails have stable names
+- a jail can outlive one process
+- entering an existing jail should feel closer to `ip netns exec <name> ...`
+- named jails should imply stable record file naming
+- record state should survive host reboot
+- replay should gradually move from "host-side flush only" toward "filesystem can materialize state from record itself"
 
-## Scope Recap
+## Design Judgment
 
-- Command interface:
-  - `cowjail run [--profile <profile>] [--record <record_path>] command ...`
-  - `cowjail mount --profile <profile> --record <record_path> <path>`
-  - `cowjail flush [--record <record_path>] [--profile <profile>] [--dry-run]`
-- Profile rules:
-  - First matched rule wins.
-  - If `/foo/bar` is allowed, parent `/foo` is visible.
-  - Unmatched paths are invisible.
-  - `.` means current working directory at launch.
-- IO model:
-  - `ro` read-only pass-through.
-  - `rw` write buffered in memory (copy-on-write), not persisted immediately.
-  - `deny` hidden/inaccessible.
-- Record model:
-  - Append framed CBOR records.
-  - Supports partial trailing record ignore and checksum validation.
-  - Supports marking entries as flushed to avoid double-apply.
-  - Includes a header frame that stores the normalized source profile (with `.` already expanded).
-  - `run` periodically flushes record buffer to disk.
-- Runtime flow (`run` mode):
-  1) Start FUSE mount with filtered view.
-  2) `chroot` into mount.
-  3) Execute command.
-  4) Record write operations for later `flush`.
+This direction is feasible and materially better for usability.
 
-## Commit-by-Commit Plan
+The strongest part of the proposal is the shift from an almost-anonymous one-shot jail to a named object with lifecycle:
 
-1. `build: add foundational crates and feature flags`
-- Add lightweight CLI and IO crates (`pico-args`, `fs-err`) and keep `anyhow` for executable-style error handling.
-- Keep compile green with no behavior changes.
+- easier to inspect
+- easier to re-enter
+- easier to associate with a record file
+- easier to debug
+- easier to recover after reboot
 
-2. `cli: scaffold run/mount/flush subcommands and option parsing`
-- Implement manual parser (or `pico-args`) and argument validation.
-- Add typed command enum and placeholders.
+The main architectural consequence is that `cowjail` stops being only a command runner and becomes a jail manager.
 
-3. `profile: define rule grammar and parser`
-- Implement `RuleAction` (`ro/rw/deny`) and parse profile file line format.
-- Add syntax error reporting with line numbers.
+That means the implementation should explicitly manage:
 
-4. `profile: implement matcher with first-hit semantics`
-- Use glob-based matching and canonical absolute path handling.
-- Resolve `.` to launch cwd at load time.
+- jail identity
+- jail metadata
+- jail lifecycle
+- namespace entry/exit
+- persistent backing state
 
-5. `profile: add parent-visibility expansion logic`
-- Ensure allowing `/a/b` also implies visibility for `/a`.
-- Keep deny semantics intact for explicitly denied deeper paths.
+## Core Model
 
-6. `profile: add table-driven tests for precedence and edge cases`
-- Cases: first match wins, unmatched hidden, dot expansion, overlapping rules.
+Each jail has a globally unique name, for example:
 
-7. `record: design framed binary format and constants`
-- Define tag byte, length (u64), checksum, payload layout.
-- Document forward compatibility and version byte strategy.
+- `cowjail create --name agent-a --profile default`
+- `cowjail exec agent-a command ...`
+- `cowjail mount agent-a <path>`
+- `cowjail flush agent-a`
+- `cowjail rm agent-a`
 
-8. `record: implement writer with atomic append discipline`
-- Append records with checksum.
-- Buffered write + periodic/user-triggered `flush` behavior (no strict `fsync` requirements).
+Each named jail should have durable metadata under a stable runtime path plus a durable record path.
 
-9. `record: implement tolerant reader for partial/corrupt tail`
-- Stop at first incomplete/tail-corrupt frame; ignore remaining bytes.
-- Expose iterator-style API for replay.
+Suggested split:
 
-10. `record: add flushed-bit/tag mutation support`
-- Add in-place mark for flushed record entries.
-- Prevent reapply on repeated `flush`.
+- runtime namespace handle and mount wiring under `/run/cowjail/<name>/`
+- durable record and metadata under `~/.local/state/cowjail/` or `~/.cache/cowjail/`
 
-11. `record: add tests for crash-recovery scenarios`
-- Simulate truncation, bad checksum, duplicate flush execution.
+The runtime path can disappear on reboot; the durable state must not.
 
-12. `cow: implement in-memory copy-on-write inode/file buffer`
-- Create overlay map for created/modified/deleted paths.
-- Support read-after-write behavior within same session.
+## Namespace Design
 
-13. `cow: map VFS write operations to record operations`
-- Define operation schema (create/write/truncate/unlink/rename/mkdir/rmdir/chmod/chown/utimens if supported).
-- Serialize via CBOR payload types.
+The proposal to use a mount namespace is correct.
 
-14. `fuse: scaffold filesystem with lookup/readdir/open/read`
-- Minimal read-only view following profile visibility.
-- No mutation yet; ensure mount/unmount lifecycle works.
+Recommended behavior:
 
-15. `fuse: enforce ro/rw/deny permissions on operation paths`
-- Read path policy at syscall boundary and return proper errno.
-- Verify denied files are non-discoverable where required.
+1. Create a new mount namespace for the jail.
+2. Bind-mount a namespace handle into `/run/cowjail/<name>/mntns` so it can be reopened later.
+3. Mount the jail FUSE filesystem inside that namespace.
+4. Enter the namespace when running commands or attaching debug mounts.
 
-16. `fuse: implement rw write path via in-memory cow layer`
-- Route write-like operations into overlay map, never host FS.
-- Reflect metadata updates in overlay.
+This is analogous to `ip netns`, but for mount namespaces.
 
-17. `mount: add explicit mount command for non-root debugging`
-- Implement `cowjail mount --profile --record <path>` to mount filtered FS without chroot/exec.
-- Keep process attached for debugging until unmount/interrupt.
+### IPC Isolation
 
-18. `run: add euid self-check and setuid guidance`
-- Fail fast when `euid != 0`.
-- Print actionable guidance for installing setuid helper/binary.
+Adding IPC isolation is worth doing.
 
-19. `run: mount, chroot, and child command execution`
-- Prepare mountpoint, `chroot`, `chdir(<original cwd>)`, exec command.
-- Capture exit status and signal mapping.
+Reason:
 
-20. `run: periodic record flush and graceful shutdown handling`
-- Background periodic flush of buffered records.
-- Final sync on process exit/signals.
+- some launchers or helpers may use IPC channels that should not bleed across jail boundaries
+- it reduces accidental interaction with host session services
+- it makes the jail concept more coherent when reused by multiple commands
 
-21. `flush: implement replay engine with profile-aware safety checks`
-- Pick latest record by mtime when unspecified.
-- Apply only unflushed entries; support idempotent reruns.
-- Allow `--profile` override for stricter replay policy than source run profile.
-- Validate replay paths against effective flush profile and reject disallowed writes.
+Suggested sequence:
 
-22. `flush: add --dry-run output and diff-like summary`
-- Print intended mutations without disk writes.
-- Mark nothing as flushed in dry-run mode.
+- start with mount namespace only
+- then add IPC namespace
+- evaluate whether PID namespace is needed later
 
-23. `ops: add lock strategy for concurrent run/flush access`
-- File lock for record writing and flush replay coordination.
-- Ensure flush can proceed while run is active without corruption.
+PID namespace is valuable, but it is a larger behavioral change than mount+IPC and does not need to block the named-jail design.
 
-24. `docs: write profile/reference docs and threat model`
-- Clarify guarantees, non-goals (not a full sandbox), known escapes.
-- Provide sample profiles and operational playbook.
+## Record and State Design
 
-25. `test: integration tests for run+flush end-to-end`
-- Use temp dirs to validate no host writes during run.
-- Validate flushed results and idempotency.
+Named jails imply stable records.
 
-26. `release: polish errors, logs, and default paths`
-- Default record path under `.cache/cowjail/<timestamp>.cjr`.
-- Improve actionable error messages and CLI UX.
+Instead of "new implicit record for each run", use:
 
-## Suggested Milestones
+- one stable record file per jail name
+- one metadata file per jail name
 
-- M1 (commits 1-6): CLI + profile engine complete.
-- M2 (commits 7-11): durable record format complete.
-- M3 (commits 12-20): FUSE runtime, mount debug path, and run command complete.
-- M4 (commits 21-23): flush workflow + concurrency complete.
-- M5 (commits 24-26): docs, tests, release hardening.
+Suggested durable files:
 
-## Risks and Early Decisions
+- `state/<name>/record.cjr`
+- `state/<name>/profile`
+- `state/<name>/meta.json`
 
-- FUSE crate stability: vendor currently exists; verify required ops coverage early (commit 14) to avoid late redesign.
-- `run` requires root euid for `chroot`; keep `mount` as the non-root debugging path.
-- Glob matching correctness with symlink/canonical paths must be deterministic to avoid policy bypass.
-- Record mutation-in-place for flushed mark should stay checksum-aware and tolerant of torn tail records.
+Suggested metadata contents:
 
-## Definition of Done (v0)
+- jail name
+- normalized profile source
+- creation time
+- last attach time
+- record path
+- runtime namespace handle path
+- status flags
 
-- `run` can safely execute untrusted command with profile-constrained visible tree.
-- Any writes are isolated in memory and recorded to record file.
-- `flush` can replay reliably, resume after interruption, and avoid duplicate application.
-- Core integration tests pass on a Linux environment with FUSE support.
+## Reboot Survival
+
+If you want the jail to survive reboot conceptually, split "jail identity" from "live namespace instance".
+
+After reboot:
+
+- the mount namespace handle under `/run` is gone
+- the record and profile remain
+- `cowjail revive <name>` or `cowjail start <name>` should recreate the namespace and remount the filesystem from durable state
+
+This is where FUSE-internal replay becomes important.
+
+## FUSE Internal Replay
+
+This is the right long-term move.
+
+Today the model is:
+
+- host filesystem visible through profile
+- overlay in memory
+- write operations appended to record
+- separate `flush` replays record to host
+
+For reboot survival, the jail filesystem itself should be able to reconstruct overlay state from record on mount.
+
+That means:
+
+- open record at mount time
+- scan valid frames
+- build overlay state from unflushed operations
+- present reconstructed state immediately inside the FUSE filesystem
+
+This should be treated as "overlay replay", distinct from "host flush replay".
+
+Two replay layers:
+
+1. `record -> overlay`
+   Used when mounting or reviving a jail. Does not mutate host filesystem.
+
+2. `record -> host`
+   Used by `cowjail flush`. Mutates host filesystem and marks frames flushed.
+
+That split gives you reboot persistence without forcing immediate host writes.
+
+## CLI Direction
+
+The old commands are too tied to ephemeral execution.
+
+Suggested new top-level shape:
+
+```text
+cowjail create --name <name> [--profile <profile>]
+cowjail start <name>
+cowjail exec <name> command ...
+cowjail mount <name> <path>
+cowjail flush <name> [--dry-run] [--profile <profile>]
+cowjail status [<name>]
+cowjail rm <name>
+```
+
+Possible compatibility bridge:
+
+- keep `cowjail run` as sugar for `create + exec + optional auto-cleanup`
+
+That avoids breaking the current UX immediately while moving the internals to named jails.
+
+## Recommended Implementation Order
+
+### Phase 1: Persistent jail identity
+
+1. `state: add named jail metadata model`
+- Introduce jail name validation and on-disk metadata layout.
+- Make jail names globally unique.
+
+2. `cli: add create/status/rm commands`
+- Start managing named jails even before namespace reuse exists.
+- Keep runtime behavior simple.
+
+3. `record: bind jail name to stable record path`
+- Replace implicit per-run record with a stable record path derived from jail name.
+- Keep existing frame format.
+
+4. `profile: persist normalized profile into jail metadata`
+- Remove ambiguity between "profile path" and "actual resolved profile content".
+
+### Phase 2: Named mount namespace lifecycle
+
+5. `ns: create named mount namespace handles under /run/cowjail`
+- Add namespace creation and runtime directory conventions.
+
+6. `ns: add enter logic for existing named jail`
+- Implement the equivalent of "open handle and setns into it".
+
+7. `mount: move fuse mount lifecycle into named namespace`
+- Make mount placement part of jail start rather than part of a single process execution.
+
+8. `cmd: add start and exec commands`
+- `start` creates or restores runtime namespace state.
+- `exec` enters the jail and runs a command inside it.
+
+### Phase 3: Isolation refinement
+
+9. `ns: add ipc namespace isolation`
+- Keep this separate from mount namespace work.
+- Add behavioral tests for isolated IPC.
+
+10. `run: preserve privilege dropping inside named exec path`
+- Keep `setgroups([])`, `setgid`, `setuid`, `PR_SET_NO_NEW_PRIVS`.
+
+11. `security: document current isolation boundary`
+- Explicitly state that network and broader sandboxing are still out of scope.
+
+### Phase 4: Overlay replay from record
+
+12. `record: define overlay replay pass`
+- Formalize record-to-overlay replay semantics.
+
+13. `fuse: reconstruct overlay state from record at mount time`
+- Make a newly started jail show prior unflushed writes.
+
+14. `fuse: separate overlay replay from host flush replay`
+- Do not mark frames flushed just because overlay replay consumed them.
+
+15. `test: reboot-style recovery scenarios`
+- Simulate "write in jail -> process exits -> remount jail -> state still visible".
+
+### Phase 5: Operational polish
+
+16. `flush: switch to jail-name based UX`
+- `cowjail flush <name>` should discover profile and record from metadata.
+
+17. `status: show live namespace status and pending record info`
+- Include pending frame count and whether runtime namespace exists.
+
+18. `docs: update README around named jail workflow`
+- Replace temporary run-focused examples with `create/start/exec/flush`.
+
+## Key Risks
+
+### 1. Mount namespace handle management
+
+The `/run` handle approach is sound, but cleanup must be explicit.
+
+Questions to settle:
+
+- what command owns namespace creation
+- what command remounts after reboot
+- how to detect stale runtime handles
+
+### 2. Stable single record per jail
+
+One stable record file is good for ergonomics, but it increases pressure on:
+
+- compaction
+- recovery time on mount
+- concurrent writer/flush coordination
+
+Long term, you may want:
+
+- a compacted snapshot file
+- plus an append-only active log
+
+But this does not need to block the first named-jail version.
+
+### 3. Overlay replay correctness
+
+Once the filesystem rehydrates from record, replay bugs become mount-time bugs, not just flush-time bugs.
+
+That raises the bar for:
+
+- ordering
+- rename boundaries
+- symlink behavior
+- type transitions
+
+### 4. Root and setns behavior
+
+Entering existing mount namespaces and mounting FUSE in them will likely tighten privilege requirements further.
+
+This should be designed deliberately instead of accreting special cases.
+
+## Definition of Done for This New Direction
+
+Version 1 of the named-jail design is done when:
+
+- a jail has a stable name and stable metadata
+- a jail can be started, re-entered, and flushed by name
+- the default record file is derived from jail identity, not per-run randomness
+- mount namespace state can be recreated after reboot
+- unflushed record state can be reconstructed into the FUSE overlay on jail start
+- `flush` remains explicit for host filesystem mutation
+
+## Non-Goals for This Plan
+
+These are intentionally out of scope for now:
+
+- network namespace support
+- non-Linux platforms
+- full process sandboxing
+- seccomp/capability micro-hardening beyond the existing exec path
