@@ -165,13 +165,13 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
             "cowjail\n\nUSAGE:\n  cowjail run [--profile <profile>] [--record <record_path>] [-v|--verbose] command ...\n  cowjail mount --profile <profile> --record <record_path> [-v|--verbose] <path>\n  cowjail flush [--record <record_path>] [--profile <profile>] [--dry-run] [-v|--verbose]\n\nRun `cowjail <subcommand> --help` for details."
         }
         HelpTopic::Run => {
-            "cowjail run\n\nUSAGE:\n  cowjail run [--profile <profile>] [--record <record_path>] [-v|--verbose] command ...\n\nOPTIONS:\n  --profile <profile>   Profile path. Default: default\n  --record <record>     Record output path. Default: .cache/cowjail/<timestamp>.cjr\n  -v, --verbose         Print progress logs"
+            "cowjail run\n\nUSAGE:\n  cowjail run [--profile <profile>] [--record <record_path>] [-v|--verbose] command ...\n\nOPTIONS:\n  --profile <profile>   Profile path. Default: default\n  --record <record>     Record output path. Default: ~/.cache/cowjail/<timestamp>.cjr\n  -v, --verbose         Print progress logs"
         }
         HelpTopic::Mount => {
             "cowjail mount\n\nUSAGE:\n  cowjail mount --profile <profile> --record <record_path> [-v|--verbose] <path>\n\nOPTIONS:\n  --profile <profile>   Profile path (required)\n  --record <record>     Record output path (required)\n  -v, --verbose         Print progress logs"
         }
         HelpTopic::Flush => {
-            "cowjail flush\n\nUSAGE:\n  cowjail flush [--record <record_path>] [--profile <profile>] [--dry-run] [-v|--verbose]\n\nOPTIONS:\n  --record <record>     Record path. Default: newest under .cache/cowjail\n  --profile <profile>   Replay policy profile override\n  --dry-run             Preview without applying or marking flushed\n  -v, --verbose         Print progress logs"
+            "cowjail flush\n\nUSAGE:\n  cowjail flush [--record <record_path>] [--profile <profile>] [--dry-run] [-v|--verbose]\n\nOPTIONS:\n  --record <record>     Record path. Default: newest under ~/.cache/cowjail\n  --profile <profile>   Replay policy profile override\n  --dry-run             Preview without applying or marking flushed\n  -v, --verbose         Print progress logs"
         }
     }
 }

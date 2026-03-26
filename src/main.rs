@@ -261,10 +261,11 @@ fn flush_command(flush: FlushCommand) -> Result<()> {
     let record_path = if let Some(path) = flush.record {
         path
     } else {
+        let default_dir = default_record_dir()?;
         newest_record_path()?.ok_or_else(|| {
             anyhow::anyhow!(
                 "no record file specified and no default record found under {}",
-                default_record_dir().display()
+                default_dir.display()
             )
         })?
     };
@@ -357,8 +358,10 @@ fn parse_profile_from_normalized_source(source: &str) -> Result<profile::Profile
         .context("failed to parse normalized profile source from record")
 }
 
-fn default_record_dir() -> PathBuf {
-    PathBuf::from(".cache/cowjail")
+fn default_record_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot resolve default record directory"))?;
+    Ok(PathBuf::from(home).join(".cache/cowjail"))
 }
 
 fn make_run_mountpoint() -> Result<PathBuf> {
@@ -375,7 +378,7 @@ fn default_record_path() -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .context("system clock is before unix epoch")?
         .as_millis();
-    Ok(default_record_dir().join(format!("{millis}.cjr")))
+    Ok(default_record_dir()?.join(format!("{millis}.cjr")))
 }
 
 fn ensure_record_parent_dir(path: &Path) -> Result<()> {
@@ -387,7 +390,7 @@ fn ensure_record_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn newest_record_path() -> Result<Option<PathBuf>> {
-    let dir = default_record_dir();
+    let dir = default_record_dir()?;
     if !dir.exists() {
         return Ok(None);
     }
