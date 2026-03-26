@@ -635,6 +635,18 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
         }
         op::Operation::Truncate { path, size } => {
             validate_abs(path)?;
+            match fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    bail!("refusing to truncate symlink during replay: {}", path.display());
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("failed to inspect truncate target {}", path.display())
+                    });
+                }
+            }
             let file = fs::OpenOptions::new()
                 .create(false)
                 .write(true)

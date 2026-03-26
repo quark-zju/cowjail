@@ -641,3 +641,71 @@ fn flush_create_dir_on_existing_file_fails_without_marking() {
     let frames = record::read_frames(&record).expect("read frames");
     assert!(!frames[0].flushed);
 }
+
+#[cfg(unix)]
+#[test]
+fn flush_delete_on_symlink_removes_link_not_target() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp = tempdir().expect("tempdir");
+    let record = temp.path().join("record.cjr");
+    let real_target = temp.path().join("real-target.txt");
+    let link_path = temp.path().join("link.txt");
+    fs::write(&real_target, b"keep-target").expect("seed target");
+    unix_fs::symlink(&real_target, &link_path).expect("seed symlink");
+
+    let writer = record::Writer::open_append(&record).expect("writer open");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::WriteFile {
+                path: link_path.clone(),
+                state: op::FileState::Deleted,
+            },
+        )
+        .expect("append delete");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&record, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+    assert!(!link_path.exists());
+    assert_eq!(fs::read(&real_target).expect("read original target"), b"keep-target");
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_truncate_on_symlink_fails_without_marking_or_modifying_target() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp = tempdir().expect("tempdir");
+    let record = temp.path().join("record.cjr");
+    let real_target = temp.path().join("real-target.txt");
+    let link_path = temp.path().join("link.txt");
+    fs::write(&real_target, b"abcdef").expect("seed target");
+    unix_fs::symlink(&real_target, &link_path).expect("seed symlink");
+
+    let writer = record::Writer::open_append(&record).expect("writer open");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::Truncate {
+                path: link_path.clone(),
+                size: 3,
+            },
+        )
+        .expect("append truncate");
+    writer.sync().expect("sync");
+
+    let err = flush_record(&record, false, None).expect_err("flush should fail");
+    assert!(
+        err.to_string().contains("refusing to truncate symlink")
+            || err.to_string().contains("failed to open file for truncate")
+    );
+    assert!(fs::symlink_metadata(&link_path)
+        .expect("metadata")
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read(&real_target).expect("read original target"), b"abcdef");
+    let frames = record::read_frames(&record).expect("read frames");
+    assert!(!frames[0].flushed);
+}
