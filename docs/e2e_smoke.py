@@ -161,13 +161,8 @@ def prepare_setuid_binary() -> Path | None:
     shutil.copy2(built, suid_copy)
     suid_copy_path = suid_copy
 
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        suid_copy.chmod(suid_copy.stat().st_mode | 0o4000)
-        return suid_copy
-
     try:
-        run(["sudo", "chown", "root:root", str(suid_copy)], stdout=subprocess.DEVNULL)
-        run(["sudo", "chmod", "u+s", str(suid_copy)], stdout=subprocess.DEVNULL)
+        run([str(suid_copy), "_suid"], stdout=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
     return suid_copy
@@ -176,7 +171,7 @@ def prepare_setuid_binary() -> Path | None:
 def run_high_level_smoke() -> bool:
     suid_bin = prepare_setuid_binary()
     if suid_bin is None:
-        print("[high] SKIP: failed to setup setuid binary via sudo")
+        print("[high] SKIP: failed to setup setuid binary via _suid")
         return False
 
     print("[high 1/6] cleaning old jail if present")
