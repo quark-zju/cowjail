@@ -335,12 +335,9 @@ Completed:
 - [x] Phase 4 step `13` record-to-overlay replay pass defined and implemented
 - [x] Phase 4 step `14` mount-time overlay reconstruction from record
 - [x] Phase 4 step `15` overlay replay kept separate from host flush replay
+- [x] Phase 4 step `16` reboot-style recovery scenario tests
 - [x] Phase 5 step `17` public `flush` uses selector-based UX
 - [x] Phase 5 step `18` hidden low-level `_fuse` / `_mount` / `_flush` commands
-
-In progress:
-
-- [ ] Phase 4 step `16` reboot-style recovery scenario tests
 
 Not started:
 

@@ -1338,4 +1338,76 @@ mod tests {
             }) if data == b"new"
         ));
     }
+
+    #[test]
+    fn replay_persists_pending_overlay_across_remount_like_restart() {
+        let dir = tempdir().expect("tempdir");
+        let record_path = dir.path().join("cowjail-replay-restart-test.cjr");
+        let mount1_writer = record::Writer::open_append(&record_path).expect("open first writer");
+
+        mount1_writer
+            .append_cbor(
+                record::TAG_WRITE_OP,
+                &Operation::WriteFile {
+                    path: PathBuf::from("/tmp/reboot-visible-a"),
+                    state: FileState::Regular(b"first".to_vec()),
+                },
+            )
+            .expect("append first write");
+        mount1_writer
+            .append_cbor(
+                record::TAG_WRITE_OP,
+                &Operation::Rename {
+                    from: PathBuf::from("/tmp/reboot-visible-a"),
+                    to: PathBuf::from("/tmp/reboot-visible-b"),
+                },
+            )
+            .expect("append rename");
+        mount1_writer
+            .append_cbor(
+                record::TAG_WRITE_OP,
+                &Operation::Truncate {
+                    path: PathBuf::from("/tmp/reboot-visible-b"),
+                    size: 3,
+                },
+            )
+            .expect("append truncate");
+        mount1_writer.sync().expect("sync first writer");
+
+        let mount1_frames = record::read_frames(&record_path).expect("read first mount frames");
+        let mut mount1_fs = CowFs::new(parse_profile("/tmp/** rw"), mount1_writer);
+        let mount1_stats = mount1_fs.replay_from_record_frames(&mount1_frames);
+        assert_eq!(mount1_stats.pending_ops, 3);
+        assert_eq!(mount1_stats.applied_ops, 3);
+        assert!(matches!(
+            mount1_fs.overlay.get(Path::new("/tmp/reboot-visible-a")),
+            Some(OverlayNode::Deleted)
+        ));
+        assert!(matches!(
+            mount1_fs.overlay.get(Path::new("/tmp/reboot-visible-b")),
+            Some(OverlayNode::Regular {
+                data,
+                executable: false
+            }) if data == b"fir"
+        ));
+        drop(mount1_fs);
+
+        let mount2_writer = record::Writer::open_append(&record_path).expect("open second writer");
+        let mount2_frames = record::read_frames(&record_path).expect("read second mount frames");
+        let mut mount2_fs = CowFs::new(parse_profile("/tmp/** rw"), mount2_writer);
+        let mount2_stats = mount2_fs.replay_from_record_frames(&mount2_frames);
+        assert_eq!(mount2_stats.pending_ops, 3);
+        assert_eq!(mount2_stats.applied_ops, 3);
+        assert!(matches!(
+            mount2_fs.overlay.get(Path::new("/tmp/reboot-visible-a")),
+            Some(OverlayNode::Deleted)
+        ));
+        assert!(matches!(
+            mount2_fs.overlay.get(Path::new("/tmp/reboot-visible-b")),
+            Some(OverlayNode::Regular {
+                data,
+                executable: false
+            }) if data == b"fir"
+        ));
+    }
 }
