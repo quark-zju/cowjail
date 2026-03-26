@@ -17,36 +17,31 @@ Out of scope:
 - full process/container sandboxing
 - cross-platform support (Linux only)
 
-## Quick Usage (Named Jail Workflow)
+## Quick Usage
 
-Create or pin a named jail:
-
-```bash
-cowjail add --name agent --profile default
-```
-
-Run command inside jail (auto-create if missing):
+Start from the simplest flow (default profile + current directory identity):
 
 ```bash
-cowjail run --name agent -- your-command arg1 arg2
+cowjail run -- your-command arg1 arg2
+cowjail flush --dry-run
+cowjail flush
 ```
 
-Or run by profile-derived jail identity:
+Use an explicit profile:
 
 ```bash
 cowjail run --profile default -- your-command
+cowjail flush --profile default --dry-run
+cowjail flush --profile default
 ```
 
-Inspect/apply pending writes:
+Use named jail management when you want stable explicit identities:
 
 ```bash
+cowjail add --name agent --profile default
+cowjail run --name agent -- your-command arg1 arg2
 cowjail flush --name agent --dry-run
 cowjail flush --name agent
-```
-
-List and remove:
-
-```bash
 cowjail list
 cowjail rm --name agent
 ```
