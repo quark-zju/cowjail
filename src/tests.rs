@@ -1,0 +1,463 @@
+use super::*;
+use tempfile::tempdir;
+
+fn temp_record_path(name: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be monotonic")
+        .as_nanos();
+    p.push(format!("cowjail-main-{name}-{now}.cjr"));
+    p
+}
+
+fn temp_profile_path(name: &str, content: &str) -> std::path::PathBuf {
+    let mut p = std::env::temp_dir();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be monotonic")
+        .as_nanos();
+    p.push(format!("cowjail-main-{name}-{now}.profile"));
+    fs::write(&p, content).expect("write profile");
+    p
+}
+
+#[test]
+fn flush_dry_run_does_not_mark() {
+    let path = temp_record_path("dry-run");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+    let op = op::Operation::WriteFile {
+        path: temp_record_path("target"),
+        state: op::FileState::Regular(b"hello".to_vec()),
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, true, None).expect("flush dry-run");
+    assert_eq!(stats.total, 1);
+    assert_eq!(stats.pending, 1);
+    assert_eq!(stats.marked, 0);
+
+    let frames = record::read_frames(&path).expect("read frames");
+    assert!(!frames[0].flushed);
+}
+
+#[test]
+fn flush_marks_and_becomes_idempotent() {
+    let path = temp_record_path("mark");
+    let out_path = temp_record_path("write-target");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+    let op = op::Operation::WriteFile {
+        path: out_path.clone(),
+        state: op::FileState::Regular(b"world".to_vec()),
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let first = flush_record(&path, false, None).expect("first flush");
+    assert_eq!(first.pending, 1);
+    assert_eq!(first.marked, 1);
+    let bytes = fs::read(&out_path).expect("output should be written");
+    assert_eq!(bytes, b"world");
+
+    let second = flush_record(&path, false, None).expect("second flush");
+    assert_eq!(second.pending, 0);
+    assert_eq!(second.marked, 0);
+    assert_eq!(second.skipped, 1);
+}
+
+#[test]
+fn flush_applies_rename() {
+    let path = temp_record_path("rename-record");
+    let from = temp_record_path("rename-from");
+    let to = temp_record_path("rename-to");
+    fs::write(&from, b"rename-me").expect("seed source");
+
+    let writer = record::Writer::open_append(&path).expect("writer open");
+    let op = op::Operation::Rename {
+        from: from.clone(),
+        to: to.clone(),
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+    assert!(!from.exists());
+    let bytes = fs::read(&to).expect("renamed target");
+    assert_eq!(bytes, b"rename-me");
+}
+
+#[test]
+fn flush_applies_truncate() {
+    let path = temp_record_path("truncate-record");
+    let target = temp_record_path("truncate-target");
+    fs::write(&target, b"abcdef").expect("seed target");
+
+    let writer = record::Writer::open_append(&path).expect("writer open");
+    let op = op::Operation::Truncate {
+        path: target.clone(),
+        size: 3,
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+    let bytes = fs::read(&target).expect("truncated target");
+    assert_eq!(bytes, b"abc");
+}
+
+#[test]
+fn flush_applies_create_and_remove_ops() {
+    let path = temp_record_path("create-remove-record");
+    let dir = temp_record_path("ops-dir");
+    let file = dir.join("f.txt");
+
+    let writer = record::Writer::open_append(&path).expect("writer open");
+    let ops = [
+        op::Operation::CreateDir { path: dir.clone() },
+        op::Operation::WriteFile {
+            path: file.clone(),
+            state: op::FileState::Regular(b"x".to_vec()),
+        },
+        op::Operation::WriteFile {
+            path: file.clone(),
+            state: op::FileState::Deleted,
+        },
+        op::Operation::RemoveDir { path: dir.clone() },
+    ];
+    for op in ops {
+        writer
+            .append_cbor(record::TAG_WRITE_OP, &op)
+            .expect("append op");
+    }
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 4);
+    assert!(!file.exists());
+    assert!(!dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_applies_executable_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_record_path("chmod-record");
+    let target = temp_record_path("chmod-target");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let op = op::Operation::WriteFile {
+        path: target.clone(),
+        state: op::FileState::Executable(b"#!/bin/sh\necho hi\n".to_vec()),
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+
+    let mode = fs::metadata(&target)
+        .expect("target metadata")
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o111, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_applies_symlink_creation() {
+    let path = temp_record_path("symlink-record");
+    let dir = temp_record_path("symlink-dir");
+    let target = dir.join("target.txt");
+    let link = dir.join("link.txt");
+    fs::create_dir_all(&dir).expect("mkdir");
+    fs::write(&target, b"link-target").expect("seed target");
+
+    let writer = record::Writer::open_append(&path).expect("writer open");
+    let op = op::Operation::WriteFile {
+        path: link.clone(),
+        state: op::FileState::Symlink(target.clone()),
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+    let resolved = fs::read_link(&link).expect("read link");
+    assert_eq!(resolved, target);
+}
+
+#[test]
+fn flush_compacts_multiple_writes_then_delete() {
+    let path = temp_record_path("compact-delete-record");
+    let target = temp_record_path("compact-delete-target");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let ops = [
+        op::Operation::WriteFile {
+            path: target.clone(),
+            state: op::FileState::Regular(b"v1".to_vec()),
+        },
+        op::Operation::WriteFile {
+            path: target.clone(),
+            state: op::FileState::Regular(b"v2".to_vec()),
+        },
+        op::Operation::WriteFile {
+            path: target.clone(),
+            state: op::FileState::Deleted,
+        },
+    ];
+    for op in ops {
+        writer
+            .append_cbor(record::TAG_WRITE_OP, &op)
+            .expect("append op");
+    }
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.pending, 3);
+    assert_eq!(stats.optimized, 2);
+    assert_eq!(stats.marked, 3);
+    assert!(!target.exists());
+}
+
+#[test]
+fn flush_compaction_respects_rename_boundaries() {
+    let path = temp_record_path("compact-rename-boundary-record");
+    let a = temp_record_path("compact-rename-a");
+    let b = temp_record_path("compact-rename-b");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let ops = [
+        op::Operation::WriteFile {
+            path: a.clone(),
+            state: op::FileState::Regular(b"v1".to_vec()),
+        },
+        op::Operation::WriteFile {
+            path: a.clone(),
+            state: op::FileState::Regular(b"v2".to_vec()),
+        },
+        op::Operation::Rename {
+            from: a.clone(),
+            to: b.clone(),
+        },
+        op::Operation::WriteFile {
+            path: a.clone(),
+            state: op::FileState::Regular(b"v3".to_vec()),
+        },
+    ];
+    for op in ops {
+        writer
+            .append_cbor(record::TAG_WRITE_OP, &op)
+            .expect("append op");
+    }
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.pending, 4);
+    assert_eq!(stats.optimized, 1);
+    assert_eq!(stats.marked, 4);
+    assert_eq!(fs::read(&b).expect("renamed content"), b"v2");
+    assert_eq!(fs::read(&a).expect("post-rename write"), b"v3");
+}
+
+#[test]
+fn flush_blocks_when_profile_header_disallows_write() {
+    let path = temp_record_path("profile-block-record");
+    let target = temp_record_path("profile-block-target");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let header = ProfileHeaderFrame {
+        normalized_profile: format!("{} ro\n", target.display()),
+    };
+    writer
+        .append_cbor(record::TAG_PROFILE_HEADER, &header)
+        .expect("append header");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::WriteFile {
+                path: target.clone(),
+                state: op::FileState::Regular(b"blocked".to_vec()),
+            },
+        )
+        .expect("append write");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.pending, 1);
+    assert_eq!(stats.blocked, 1);
+    assert_eq!(stats.marked, 0);
+    assert!(!target.exists());
+}
+
+#[test]
+fn flush_profile_override_can_allow_previously_blocked_write() {
+    let path = temp_record_path("profile-override-record");
+    let target = temp_record_path("profile-override-target");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let header = ProfileHeaderFrame {
+        normalized_profile: format!("{} ro\n", target.display()),
+    };
+    writer
+        .append_cbor(record::TAG_PROFILE_HEADER, &header)
+        .expect("append header");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::WriteFile {
+                path: target.clone(),
+                state: op::FileState::Regular(b"allowed".to_vec()),
+            },
+        )
+        .expect("append write");
+    writer.sync().expect("sync");
+
+    let first = flush_record(&path, false, None).expect("flush blocked");
+    assert_eq!(first.blocked, 1);
+    assert_eq!(first.marked, 0);
+
+    let override_profile =
+        temp_profile_path("profile-override", &format!("{} rw\n", target.display()));
+    let override_profile_str = override_profile.to_string_lossy().to_string();
+    let second = flush_record(&path, false, Some(&override_profile_str))
+        .expect("flush with override");
+    assert_eq!(second.blocked, 0);
+    assert_eq!(second.marked, 1);
+    assert_eq!(fs::read(&target).expect("read target"), b"allowed");
+}
+
+#[test]
+fn load_profile_uses_builtin_default_profile() {
+    let loaded = load_profile(Path::new(cli::DEFAULT_PROFILE)).expect("load builtin default");
+    assert_eq!(
+        loaded.profile.first_match_action(Path::new("/bin/sh")),
+        Some(profile::RuleAction::ReadOnly)
+    );
+    assert_eq!(
+        loaded.profile.first_match_action(Path::new("/tmp")),
+        Some(profile::RuleAction::ReadWrite)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_regular_write_replaces_existing_symlink_instead_of_following_it() {
+    use std::os::unix::fs as unix_fs;
+
+    let temp = tempdir().expect("tempdir");
+    let record = temp.path().join("record.cjr");
+    let real_target = temp.path().join("real-target.txt");
+    let link_path = temp.path().join("link.txt");
+    fs::write(&real_target, b"host-target").expect("seed target");
+    unix_fs::symlink(&real_target, &link_path).expect("seed symlink");
+
+    let writer = record::Writer::open_append(&record).expect("writer open");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::WriteFile {
+                path: link_path.clone(),
+                state: op::FileState::Regular(b"replacement".to_vec()),
+            },
+        )
+        .expect("append write");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&record, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+    assert_eq!(fs::read(&link_path).expect("read replaced file"), b"replacement");
+    assert_eq!(
+        fs::read(&real_target).expect("read original target"),
+        b"host-target"
+    );
+    assert!(
+        !fs::symlink_metadata(&link_path)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_symlink_write_replaces_existing_regular_file() {
+    let temp = tempdir().expect("tempdir");
+    let record = temp.path().join("record.cjr");
+    let real_target = temp.path().join("real-target.txt");
+    let link_path = temp.path().join("link.txt");
+    fs::write(&real_target, b"target").expect("seed target");
+    fs::write(&link_path, b"old-file").expect("seed file");
+
+    let writer = record::Writer::open_append(&record).expect("writer open");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::WriteFile {
+                path: link_path.clone(),
+                state: op::FileState::Symlink(real_target.clone()),
+            },
+        )
+        .expect("append write");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&record, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+    assert!(
+        fs::symlink_metadata(&link_path)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&link_path).expect("read link"), real_target);
+}
+
+#[test]
+fn flush_rename_to_blocked_target_is_rejected() {
+    let temp = tempdir().expect("tempdir");
+    let record = temp.path().join("record.cjr");
+    let from = temp.path().join("from.txt");
+    let to = temp.path().join("to.txt");
+    fs::write(&from, b"rename-me").expect("seed source");
+
+    let writer = record::Writer::open_append(&record).expect("writer open");
+    let header = ProfileHeaderFrame {
+        normalized_profile: format!("{} rw\n{} ro\n", from.display(), to.display()),
+    };
+    writer
+        .append_cbor(record::TAG_PROFILE_HEADER, &header)
+        .expect("append header");
+    writer
+        .append_cbor(
+            record::TAG_WRITE_OP,
+            &op::Operation::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            },
+        )
+        .expect("append rename");
+    writer.sync().expect("sync");
+
+    let stats = flush_record(&record, false, None).expect("flush");
+    assert_eq!(stats.pending, 1);
+    assert_eq!(stats.blocked, 1);
+    assert_eq!(stats.marked, 0);
+    assert!(from.exists());
+    assert!(!to.exists());
+}
