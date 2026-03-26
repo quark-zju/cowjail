@@ -91,10 +91,6 @@ pub(crate) fn runtime_root() -> PathBuf {
     PathBuf::from("/run/cowjail")
 }
 
-pub(crate) fn jail_paths(name: &str) -> Result<JailPaths> {
-    Ok(jail_paths_in(&layout()?, name))
-}
-
 pub(crate) fn jail_paths_in(layout: &JailLayout, name: &str) -> JailPaths {
     let state_dir = layout.state_root.join(name);
     let runtime_dir = layout.runtime_root.join(name);

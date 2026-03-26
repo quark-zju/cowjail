@@ -131,6 +131,34 @@ fn remove_jail_can_follow_profile_selected_generated_identity() {
 }
 
 #[test]
+fn resolve_in_rejects_rebinding_existing_named_jail_to_different_profile() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let profile_a = temp.path().join("a.profile");
+    let profile_b = temp.path().join("b.profile");
+    fs::write(&profile_a, ". rw\n/tmp ro\n").expect("write profile a");
+    fs::write(&profile_b, ". rw\n/etc ro\n").expect("write profile b");
+
+    jail::resolve_in(
+        &layout,
+        Some("demo"),
+        Some(profile_a.to_str().expect("utf-8 path")),
+        jail::ResolveMode::EnsureExists,
+    )
+    .expect("create named jail");
+
+    let err = jail::resolve_in(
+        &layout,
+        Some("demo"),
+        Some(profile_b.to_str().expect("utf-8 path")),
+        jail::ResolveMode::EnsureExists,
+    )
+    .expect_err("rebind should fail");
+    assert!(err.to_string().contains("bound to a different profile"));
+}
+
+#[test]
 fn flush_dry_run_does_not_mark() {
     let path = temp_record_path("dry-run");
     let writer = record::Writer::open_append(&path).expect("writer open");
