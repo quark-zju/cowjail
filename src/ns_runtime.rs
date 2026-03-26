@@ -41,6 +41,7 @@ pub(crate) enum RuntimeState {
 #[derive(Debug)]
 pub(crate) struct RuntimeLock {
     file: fs::File,
+    #[cfg(test)]
     path: PathBuf,
 }
 
@@ -99,6 +100,7 @@ pub(crate) fn open_lock(jail: &JailPaths) -> Result<RuntimeLock> {
     open_lock_file(paths.lock_path)
 }
 
+#[cfg(test)]
 pub(crate) fn try_open_lock(jail: &JailPaths) -> Result<Option<RuntimeLock>> {
     let paths = ensure_runtime_dir(jail)?;
     let file = fs::OpenOptions::new()
@@ -110,6 +112,7 @@ pub(crate) fn try_open_lock(jail: &JailPaths) -> Result<Option<RuntimeLock>> {
     match file.try_lock() {
         Ok(()) => Ok(Some(RuntimeLock {
             file,
+            #[cfg(test)]
             path: paths.lock_path,
         })),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -146,6 +149,7 @@ pub(crate) fn classify(status: &RuntimeStatus) -> RuntimeState {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ensure_runtime_skeleton(jail: &JailPaths) -> Result<RuntimeStatus> {
     let lock = open_lock(jail)?;
     let status = inspect(jail)?;
@@ -190,6 +194,7 @@ where
     })
 }
 
+#[cfg(test)]
 pub(crate) fn ensure_runtime_placeholders(jail: &JailPaths) -> Result<EnsuredRuntime> {
     ensure_runtime_with(jail, |paths| {
         write_placeholder(&paths.mntns_path, b"mntns-placeholder")?;
@@ -377,6 +382,7 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn write_placeholder(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -475,6 +481,7 @@ impl Drop for RuntimeLock {
 }
 
 impl RuntimeLock {
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -489,5 +496,9 @@ fn open_lock_file(path: PathBuf) -> Result<RuntimeLock> {
         .with_context(|| format!("failed to open runtime lock {}", path.display()))?;
     file.lock()
         .with_context(|| format!("failed to lock runtime lock {}", path.display()))?;
-    Ok(RuntimeLock { file, path })
+    Ok(RuntimeLock {
+        file,
+        #[cfg(test)]
+        path,
+    })
 }

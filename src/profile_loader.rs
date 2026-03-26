@@ -86,6 +86,7 @@ pub(crate) fn ensure_record_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn default_record_dir_from_home(home: &Path) -> PathBuf {
     home.join(".cache/cowjail")
 }
