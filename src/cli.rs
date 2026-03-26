@@ -35,7 +35,7 @@ pub enum HelpTopic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddCommand {
-    pub name: String,
+    pub name: Option<String>,
     pub profile: Option<String>,
 }
 
@@ -170,9 +170,7 @@ fn parse_add(mut args: Arguments) -> Result<Command> {
             verbose: false,
         });
     }
-    let name = args
-        .value_from_str("--name")
-        .context("add requires --name <name>")?;
+    let name = args.opt_value_from_str("--name")?;
     let profile = args.opt_value_from_str("--profile")?;
     let extra = args.finish();
     if !extra.is_empty() {
@@ -206,9 +204,6 @@ fn parse_rm(mut args: Arguments) -> Result<Command> {
     let profile = args.opt_value_from_str("--profile")?;
     if name.is_some() && profile.is_some() {
         bail!("rm accepts only one of --name <name> or --profile <profile>");
-    }
-    if name.is_none() && profile.is_none() {
-        bail!("rm requires one of --name <name> or --profile <profile>");
     }
     let extra = args.finish();
     if !extra.is_empty() {
@@ -347,7 +342,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Root if verbose => concat!(
             "cowjail\n\n",
             "USAGE:\n",
-            "  cowjail add --name <name> [--profile <profile>]\n",
+            "  cowjail add [--name <name> | --profile <profile>]\n",
             "  cowjail list\n",
             "  cowjail rm [--name <name> | --profile <profile>]\n",
             "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
@@ -361,7 +356,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Root => concat!(
             "cowjail\n\n",
             "USAGE:\n",
-            "  cowjail add --name <name> [--profile <profile>]\n",
+            "  cowjail add [--name <name> | --profile <profile>]\n",
             "  cowjail list\n",
             "  cowjail rm [--name <name> | --profile <profile>]\n",
             "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
@@ -372,9 +367,9 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Add => concat!(
             "cowjail add\n\n",
             "USAGE:\n",
-            "  cowjail add --name <name> [--profile <profile>]\n\n",
+            "  cowjail add [--name <name> | --profile <profile>]\n\n",
             "OPTIONS:\n",
-            "  --name <name>         Explicit jail name (required)\n",
+            "  --name <name>         Explicit jail name\n",
             "  --profile <profile>   Profile path. Default: default",
         ),
         HelpTopic::List => concat!("cowjail list\n\n", "USAGE:\n", "  cowjail list"),
@@ -517,9 +512,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_add_requires_name() {
-        let err = parse_from(os(&["add"])).expect_err("add without name should fail");
-        assert!(err.to_string().contains("add requires --name"));
+    fn parse_add_allows_no_selector() {
+        let cmd = parse_from(os(&["add"])).expect("add without selector should parse");
+        let add = match cmd {
+            Command::Add(add) => add,
+            other => panic!("expected add, got {other:?}"),
+        };
+        assert!(add.name.is_none());
+        assert!(add.profile.is_none());
     }
 
     #[test]
@@ -530,8 +530,13 @@ mod tests {
 
     #[test]
     fn parse_rm_requires_exactly_one_selector() {
-        let err = parse_from(os(&["rm"])).expect_err("rm without selector should fail");
-        assert!(err.to_string().contains("rm requires"));
+        let cmd = parse_from(os(&["rm"])).expect("rm without selector should parse");
+        let rm = match cmd {
+            Command::Rm(rm) => rm,
+            other => panic!("expected rm, got {other:?}"),
+        };
+        assert!(rm.name.is_none());
+        assert!(rm.profile.is_none());
 
         let err = parse_from(os(&["rm", "--name", "a", "--profile", "b"]))
             .expect_err("rm with two selectors should fail");

@@ -4,10 +4,12 @@ use crate::cli::{AddCommand, ListCommand, RmCommand};
 use crate::jail;
 
 pub(crate) fn add_command(add: AddCommand) -> Result<()> {
-    jail::validate_explicit_name(&add.name)
-        .with_context(|| format!("invalid jail name '{}'", add.name))?;
+    if let Some(name) = add.name.as_deref() {
+        jail::validate_explicit_name(name)
+            .with_context(|| format!("invalid jail name '{name}'"))?;
+    }
     jail::resolve(
-        Some(&add.name),
+        add.name.as_deref(),
         add.profile.as_deref(),
         jail::ResolveMode::EnsureExists,
     )
