@@ -377,7 +377,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Root if verbose => concat!(
             "cowjail\n\n",
             "USAGE:\n",
-            "  cowjail add (<name> | --name <name> | --profile <profile>) [--profile <profile>]\n",
+            "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
             "  cowjail list\n",
             "  cowjail rm (<name> | --name <name> | --profile <profile>)\n",
             "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
@@ -391,7 +391,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Root => concat!(
             "cowjail\n\n",
             "USAGE:\n",
-            "  cowjail add (<name> | --name <name> | --profile <profile>) [--profile <profile>]\n",
+            "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
             "  cowjail list\n",
             "  cowjail rm (<name> | --name <name> | --profile <profile>)\n",
             "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
@@ -402,7 +402,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Add => concat!(
             "cowjail add\n\n",
             "USAGE:\n",
-            "  cowjail add (<name> | --name <name> | --profile <profile>) [--profile <profile>]\n\n",
+            "  cowjail add [<name> | --name <name>] [--profile <profile>]\n\n",
             "NOTES:\n",
             "  () means required choice, [] means optional\n\n",
             "OPTIONS:\n",
