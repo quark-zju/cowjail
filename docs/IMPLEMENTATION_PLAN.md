@@ -148,7 +148,7 @@ Key requirements:
 
 Practical plan:
 
-- `run` spawns an internal server entrypoint (reuse `_mount` or add a hidden `fuse-server`)
+- `run` spawns an internal server entrypoint via hidden `_fuse`
 - the parent sets up namespaces as needed, then execs the FUSE server
 - after mount completes, the server drops privileges and loops
 
@@ -302,6 +302,7 @@ The project should keep a low-level escape hatch for advanced users and debuggin
 Suggested hidden commands:
 
 ```text
+cowjail _fuse --profile <profile> --record <record_path> --pid-path <pid_path> <mountpoint>
 cowjail _mount --profile <profile> --record <record_path> <path>
 cowjail _flush --record <record_path> [--profile <profile>] [--dry-run]
 ```
@@ -329,7 +330,7 @@ Completed:
 - [x] Phase 3 step `10` IPC namespace isolation baseline
 - [x] Phase 3 step `11` privilege drop path with `setgroups/setgid/setuid/PR_SET_NO_NEW_PRIVS`
 - [x] Phase 5 step `17` public `flush` uses selector-based UX
-- [x] Phase 5 step `18` hidden low-level `_mount` / `_flush` commands
+- [x] Phase 5 step `18` hidden low-level `_fuse` / `_mount` / `_flush` commands
 
 In progress:
 
@@ -411,7 +412,7 @@ Not started:
 - `flush` should use the same jail selector logic as `run`.
 - Public `flush` should be high-level and state-aware.
 
-18. `debug: preserve hidden _mount and _flush commands`
+18. `debug: preserve hidden _fuse, _mount and _flush commands`
 - Keep low-level commands for recovery and advanced debugging.
 - Do not write named-jail metadata from these code paths.
 
