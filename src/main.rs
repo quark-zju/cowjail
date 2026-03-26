@@ -8,6 +8,7 @@ mod cowfs;
 mod jail;
 mod ns_runtime;
 mod op;
+mod privileges;
 mod profile;
 mod profile_loader;
 mod record;

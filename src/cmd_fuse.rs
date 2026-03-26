@@ -3,6 +3,7 @@ use fs_err as fs;
 
 use crate::cli::LowLevelFuseCommand;
 use crate::cowfs;
+use crate::privileges;
 use crate::profile_loader::{append_profile_header, ensure_record_parent_dir, load_profile};
 use crate::record;
 use crate::vlog;
@@ -55,9 +56,9 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     fs::write(&cmd.pid_path, format!("{pid}\n"))
         .with_context(|| format!("failed to write fuse pid file {}", cmd.pid_path.display()))?;
 
+    privileges::drop_to_real_user(false)?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-    drop_privileges(uid, gid)?;
     vlog(
         cmd.verbose,
         format!("_fuse: running as uid={} gid={}", uid, gid),
@@ -66,20 +67,4 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     loop {
         std::thread::park();
     }
-}
-
-fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
-    if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setgroups([]) failed: {err}"));
-    }
-    if unsafe { libc::setgid(gid) } != 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setgid({gid}) failed: {err}"));
-    }
-    if unsafe { libc::setuid(uid) } != 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setuid({uid}) failed: {err}"));
-    }
-    Ok(())
 }

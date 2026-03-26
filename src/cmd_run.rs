@@ -10,6 +10,7 @@ use crate::cli::RunCommand;
 use crate::cowfs;
 use crate::jail;
 use crate::ns_runtime;
+use crate::privileges;
 use crate::profile_loader::{
     append_profile_header, ensure_record_parent_dir, parse_profile_from_normalized_source,
 };
@@ -191,32 +192,10 @@ fn run_child_in_chroot(
                     format!("chdir failed: {err}"),
                 ));
             }
-            if libc::setgroups(0, std::ptr::null()) != 0 {
-                let err = std::io::Error::last_os_error();
+            if let Err(err) = privileges::drop_to_user(ruid, rgid, true) {
                 return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("setgroups([]) failed: {err}"),
-                ));
-            }
-            if libc::setgid(rgid) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("setgid({rgid}) failed: {err}"),
-                ));
-            }
-            if libc::setuid(ruid) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("setuid({ruid}) failed: {err}"),
-                ));
-            }
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("prctl(PR_SET_NO_NEW_PRIVS) failed: {err}"),
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
                 ));
             }
             Ok(())
