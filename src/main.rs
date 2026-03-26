@@ -220,6 +220,13 @@ fn run_child_in_chroot(
                     format!("setuid({ruid}) failed: {err}"),
                 ));
             }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!("prctl(PR_SET_NO_NEW_PRIVS) failed: {err}"),
+                ));
+            }
             Ok(())
         });
     }
