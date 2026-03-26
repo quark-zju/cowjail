@@ -38,28 +38,16 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         jail::ResolveMode::EnsureExists,
     )
     .context("failed to resolve run jail")?;
-    let runtime = ns_runtime::ensure_runtime_namespaces(&resolved.paths)
-        .context("failed to ensure named runtime namespace handles")?;
-    let mntns_file = fs::File::open(&runtime.paths.mntns_path).with_context(|| {
-        format!(
-            "failed to open mount namespace handle {}",
-            runtime.paths.mntns_path.display()
-        )
-    })?;
-    let ipcns_file = fs::File::open(&runtime.paths.ipcns_path).with_context(|| {
-        format!(
-            "failed to open ipc namespace handle {}",
-            runtime.paths.ipcns_path.display()
-        )
-    })?;
+    let runtime = ns_runtime::ensure_runtime_for_exec(&resolved.paths)
+        .context("failed to ensure/open named runtime namespace handles")?;
     vlog(
         run.verbose,
         format!(
             "run: runtime={} state_before={:?} state_after={:?} rebuilt={}",
-            runtime.paths.runtime_dir.display(),
-            runtime.state_before,
-            runtime.state_after,
-            runtime.rebuilt
+            runtime.ensured.paths.runtime_dir.display(),
+            runtime.ensured.state_before,
+            runtime.ensured.state_after,
+            runtime.ensured.rebuilt
         ),
     );
     let jail_profile = parse_profile_from_normalized_source(&resolved.normalized_profile)
@@ -116,8 +104,14 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
             cwd.display()
         ),
     );
-    let status = run_child_in_chroot(&run, &mountpoint, &cwd, mntns_file, ipcns_file)
-        .with_context(|| format!("failed to execute jailed command {:?}", run.program));
+    let status = run_child_in_chroot(
+        &run,
+        &mountpoint,
+        &cwd,
+        runtime.mntns_file,
+        runtime.ipcns_file,
+    )
+    .with_context(|| format!("failed to execute jailed command {:?}", run.program));
 
     vlog(
         run.verbose,

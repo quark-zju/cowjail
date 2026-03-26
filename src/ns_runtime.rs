@@ -50,6 +50,12 @@ pub(crate) struct EnsuredRuntime {
     pub(crate) rebuilt: bool,
 }
 
+pub(crate) struct ExecRuntime {
+    pub(crate) ensured: EnsuredRuntime,
+    pub(crate) mntns_file: fs::File,
+    pub(crate) ipcns_file: fs::File,
+}
+
 pub(crate) fn paths_for(jail: &JailPaths) -> NsRuntimePaths {
     NsRuntimePaths {
         runtime_dir: jail.runtime_dir.clone(),
@@ -189,6 +195,32 @@ pub(crate) fn ensure_runtime_placeholders(jail: &JailPaths) -> Result<EnsuredRun
 
 pub(crate) fn ensure_runtime_namespaces(jail: &JailPaths) -> Result<EnsuredRuntime> {
     ensure_runtime_with(jail, bootstrap_namespace_handles)
+}
+
+pub(crate) fn open_namespace_handles(paths: &NsRuntimePaths) -> Result<(fs::File, fs::File)> {
+    let mntns_file = fs::File::open(&paths.mntns_path).with_context(|| {
+        format!(
+            "failed to open mount namespace handle {}",
+            paths.mntns_path.display()
+        )
+    })?;
+    let ipcns_file = fs::File::open(&paths.ipcns_path).with_context(|| {
+        format!(
+            "failed to open ipc namespace handle {}",
+            paths.ipcns_path.display()
+        )
+    })?;
+    Ok((mntns_file, ipcns_file))
+}
+
+pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
+    let ensured = ensure_runtime_namespaces(jail)?;
+    let (mntns_file, ipcns_file) = open_namespace_handles(&ensured.paths)?;
+    Ok(ExecRuntime {
+        ensured,
+        mntns_file,
+        ipcns_file,
+    })
 }
 
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {

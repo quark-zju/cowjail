@@ -380,6 +380,19 @@ fn ns_runtime_ensure_placeholders_sets_ready_state() {
 }
 
 #[test]
+fn ns_runtime_open_namespace_handles_from_paths() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let jail_paths = jail::jail_paths_in(&layout, "demo");
+    let runtime_paths = ns_runtime::ensure_runtime_dir(&jail_paths).expect("ensure runtime");
+    fs::write(&runtime_paths.mntns_path, b"x").expect("write mntns");
+    fs::write(&runtime_paths.ipcns_path, b"y").expect("write ipcns");
+
+    let (_mnt, _ipc) = ns_runtime::open_namespace_handles(&runtime_paths).expect("open handles");
+}
+
+#[test]
 fn flush_dry_run_does_not_mark() {
     let path = temp_record_path("dry-run");
     let writer = record::Writer::open_append(&path).expect("writer open");
