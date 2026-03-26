@@ -32,8 +32,6 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     }
 
     let cwd = jail::current_pwd().context("failed to resolve current working directory")?;
-    let ruid = unsafe { libc::getuid() };
-    let rgid = unsafe { libc::getgid() };
     let resolved = jail::resolve(
         run.name.as_deref(),
         run.profile.as_deref(),
@@ -118,7 +116,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
             cwd.display()
         ),
     );
-    let status = run_child_in_chroot(&run, &mountpoint, &cwd, ruid, rgid, mntns_file, ipcns_file)
+    let status = run_child_in_chroot(&run, &mountpoint, &cwd, mntns_file, ipcns_file)
         .with_context(|| format!("failed to execute jailed command {:?}", run.program));
 
     vlog(
@@ -148,8 +146,6 @@ fn run_child_in_chroot(
     run: &RunCommand,
     mountpoint: &Path,
     old_cwd: &Path,
-    ruid: libc::uid_t,
-    rgid: libc::gid_t,
     mntns_file: fs::File,
     ipcns_file: fs::File,
 ) -> Result<std::process::ExitStatus> {
@@ -192,7 +188,7 @@ fn run_child_in_chroot(
                     format!("chdir failed: {err}"),
                 ));
             }
-            if let Err(err) = privileges::drop_to_user(ruid, rgid, true) {
+            if let Err(err) = privileges::drop_to_real_user() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     err.to_string(),
