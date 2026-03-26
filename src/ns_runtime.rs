@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use fs_err as fs;
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -403,11 +404,33 @@ fn bind_namespace_handle(source: &str, target: &Path) -> Result<()> {
         libc::mount(
             source_c.as_ptr(),
             target_c.as_ptr(),
-            std::ptr::null(),
+            b"none\0".as_ptr().cast(),
             libc::MS_BIND as libc::c_ulong,
             std::ptr::null(),
         )
     };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINVAL) && source.starts_with("/proc/self/ns/") {
+            let ns_fd = fs::File::open(source)
+                .with_context(|| format!("failed to open namespace source {}", source))?;
+            let fd_path = format!("/proc/self/fd/{}", ns_fd.as_raw_fd());
+            let fd_path_c = CString::new(fd_path.as_str())
+                .with_context(|| format!("invalid fd source path: {fd_path}"))?;
+            let retry_rc = unsafe {
+                libc::mount(
+                    fd_path_c.as_ptr(),
+                    target_c.as_ptr(),
+                    b"none\0".as_ptr().cast(),
+                    libc::MS_BIND as libc::c_ulong,
+                    std::ptr::null(),
+                )
+            };
+            if retry_rc == 0 {
+                return Ok(());
+            }
+        }
+    }
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         let src_meta = metadata_summary(Path::new(source));
