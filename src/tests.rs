@@ -1,8 +1,8 @@
 use super::{cli, cmd_flush, jail, op, profile, profile_loader, record};
+use crate::profile_loader::ProfileHeaderFrame;
 use fs_err as fs;
 use std::path::Path;
 use tempfile::tempdir;
-use crate::profile_loader::ProfileHeaderFrame;
 
 fn temp_record_path(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -41,6 +41,23 @@ fn auto_jail_name_uses_reserved_prefix() {
     let name = jail::derive_auto_name("/tmp rw\n");
     assert!(name.starts_with(jail::AUTO_NAME_PREFIX));
     assert!(jail::is_generated_name(&name));
+}
+
+#[test]
+fn cowjail_path_helpers_are_testable_without_process_home() {
+    let home = Path::new("/tmp/cowjail-home");
+    assert_eq!(
+        jail::config_root_from_home(home),
+        home.join(".config/cowjail")
+    );
+    assert_eq!(
+        jail::state_root_from_home(home),
+        home.join(".local/state/cowjail")
+    );
+    assert_eq!(
+        profile_loader::default_record_dir_from_home(home),
+        home.join(".cache/cowjail")
+    );
 }
 
 #[test]
@@ -366,7 +383,8 @@ fn flush_profile_override_can_allow_previously_blocked_write() {
 
 #[test]
 fn load_profile_uses_builtin_default_profile() {
-    let loaded = profile_loader::load_profile(Path::new(cli::DEFAULT_PROFILE)).expect("load builtin default");
+    let loaded = profile_loader::load_profile(Path::new(cli::DEFAULT_PROFILE))
+        .expect("load builtin default");
     assert_eq!(
         loaded.profile.first_match_action(Path::new("/bin/sh")),
         Some(profile::RuleAction::ReadOnly)
@@ -403,7 +421,10 @@ fn flush_regular_write_replaces_existing_symlink_instead_of_following_it() {
 
     let stats = cmd_flush::flush_record(&record, false, None).expect("flush");
     assert_eq!(stats.marked, 1);
-    assert_eq!(fs::read(&link_path).expect("read replaced file"), b"replacement");
+    assert_eq!(
+        fs::read(&link_path).expect("read replaced file"),
+        b"replacement"
+    );
     assert_eq!(
         fs::read(&real_target).expect("read original target"),
         b"host-target"
@@ -503,9 +524,10 @@ fn flush_regular_write_into_existing_directory_fails_without_marking() {
     writer.sync().expect("sync");
 
     let err = cmd_flush::flush_record(&record, false, None).expect_err("flush should fail");
-    assert!(err
-        .to_string()
-        .contains("refusing to replace directory with regular file"));
+    assert!(
+        err.to_string()
+            .contains("refusing to replace directory with regular file")
+    );
     assert!(target_dir.is_dir());
     let frames = record::read_frames(&record).expect("read frames");
     assert!(!frames[0].flushed);
@@ -534,9 +556,10 @@ fn flush_symlink_write_into_existing_directory_fails_without_marking() {
     writer.sync().expect("sync");
 
     let err = cmd_flush::flush_record(&record, false, None).expect_err("flush should fail");
-    assert!(err
-        .to_string()
-        .contains("refusing to replace directory with symlink"));
+    assert!(
+        err.to_string()
+            .contains("refusing to replace directory with symlink")
+    );
     assert!(target_dir.is_dir());
     let frames = record::read_frames(&record).expect("read frames");
     assert!(!frames[0].flushed);
@@ -690,7 +713,10 @@ fn flush_delete_on_symlink_removes_link_not_target() {
     let stats = cmd_flush::flush_record(&record, false, None).expect("flush");
     assert_eq!(stats.marked, 1);
     assert!(!link_path.exists());
-    assert_eq!(fs::read(&real_target).expect("read original target"), b"keep-target");
+    assert_eq!(
+        fs::read(&real_target).expect("read original target"),
+        b"keep-target"
+    );
 }
 
 #[cfg(unix)]
@@ -722,11 +748,16 @@ fn flush_truncate_on_symlink_fails_without_marking_or_modifying_target() {
         err.to_string().contains("refusing to truncate symlink")
             || err.to_string().contains("failed to open file for truncate")
     );
-    assert!(fs::symlink_metadata(&link_path)
-        .expect("metadata")
-        .file_type()
-        .is_symlink());
-    assert_eq!(fs::read(&real_target).expect("read original target"), b"abcdef");
+    assert!(
+        fs::symlink_metadata(&link_path)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(&real_target).expect("read original target"),
+        b"abcdef"
+    );
     let frames = record::read_frames(&record).expect("read frames");
     assert!(!frames[0].flushed);
 }
@@ -760,8 +791,14 @@ fn flush_rename_over_symlink_replaces_link_not_target() {
     let stats = cmd_flush::flush_record(&record, false, None).expect("flush");
     assert_eq!(stats.marked, 1);
     assert!(!from.exists());
-    assert_eq!(fs::read(&link_path).expect("read renamed file"), b"rename-me");
-    assert_eq!(fs::read(&symlink_target).expect("read original target"), b"keep-target");
+    assert_eq!(
+        fs::read(&link_path).expect("read renamed file"),
+        b"rename-me"
+    );
+    assert_eq!(
+        fs::read(&symlink_target).expect("read original target"),
+        b"keep-target"
+    );
     assert!(
         !fs::symlink_metadata(&link_path)
             .expect("metadata")
@@ -801,13 +838,17 @@ fn flush_rename_into_symlink_parent_fails_without_marking_or_modifying_target_tr
     assert!(
         err.to_string()
             .contains("refusing to create rename target under symlink parent")
-            || err.to_string().contains("failed to create parent directories for rename target")
+            || err
+                .to_string()
+                .contains("failed to create parent directories for rename target")
     );
     assert!(from.exists());
-    assert!(fs::symlink_metadata(&symlink_dir)
-        .expect("metadata")
-        .file_type()
-        .is_symlink());
+    assert!(
+        fs::symlink_metadata(&symlink_dir)
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
     assert!(!redirected_target.exists());
     let frames = record::read_frames(&record).expect("read frames");
     assert!(!frames[0].flushed);

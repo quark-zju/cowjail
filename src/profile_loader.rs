@@ -60,7 +60,10 @@ pub(crate) fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
     let source_name = if profile_path == Path::new(cli::DEFAULT_PROFILE) {
         "built-in default profile".to_string()
     } else {
-        format!("profile file: {}", resolve_profile_path(profile_path)?.display())
+        format!(
+            "profile file: {}",
+            resolve_profile_path(profile_path)?.display()
+        )
     };
     let profile = profile::Profile::parse(&source, &cwd)
         .with_context(|| format!("failed to parse {source_name}"))?;
@@ -78,9 +81,10 @@ pub(crate) fn parse_profile_from_normalized_source(source: &str) -> Result<profi
 }
 
 pub(crate) fn default_record_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot resolve default record directory"))?;
-    Ok(PathBuf::from(home).join(".cache/cowjail"))
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        anyhow::anyhow!("HOME is not set; cannot resolve default record directory")
+    })?;
+    Ok(default_record_dir_from_home(&PathBuf::from(home)))
 }
 
 pub(crate) fn default_record_path(normalized_profile: &str, cwd: &Path) -> Result<PathBuf> {
@@ -141,6 +145,10 @@ fn record_context_hash(normalized_profile: &str, cwd: &Path) -> u64 {
     hasher.write_u8(0);
     hasher.write(normalized_profile.as_bytes());
     hasher.finish()
+}
+
+pub(crate) fn default_record_dir_from_home(home: &Path) -> PathBuf {
+    home.join(".cache/cowjail")
 }
 
 fn resolve_profile_path(profile_path: &Path) -> Result<PathBuf> {
