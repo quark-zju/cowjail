@@ -44,7 +44,6 @@ RUN_COWJAIL = [
 ]
 
 mount_proc: subprocess.Popen[str] | None = None
-suid_copy_path: Path | None = None
 
 
 def run(cmd: list[str], *, stdout=None) -> subprocess.CompletedProcess[str]:
@@ -61,11 +60,6 @@ def cleanup() -> None:
         except subprocess.TimeoutExpired:
             mount_proc.kill()
             mount_proc.wait(timeout=2)
-    if suid_copy_path is not None:
-        try:
-            suid_copy_path.unlink(missing_ok=True)
-        except OSError:
-            pass
     shutil.rmtree(WORK_DIR, ignore_errors=True)
 
 
@@ -152,20 +146,13 @@ def run_low_level_smoke() -> None:
 
 
 def prepare_setuid_binary() -> Path | None:
-    global suid_copy_path
     built = resolve_built_binary_path()
-    target_dir = resolve_target_directory()
-    suid_dir = target_dir / "e2e-suid"
-    suid_dir.mkdir(parents=True, exist_ok=True)
-    suid_copy = suid_dir / f"cowjail-suid-{os.getpid()}"
-    shutil.copy2(built, suid_copy)
-    suid_copy_path = suid_copy
 
     try:
-        run([str(suid_copy), "_suid"], stdout=subprocess.DEVNULL)
+        run([str(built), "_suid"], stdout=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
-    return suid_copy
+    return built
 
 
 def run_high_level_smoke() -> bool:
