@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use fs_err as fs;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::jail::JailPaths;
@@ -179,6 +181,14 @@ pub(crate) fn ensure_runtime_placeholders(jail: &JailPaths) -> Result<EnsuredRun
     })
 }
 
+pub(crate) fn ensure_runtime_namespaces(jail: &JailPaths) -> Result<EnsuredRuntime> {
+    ensure_runtime_with(jail, |paths| {
+        bind_namespace_handle("/proc/self/ns/mnt", &paths.mntns_path)?;
+        bind_namespace_handle("/proc/self/ns/ipc", &paths.ipcns_path)?;
+        Ok(())
+    })
+}
+
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
     let paths = paths_for(jail);
     match fs::remove_dir_all(&paths.runtime_dir) {
@@ -217,6 +227,38 @@ fn remove_if_present(path: &Path) -> Result<()> {
 
 fn write_placeholder(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn bind_namespace_handle(source: &str, target: &Path) -> Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(target)
+        .with_context(|| format!("failed to create namespace handle {}", target.display()))?;
+    let source_c =
+        CString::new(source).with_context(|| format!("invalid source path: {source}"))?;
+    let target_c = CString::new(target.as_os_str().as_bytes())
+        .with_context(|| format!("invalid target path: {}", target.display()))?;
+
+    let rc = unsafe {
+        libc::mount(
+            source_c.as_ptr(),
+            target_c.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::anyhow!(
+            "failed to bind namespace handle {} -> {}: {err}",
+            source,
+            target.display()
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for RuntimeLock {

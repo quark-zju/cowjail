@@ -38,8 +38,8 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         jail::ResolveMode::EnsureExists,
     )
     .context("failed to resolve run jail")?;
-    let runtime = ns_runtime::ensure_runtime_placeholders(&resolved.paths)
-        .context("failed to ensure named runtime skeleton")?;
+    let runtime = ns_runtime::ensure_runtime_namespaces(&resolved.paths)
+        .context("failed to ensure named runtime namespace handles")?;
     vlog(
         run.verbose,
         format!(
