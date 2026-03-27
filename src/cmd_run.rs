@@ -112,10 +112,25 @@ fn run_child_in_chroot(
             }
             if libc::chdir(cwd_c.as_ptr()) != 0 {
                 let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("chdir failed: {err}"),
-                ));
+                let not_found =
+                    matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR | libc::EACCES));
+                if not_found {
+                    let root = CString::new("/").expect("literal '/' cannot contain NUL");
+                    if libc::chdir(root.as_ptr()) != 0 {
+                        let fallback_err = std::io::Error::last_os_error();
+                        return Err(std::io::Error::new(
+                            fallback_err.kind(),
+                            format!(
+                                "chdir to cwd failed ({err}); fallback chdir('/') also failed: {fallback_err}"
+                            ),
+                        ));
+                    }
+                } else {
+                    return Err(std::io::Error::new(
+                        err.kind(),
+                        format!("chdir failed: {err}"),
+                    ));
+                }
             }
             if let Err(err) = privileges::drop_to_real_user() {
                 return Err(std::io::Error::new(
