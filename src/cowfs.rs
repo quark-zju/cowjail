@@ -69,6 +69,8 @@ impl CowFs {
             OsStr::new("-o"),
             OsStr::new("default_permissions"),
             OsStr::new("-o"),
+            OsStr::new("allow_other"),
+            OsStr::new("-o"),
             OsStr::new("fsname=cowjail"),
         ];
         fuse::mount(self, mountpoint, &options).with_context(|| {
@@ -86,6 +88,8 @@ impl CowFs {
         let options = [
             OsStr::new("-o"),
             OsStr::new("default_permissions"),
+            OsStr::new("-o"),
+            OsStr::new("allow_other"),
             OsStr::new("-o"),
             OsStr::new("fsname=cowjail"),
         ];
