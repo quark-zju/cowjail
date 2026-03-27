@@ -196,7 +196,16 @@ def run_high_level_smoke(
 
     try:
         print("[high 2/6] creating named jail")
-        run([str(suid_bin), "add", "--name", HIGH_LEVEL_JAIL, "--profile", str(PROFILE_PATH)])
+        run(
+            [
+                str(suid_bin),
+                "add",
+                "--name",
+                HIGH_LEVEL_JAIL,
+                "--profile",
+                str(PROFILE_PATH),
+            ]
+        )
 
         print("[high 3/6] writing via high-level run")
         run_cmd = [
@@ -206,7 +215,7 @@ def run_high_level_smoke(
             HIGH_LEVEL_JAIL,
             "/bin/sh",
             "-c",
-            f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
+            f"/bin/echo 'after-high' > '{TARGET_PATH_HIGH}'",
         ]
         if strace_prefix:
             run_cmd = [*strace_prefix, *run_cmd]
