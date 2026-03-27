@@ -174,20 +174,26 @@ def run_high_level_smoke() -> bool:
     run([str(suid_bin), "add", "--name", HIGH_LEVEL_JAIL, "--profile", str(PROFILE_PATH)])
 
     print("[high 3/6] writing via high-level run")
-    run_result = subprocess.run(
-        [
-            str(suid_bin),
-            "run",
-            "--name",
-            HIGH_LEVEL_JAIL,
-            "/bin/sh",
-            "-lc",
-            f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
-        ],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
+    try:
+        run_result = subprocess.run(
+            [
+                str(suid_bin),
+                "run",
+                "--name",
+                HIGH_LEVEL_JAIL,
+                "/bin/sh",
+                "-lc",
+                f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(exc.stdout or "", end="")
+        print(exc.stderr or "", end="", file=sys.stderr)
+        fail("high-level run timed out after 20s at [high 3/6]")
     if run_result.returncode != 0:
         merged = f"{run_result.stdout}\n{run_result.stderr}"
         if "requires root euid" in merged:
