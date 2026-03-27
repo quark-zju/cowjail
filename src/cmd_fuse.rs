@@ -13,6 +13,15 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     if euid != 0 {
         bail!("_fuse requires root euid (current euid={euid})");
     }
+    if std::env::var_os("COWJAIL_UNSHARE_IPC").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        let rc = unsafe { libc::unshare(libc::CLONE_NEWIPC) };
+        if rc != 0 {
+            bail!(
+                "_fuse failed to unshare ipc namespace: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
 
     fs::create_dir_all(&cmd.mountpoint).with_context(|| {
         format!(

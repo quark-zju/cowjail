@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
 use fs_err as fs;
-use std::ffi::CString;
-use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,7 +23,6 @@ pub(crate) struct NsRuntimePaths {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeStatus {
     pub(crate) runtime_dir_exists: bool,
-    pub(crate) ipcns_exists: bool,
     pub(crate) lock_exists: bool,
 }
 
@@ -55,7 +51,6 @@ pub(crate) struct EnsuredRuntime {
 
 pub(crate) struct ExecRuntime {
     pub(crate) ensured: EnsuredRuntime,
-    pub(crate) ipcns_file: fs::File,
 }
 
 pub(crate) fn paths_for(jail: &JailPaths) -> NsRuntimePaths {
@@ -128,17 +123,16 @@ pub(crate) fn inspect(jail: &JailPaths) -> Result<RuntimeStatus> {
     let paths = paths_for(jail);
     Ok(RuntimeStatus {
         runtime_dir_exists: paths.runtime_dir.exists(),
-        ipcns_exists: exists_file(&paths.ipcns_path)?,
         lock_exists: exists_file(&paths.lock_path)?,
     })
 }
 
 pub(crate) fn classify(status: &RuntimeStatus) -> RuntimeState {
-    match (status.runtime_dir_exists, status.lock_exists, status.ipcns_exists) {
-        (false, false, false) => RuntimeState::Missing,
-        (_, _, true) => RuntimeState::Ready,
-        (true, true, false) => RuntimeState::SkeletonOnly,
-        _ => RuntimeState::PartialHandles,
+    match (status.runtime_dir_exists, status.lock_exists) {
+        (false, false) => RuntimeState::Missing,
+        (true, true) => RuntimeState::Ready,
+        (true, false) => RuntimeState::SkeletonOnly,
+        (false, true) => RuntimeState::PartialHandles,
     }
 }
 
@@ -192,40 +186,16 @@ where
 
 #[cfg(test)]
 pub(crate) fn ensure_runtime_placeholders(jail: &JailPaths) -> Result<EnsuredRuntime> {
-    ensure_runtime_with(jail, |paths| {
-        write_placeholder(&paths.ipcns_path, b"ipcns-placeholder")?;
-        Ok(())
-    })
+    ensure_runtime_with(jail, |_paths| Ok(()))
 }
 
 pub(crate) fn ensure_runtime_namespaces(jail: &JailPaths) -> Result<EnsuredRuntime> {
-    ensure_runtime_with(jail, bootstrap_namespace_handles)
-}
-
-pub(crate) fn open_namespace_handle(paths: &NsRuntimePaths) -> Result<fs::File> {
-    let ipcns_file = fs::File::open(&paths.ipcns_path).with_context(|| {
-        format!(
-            "failed to open ipc namespace handle {}",
-            paths.ipcns_path.display()
-        )
-    })?;
-    Ok(ipcns_file)
+    ensure_runtime_with(jail, |_paths| Ok(()))
 }
 
 pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
-    let mut ensured = ensure_runtime_namespaces(jail)?;
-    let mut ipcns_file = open_namespace_handle(&ensured.paths)?;
-    if !ipcns_handle_usable(&ipcns_file)? {
-        ensured = rebuild_runtime_namespaces(jail)?;
-        ipcns_file = open_namespace_handle(&ensured.paths)?;
-        if !ipcns_handle_usable(&ipcns_file)? {
-            return Err(anyhow::anyhow!(
-                "ipc namespace handle is unusable after rebuild: {}",
-                ensured.paths.ipcns_path.display()
-            ));
-        }
-    }
-    Ok(ExecRuntime { ensured, ipcns_file })
+    let ensured = ensure_runtime_namespaces(jail)?;
+    Ok(ExecRuntime { ensured })
 }
 
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
@@ -360,196 +330,6 @@ fn remove_if_present(path: &Path) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
     }
-}
-
-#[cfg(test)]
-fn write_placeholder(path: &Path, bytes: &[u8]) -> Result<()> {
-    fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn bind_namespace_handle(source: &str, target: &Path) -> Result<()> {
-    fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(target)
-        .with_context(|| format!("failed to create namespace handle {}", target.display()))?;
-    let source_c =
-        CString::new(source).with_context(|| format!("invalid source path: {source}"))?;
-    let target_c = CString::new(target.as_os_str().as_bytes())
-        .with_context(|| format!("invalid target path: {}", target.display()))?;
-
-    let rc = unsafe {
-        libc::mount(
-            source_c.as_ptr(),
-            target_c.as_ptr(),
-            b"none\0".as_ptr().cast(),
-            libc::MS_BIND as libc::c_ulong,
-            std::ptr::null(),
-        )
-    };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        let src_meta = metadata_summary(Path::new(source));
-        let dst_meta = metadata_summary(target);
-        let ids = process_identity_summary();
-        let uid_map = read_text_summary("/proc/self/uid_map", 120);
-        let gid_map = read_text_summary("/proc/self/gid_map", 120);
-        return Err(anyhow::anyhow!(
-            concat!(
-                "failed to bind namespace handle {} -> {}: {}; ",
-                "ids=[{}]; uid_map=[{}]; gid_map=[{}]; src=[{}]; dst=[{}]"
-            ),
-            source,
-            target.display(),
-            err,
-            ids,
-            uid_map,
-            gid_map,
-            src_meta,
-            dst_meta
-        ));
-    }
-    Ok(())
-}
-
-fn process_identity_summary() -> String {
-    let uid = unsafe { libc::getuid() };
-    let euid = unsafe { libc::geteuid() };
-    let gid = unsafe { libc::getgid() };
-    let egid = unsafe { libc::getegid() };
-    format!("uid={uid} euid={euid} gid={gid} egid={egid}")
-}
-
-fn read_text_summary(path: &str, max_len: usize) -> String {
-    match fs::read_to_string(path) {
-        Ok(raw) => {
-            let compact = raw.replace('\n', " | ");
-            let compact = compact.trim();
-            if compact.len() <= max_len {
-                compact.to_string()
-            } else {
-                format!("{}...", &compact[..max_len])
-            }
-        }
-        Err(err) => format!("unavailable: {err}"),
-    }
-}
-
-fn metadata_summary(path: &Path) -> String {
-    use std::os::unix::fs::MetadataExt;
-    match fs::symlink_metadata(path) {
-        Ok(meta) => format!(
-            "kind={} mode={:o} uid={} gid={}",
-            if meta.file_type().is_dir() {
-                "dir"
-            } else if meta.file_type().is_file() {
-                "file"
-            } else if meta.file_type().is_symlink() {
-                "symlink"
-            } else {
-                "other"
-            },
-            meta.mode(),
-            meta.uid(),
-            meta.gid()
-        ),
-        Err(err) => format!("missing/unreadable: {err}"),
-    }
-}
-
-fn bootstrap_namespace_handles(paths: &NsRuntimePaths) -> Result<()> {
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(anyhow::anyhow!(
-            "failed to fork namespace bootstrap process: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    if pid == 0 {
-        let rc = unsafe { libc::unshare(libc::CLONE_NEWIPC) };
-        if rc != 0 {
-            eprintln!("unshare failed: {}", std::io::Error::last_os_error());
-            unsafe { libc::_exit(101) };
-        }
-        if let Err(err) = bind_namespace_handle("/proc/self/ns/ipc", &paths.ipcns_path) {
-            eprintln!("{err:#}");
-            unsafe { libc::_exit(104) };
-        }
-        unsafe { libc::_exit(0) };
-    }
-
-    let mut status: libc::c_int = 0;
-    let wait_rc = unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, 0) };
-    if wait_rc < 0 {
-        return Err(anyhow::anyhow!(
-            "failed to wait for namespace bootstrap process: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    if libc::WIFEXITED(status) {
-        let code = libc::WEXITSTATUS(status);
-        if code == 0 {
-            return Ok(());
-        }
-        return Err(anyhow::anyhow!(
-            "namespace bootstrap process exited with code {code}"
-        ));
-    }
-    if libc::WIFSIGNALED(status) {
-        let sig = libc::WTERMSIG(status);
-        return Err(anyhow::anyhow!(
-            "namespace bootstrap process killed by signal {sig}"
-        ));
-    }
-    Err(anyhow::anyhow!(
-        "namespace bootstrap process ended unexpectedly: status={status}"
-    ))
-}
-
-fn rebuild_runtime_namespaces(jail: &JailPaths) -> Result<EnsuredRuntime> {
-    let _lock = open_lock(jail)?;
-    let paths = paths_for(jail);
-    let initial_status = inspect(jail)?;
-    let state_before = classify(&initial_status);
-    reset_to_skeleton(&paths)?;
-    bootstrap_namespace_handles(&paths)?;
-    let final_status = inspect(jail)?;
-    let state_after = classify(&final_status);
-    Ok(EnsuredRuntime {
-        paths,
-        state_before,
-        state_after,
-        rebuilt: true,
-    })
-}
-
-fn ipcns_handle_usable(file: &fs::File) -> Result<bool> {
-    let fd = file.as_raw_fd();
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(anyhow::anyhow!(
-            "failed to fork for ipcns validation: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    if pid == 0 {
-        let rc = unsafe { libc::setns(fd, libc::CLONE_NEWIPC) };
-        unsafe { libc::_exit(if rc == 0 { 0 } else { 1 }) };
-    }
-    let mut status: libc::c_int = 0;
-    let wait_rc = unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, 0) };
-    if wait_rc < 0 {
-        return Err(anyhow::anyhow!(
-            "failed waiting ipcns validation child: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    if libc::WIFEXITED(status) {
-        return Ok(libc::WEXITSTATUS(status) == 0);
-    }
-    Ok(false)
 }
 
 impl Drop for RuntimeLock {

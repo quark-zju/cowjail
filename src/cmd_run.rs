@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -31,8 +32,8 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         jail::ResolveMode::EnsureExists,
     )
     .context("failed to resolve run jail")?;
-    let runtime = ns_runtime::ensure_runtime_for_exec(&resolved.paths)
-        .context("failed to ensure/open named runtime ipc namespace handle")?;
+    let runtime =
+        ns_runtime::ensure_runtime_for_exec(&resolved.paths).context("failed to ensure runtime")?;
     vlog(
         run.verbose,
         format!(
@@ -43,17 +44,15 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
             runtime.ensured.rebuilt
         ),
     );
-    ensure_fuse_server(
+    let fuse_pid = ensure_fuse_server(
         &resolved.paths,
         &runtime.ensured.paths,
         &resolved.paths.profile_path,
         &resolved.paths.record_path,
         run.verbose,
-        runtime
-            .ipcns_file
-            .try_clone()
-            .context("failed to clone ipcns fd")?,
     )?;
+    let ipcns_file = open_process_ipcns(fuse_pid)
+        .with_context(|| format!("failed to open ipc namespace from fuse pid {fuse_pid}"))?;
 
     vlog(
         run.verbose,
@@ -67,7 +66,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         &run,
         &runtime.ensured.paths.mount_dir,
         &cwd,
-        runtime.ipcns_file,
+        ipcns_file,
     )
     .with_context(|| format!("failed to execute jailed command {:?}", run.program));
 
@@ -85,7 +84,6 @@ fn run_child_in_chroot(
         .context("mount path contains interior NUL byte")?;
     let cwd_c = CString::new(old_cwd.as_os_str().as_encoded_bytes())
         .context("cwd contains interior NUL byte")?;
-    use std::os::fd::AsRawFd;
     let ipcns_fd = ipcns_file.as_raw_fd();
 
     let mut cmd = ProcessCommand::new(&run.program);
@@ -134,8 +132,7 @@ fn ensure_fuse_server(
     profile_path: &Path,
     record_path: &Path,
     verbose: bool,
-    ipcns_file: fs::File,
-) -> Result<()> {
+) -> Result<u32> {
     let _lock = ns_runtime::open_lock(jail_paths)?;
     if let Some(pid) = ns_runtime::read_fuse_pid(runtime_paths)?
         && ns_runtime::process_has_mount(pid, &runtime_paths.mount_dir)?
@@ -148,7 +145,7 @@ fn ensure_fuse_server(
                 runtime_paths.mount_dir.display()
             ),
         );
-        return Ok(());
+        return Ok(pid);
     }
 
     vlog(
@@ -159,8 +156,6 @@ fn ensure_fuse_server(
         ),
     );
     let exe = std::env::current_exe().context("failed to locate current executable")?;
-    use std::os::fd::AsRawFd;
-    let ipcns_fd = ipcns_file.as_raw_fd();
     let mut cmd = ProcessCommand::new(exe);
     cmd.arg("_fuse")
         .arg("--profile")
@@ -170,21 +165,10 @@ fn ensure_fuse_server(
         .arg("--mountpoint")
         .arg(&runtime_paths.mount_dir)
         .arg("--pid-path")
-        .arg(&runtime_paths.fuse_pid_path);
+        .arg(&runtime_paths.fuse_pid_path)
+        .env("COWJAIL_UNSHARE_IPC", "1");
     if verbose {
         cmd.arg("-v");
-    }
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setns(ipcns_fd, libc::CLONE_NEWIPC) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("setns(CLONE_NEWIPC) for _fuse failed: {err}"),
-                ));
-            }
-            Ok(())
-        });
     }
 
     let child = cmd
@@ -200,7 +184,13 @@ fn ensure_fuse_server(
             runtime_paths.mount_dir.display()
         );
     }
-    Ok(())
+    Ok(pid)
+}
+
+fn open_process_ipcns(pid: u32) -> Result<fs::File> {
+    let path = std::path::PathBuf::from(format!("/proc/{pid}/ns/ipc"));
+    fs::File::open(&path)
+        .with_context(|| format!("failed to open ipc namespace handle {}", path.display()))
 }
 
 fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
