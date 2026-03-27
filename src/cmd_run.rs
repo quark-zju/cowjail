@@ -5,6 +5,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
+use std::process::Stdio;
 use std::time::Duration;
 
 use crate::cli::RunCommand;
@@ -171,7 +172,12 @@ fn ensure_fuse_server(
         .arg(&runtime_paths.mount_dir)
         .arg("--pid-path")
         .arg(&runtime_paths.fuse_pid_path)
-        .env("COWJAIL_UNSHARE_IPC", "1");
+        .env("COWJAIL_UNSHARE_IPC", "1")
+        // Detach _fuse from caller stdio; otherwise a failing `cowjail run` can
+        // keep capture_output() callers blocked because _fuse still holds pipes.
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     if verbose {
         cmd.arg("-v");
     }
