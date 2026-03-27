@@ -32,7 +32,8 @@ RECORD_PATH = WORK_DIR / "record.cjr"
 PROFILE_PATH = WORK_DIR / "profile"
 TARGET_PATH = WORK_DIR / "host.txt"
 TARGET_PATH_HIGH = WORK_DIR / "host-high.txt"
-HIGH_LEVEL_JAIL = "e2e-high-level"
+# Use a per-run jail name to avoid profile-binding conflicts from leftovers.
+HIGH_LEVEL_JAIL = f"e2e-high-level-{WORK_DIR.name}"
 RUN_COWJAIL = [
     "cargo",
     "run",
@@ -170,62 +171,62 @@ def run_high_level_smoke() -> bool:
         stderr=subprocess.DEVNULL,
     )
 
-    print("[high 2/6] creating named jail")
-    run([str(suid_bin), "add", "--name", HIGH_LEVEL_JAIL, "--profile", str(PROFILE_PATH)])
-
-    print("[high 3/6] writing via high-level run")
     try:
-        run_result = subprocess.run(
-            [
-                str(suid_bin),
-                "run",
-                "--name",
-                HIGH_LEVEL_JAIL,
-                "/bin/sh",
-                "-lc",
-                f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=20,
-        )
-    except subprocess.TimeoutExpired as exc:
-        print(exc.stdout or "", end="")
-        print(exc.stderr or "", end="", file=sys.stderr)
-        fail("high-level run timed out after 20s at [high 3/6]")
-    if run_result.returncode != 0:
-        merged = f"{run_result.stdout}\n{run_result.stderr}"
-        if "requires root euid" in merged:
-            print(
-                "[high] SKIP: setuid binary did not gain root euid "
-                "(likely nosuid mount on work dir)"
-            )
-            subprocess.run(
-                [str(suid_bin), "rm", "--name", HIGH_LEVEL_JAIL],
+        print("[high 2/6] creating named jail")
+        run([str(suid_bin), "add", "--name", HIGH_LEVEL_JAIL, "--profile", str(PROFILE_PATH)])
+
+        print("[high 3/6] writing via high-level run")
+        try:
+            run_result = subprocess.run(
+                [
+                    str(suid_bin),
+                    "run",
+                    "--name",
+                    HIGH_LEVEL_JAIL,
+                    "/bin/sh",
+                    "-lc",
+                    f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
+                ],
                 check=False,
                 text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
             )
-            return False
-        print(run_result.stdout, end="")
-        print(run_result.stderr, end="", file=sys.stderr)
-        fail(f"high-level run failed with exit code {run_result.returncode}")
+        except subprocess.TimeoutExpired as exc:
+            print(exc.stdout or "", end="")
+            print(exc.stderr or "", end="", file=sys.stderr)
+            fail("high-level run timed out after 20s at [high 3/6]")
+        if run_result.returncode != 0:
+            merged = f"{run_result.stdout}\n{run_result.stderr}"
+            if "requires root euid" in merged:
+                print(
+                    "[high] SKIP: setuid binary did not gain root euid "
+                    "(likely nosuid mount on work dir)"
+                )
+                return False
+            print(run_result.stdout, end="")
+            print(run_result.stderr, end="", file=sys.stderr)
+            fail(f"high-level run failed with exit code {run_result.returncode}")
 
-    print("[high 4/6] verifying host not changed before flush")
-    if TARGET_PATH_HIGH.read_text(encoding="utf-8") != "before-high\n":
-        fail("host content changed before high-level flush (unexpected)")
+        print("[high 4/6] verifying host not changed before flush")
+        if TARGET_PATH_HIGH.read_text(encoding="utf-8") != "before-high\n":
+            fail("host content changed before high-level flush (unexpected)")
 
-    print("[high 5/6] flushing named jail")
-    run([str(suid_bin), "flush", "--name", HIGH_LEVEL_JAIL])
+        print("[high 5/6] flushing named jail")
+        run([str(suid_bin), "flush", "--name", HIGH_LEVEL_JAIL])
 
-    print("[high 6/6] verifying host changed after flush")
-    if TARGET_PATH_HIGH.read_text(encoding="utf-8") != "after-high\n":
-        fail("host content was not updated by high-level flush")
-
-    run([str(suid_bin), "rm", "--name", HIGH_LEVEL_JAIL])
-    return True
+        print("[high 6/6] verifying host changed after flush")
+        if TARGET_PATH_HIGH.read_text(encoding="utf-8") != "after-high\n":
+            fail("host content was not updated by high-level flush")
+        return True
+    finally:
+        subprocess.run(
+            [str(suid_bin), "rm", "--name", HIGH_LEVEL_JAIL],
+            check=False,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def main() -> int:
