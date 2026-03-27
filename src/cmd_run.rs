@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
 use std::ffi::CString;
-use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -33,7 +32,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     )
     .context("failed to resolve run jail")?;
     let runtime = ns_runtime::ensure_runtime_for_exec(&resolved.paths)
-        .context("failed to ensure/open named runtime namespace handles")?;
+        .context("failed to ensure/open named runtime ipc namespace handle")?;
     vlog(
         run.verbose,
         format!(
@@ -50,10 +49,6 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         &resolved.paths.profile_path,
         &resolved.paths.record_path,
         run.verbose,
-        runtime
-            .mntns_file
-            .try_clone()
-            .context("failed to clone mntns fd")?,
         runtime
             .ipcns_file
             .try_clone()
@@ -72,7 +67,6 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         &run,
         &runtime.ensured.paths.mount_dir,
         &cwd,
-        runtime.mntns_file,
         runtime.ipcns_file,
     )
     .with_context(|| format!("failed to execute jailed command {:?}", run.program));
@@ -85,27 +79,19 @@ fn run_child_in_chroot(
     run: &RunCommand,
     mountpoint: &Path,
     old_cwd: &Path,
-    mntns_file: fs::File,
     ipcns_file: fs::File,
 ) -> Result<std::process::ExitStatus> {
     let mount_c = CString::new(mountpoint.as_os_str().as_encoded_bytes())
         .context("mount path contains interior NUL byte")?;
     let cwd_c = CString::new(old_cwd.as_os_str().as_encoded_bytes())
         .context("cwd contains interior NUL byte")?;
-    let mntns_fd = mntns_file.as_raw_fd();
+    use std::os::fd::AsRawFd;
     let ipcns_fd = ipcns_file.as_raw_fd();
 
     let mut cmd = ProcessCommand::new(&run.program);
     cmd.args(&run.args);
     unsafe {
         cmd.pre_exec(move || {
-            if libc::setns(mntns_fd, libc::CLONE_NEWNS) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("setns(CLONE_NEWNS) failed: {err}"),
-                ));
-            }
             if libc::setns(ipcns_fd, libc::CLONE_NEWIPC) != 0 {
                 let err = std::io::Error::last_os_error();
                 return Err(std::io::Error::new(
@@ -148,7 +134,6 @@ fn ensure_fuse_server(
     profile_path: &Path,
     record_path: &Path,
     verbose: bool,
-    mntns_file: fs::File,
     ipcns_file: fs::File,
 ) -> Result<()> {
     let _lock = ns_runtime::open_lock(jail_paths)?;
@@ -174,7 +159,7 @@ fn ensure_fuse_server(
         ),
     );
     let exe = std::env::current_exe().context("failed to locate current executable")?;
-    let mntns_fd = mntns_file.as_raw_fd();
+    use std::os::fd::AsRawFd;
     let ipcns_fd = ipcns_file.as_raw_fd();
     let mut cmd = ProcessCommand::new(exe);
     cmd.arg("_fuse")
@@ -191,13 +176,6 @@ fn ensure_fuse_server(
     }
     unsafe {
         cmd.pre_exec(move || {
-            if libc::setns(mntns_fd, libc::CLONE_NEWNS) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("setns(CLONE_NEWNS) for _fuse failed: {err}"),
-                ));
-            }
             if libc::setns(ipcns_fd, libc::CLONE_NEWIPC) != 0 {
                 let err = std::io::Error::last_os_error();
                 return Err(std::io::Error::new(

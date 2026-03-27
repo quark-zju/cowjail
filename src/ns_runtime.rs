@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use fs_err as fs;
 use std::ffi::CString;
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -26,7 +25,6 @@ pub(crate) struct NsRuntimePaths {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeStatus {
     pub(crate) runtime_dir_exists: bool,
-    pub(crate) mntns_exists: bool,
     pub(crate) ipcns_exists: bool,
     pub(crate) lock_exists: bool,
 }
@@ -56,7 +54,6 @@ pub(crate) struct EnsuredRuntime {
 
 pub(crate) struct ExecRuntime {
     pub(crate) ensured: EnsuredRuntime,
-    pub(crate) mntns_file: fs::File,
     pub(crate) ipcns_file: fs::File,
 }
 
@@ -130,22 +127,16 @@ pub(crate) fn inspect(jail: &JailPaths) -> Result<RuntimeStatus> {
     let paths = paths_for(jail);
     Ok(RuntimeStatus {
         runtime_dir_exists: paths.runtime_dir.exists(),
-        mntns_exists: exists_file(&paths.mntns_path)?,
         ipcns_exists: exists_file(&paths.ipcns_path)?,
         lock_exists: exists_file(&paths.lock_path)?,
     })
 }
 
 pub(crate) fn classify(status: &RuntimeStatus) -> RuntimeState {
-    match (
-        status.runtime_dir_exists,
-        status.lock_exists,
-        status.mntns_exists,
-        status.ipcns_exists,
-    ) {
-        (false, false, false, false) => RuntimeState::Missing,
-        (true, true, false, false) => RuntimeState::SkeletonOnly,
-        (_, _, true, true) => RuntimeState::Ready,
+    match (status.runtime_dir_exists, status.lock_exists, status.ipcns_exists) {
+        (false, false, false) => RuntimeState::Missing,
+        (_, _, true) => RuntimeState::Ready,
+        (true, true, false) => RuntimeState::SkeletonOnly,
         _ => RuntimeState::PartialHandles,
     }
 }
@@ -177,6 +168,9 @@ where
     match state_before {
         RuntimeState::Ready => {}
         RuntimeState::Missing | RuntimeState::SkeletonOnly => {
+            // Legacy versions persisted mntns handles. Remove stale files before rebuilding
+            // runtime state so the new ipc-only runtime layout stays clean.
+            remove_if_present(&paths.mntns_path)?;
             build_handles(&paths)?;
         }
         RuntimeState::PartialHandles => {
@@ -198,7 +192,6 @@ where
 #[cfg(test)]
 pub(crate) fn ensure_runtime_placeholders(jail: &JailPaths) -> Result<EnsuredRuntime> {
     ensure_runtime_with(jail, |paths| {
-        write_placeholder(&paths.mntns_path, b"mntns-placeholder")?;
         write_placeholder(&paths.ipcns_path, b"ipcns-placeholder")?;
         Ok(())
     })
@@ -208,30 +201,20 @@ pub(crate) fn ensure_runtime_namespaces(jail: &JailPaths) -> Result<EnsuredRunti
     ensure_runtime_with(jail, bootstrap_namespace_handles)
 }
 
-pub(crate) fn open_namespace_handles(paths: &NsRuntimePaths) -> Result<(fs::File, fs::File)> {
-    let mntns_file = fs::File::open(&paths.mntns_path).with_context(|| {
-        format!(
-            "failed to open mount namespace handle {}",
-            paths.mntns_path.display()
-        )
-    })?;
+pub(crate) fn open_namespace_handle(paths: &NsRuntimePaths) -> Result<fs::File> {
     let ipcns_file = fs::File::open(&paths.ipcns_path).with_context(|| {
         format!(
             "failed to open ipc namespace handle {}",
             paths.ipcns_path.display()
         )
     })?;
-    Ok((mntns_file, ipcns_file))
+    Ok(ipcns_file)
 }
 
 pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
     let ensured = ensure_runtime_namespaces(jail)?;
-    let (mntns_file, ipcns_file) = open_namespace_handles(&ensured.paths)?;
-    Ok(ExecRuntime {
-        ensured,
-        mntns_file,
-        ipcns_file,
-    })
+    let ipcns_file = open_namespace_handle(&ensured.paths)?;
+    Ok(ExecRuntime { ensured, ipcns_file })
 }
 
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
@@ -361,21 +344,6 @@ fn reset_to_skeleton(paths: &NsRuntimePaths) -> Result<()> {
 }
 
 fn remove_if_present(path: &Path) -> Result<()> {
-    let target_c = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("invalid path: {}", path.display()))?;
-    let rc = unsafe { libc::umount2(target_c.as_ptr(), libc::MNT_DETACH) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if !matches!(
-            err.raw_os_error(),
-            Some(libc::EINVAL) | Some(libc::ENOENT) | Some(libc::EPERM)
-        ) {
-            return Err(anyhow::anyhow!(
-                "failed to detach mount at {}: {err}",
-                path.display()
-            ));
-        }
-    }
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -409,28 +377,6 @@ fn bind_namespace_handle(source: &str, target: &Path) -> Result<()> {
             std::ptr::null(),
         )
     };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EINVAL) && source.starts_with("/proc/self/ns/") {
-            let ns_fd = fs::File::open(source)
-                .with_context(|| format!("failed to open namespace source {}", source))?;
-            let fd_path = format!("/proc/self/fd/{}", ns_fd.as_raw_fd());
-            let fd_path_c = CString::new(fd_path.as_str())
-                .with_context(|| format!("invalid fd source path: {fd_path}"))?;
-            let retry_rc = unsafe {
-                libc::mount(
-                    fd_path_c.as_ptr(),
-                    target_c.as_ptr(),
-                    b"none\0".as_ptr().cast(),
-                    libc::MS_BIND as libc::c_ulong,
-                    std::ptr::null(),
-                )
-            };
-            if retry_rc == 0 {
-                return Ok(());
-            }
-        }
-    }
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         let src_meta = metadata_summary(Path::new(source));
@@ -511,32 +457,10 @@ fn bootstrap_namespace_handles(paths: &NsRuntimePaths) -> Result<()> {
     }
 
     if pid == 0 {
-        let rc = unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWIPC) };
+        let rc = unsafe { libc::unshare(libc::CLONE_NEWIPC) };
         if rc != 0 {
             eprintln!("unshare failed: {}", std::io::Error::last_os_error());
             unsafe { libc::_exit(101) };
-        }
-
-        let rc = unsafe {
-            libc::mount(
-                std::ptr::null(),
-                b"/\0".as_ptr().cast(),
-                std::ptr::null(),
-                (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
-                std::ptr::null(),
-            )
-        };
-        if rc != 0 {
-            eprintln!(
-                "mount propagation setup failed: {}",
-                std::io::Error::last_os_error()
-            );
-            unsafe { libc::_exit(102) };
-        }
-
-        if let Err(err) = bind_namespace_handle("/proc/self/ns/mnt", &paths.mntns_path) {
-            eprintln!("{err:#}");
-            unsafe { libc::_exit(103) };
         }
         if let Err(err) = bind_namespace_handle("/proc/self/ns/ipc", &paths.ipcns_path) {
             eprintln!("{err:#}");
