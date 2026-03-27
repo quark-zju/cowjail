@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import atexit
 import json
 import os
@@ -68,6 +69,24 @@ def cleanup() -> None:
 def fail(message: str) -> "NoReturn":
     print(message, file=sys.stderr)
     raise SystemExit(1)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="cowjail end-to-end smoke test")
+    parser.add_argument(
+        "--strace",
+        action="store_true",
+        help="wrap high-level run step with strace",
+    )
+    parser.add_argument(
+        "--strace-log-prefix",
+        default="",
+        help=(
+            "strace output prefix path (default: /tmp/cowjail-e2e-high-run-<pid>); "
+            "strace -ff appends .<pid>"
+        ),
+    )
+    return parser.parse_args()
 
 
 def resolve_target_directory() -> Path:
@@ -169,7 +188,7 @@ def prepare_setuid_binary() -> Path | None:
     return built
 
 
-def run_high_level_smoke() -> bool:
+def run_high_level_smoke(strace_prefix: list[str] | None = None) -> bool:
     suid_bin = prepare_setuid_binary()
     if suid_bin is None:
         print("[high] SKIP: failed to setup setuid binary via _suid")
@@ -189,17 +208,20 @@ def run_high_level_smoke() -> bool:
         run([str(suid_bin), "add", "--name", HIGH_LEVEL_JAIL, "--profile", str(PROFILE_PATH)])
 
         print("[high 3/6] writing via high-level run")
+        run_cmd = [
+            str(suid_bin),
+            "run",
+            "--name",
+            HIGH_LEVEL_JAIL,
+            "/bin/sh",
+            "-lc",
+            f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
+        ]
+        if strace_prefix:
+            run_cmd = [*strace_prefix, *run_cmd]
         try:
             run_result = subprocess.run(
-                [
-                    str(suid_bin),
-                    "run",
-                    "--name",
-                    HIGH_LEVEL_JAIL,
-                    "/bin/sh",
-                    "-lc",
-                    f"printf 'after-high\\n' > '{TARGET_PATH_HIGH}'",
-                ],
+                run_cmd,
                 check=False,
                 text=True,
                 capture_output=True,
@@ -243,6 +265,7 @@ def run_high_level_smoke() -> bool:
 
 
 def main() -> int:
+    args = parse_args()
     atexit.register(cleanup)
     prepare_inputs()
 
@@ -263,7 +286,17 @@ def main() -> int:
     run_low_level_smoke()
 
     print("[3/3] running high-level smoke")
-    high_level_ran = run_high_level_smoke()
+    strace_prefix: list[str] | None = None
+    if args.strace:
+        log_prefix = (
+            args.strace_log_prefix
+            if args.strace_log_prefix
+            else f"/tmp/cowjail-e2e-high-run-{os.getpid()}"
+        )
+        strace_prefix = ["strace", "-ff", "-o", log_prefix]
+        print(f"[high] strace enabled, logs: {log_prefix}.*")
+
+    high_level_ran = run_high_level_smoke(strace_prefix)
     if high_level_ran:
         print("smoke test passed (low-level + high-level)")
     else:
