@@ -153,6 +153,22 @@ fn ensure_fuse_server(
     );
     let exe = std::env::current_exe().context("failed to locate current executable")?;
     let mut cmd = ProcessCommand::new(exe);
+    let fuse_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&runtime_paths.fuse_log_path)
+        .with_context(|| {
+            format!(
+                "failed to open fuse log file {}",
+                runtime_paths.fuse_log_path.display()
+            )
+        })?;
+    let fuse_log_err = fuse_log.try_clone().with_context(|| {
+        format!(
+            "failed to clone fuse log handle {}",
+            runtime_paths.fuse_log_path.display()
+        )
+    })?;
     cmd.arg("_fuse")
         .arg("--profile")
         .arg(profile_path)
@@ -162,11 +178,11 @@ fn ensure_fuse_server(
         .arg(&runtime_paths.mount_dir)
         .arg("--pid-path")
         .arg(&runtime_paths.fuse_pid_path)
-        // Detach _fuse from caller stdio; otherwise a failing `cowjail run` can
-        // keep capture_output() callers blocked because _fuse still holds pipes.
+        // Keep _fuse detached from caller stdio while preserving diagnostics in
+        // per-runtime logs.
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(fuse_log))
+        .stderr(Stdio::from(fuse_log_err));
     if verbose {
         cmd.arg("-v");
     }

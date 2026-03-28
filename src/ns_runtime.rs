@@ -15,6 +15,7 @@ pub(crate) const LOCK_FILE_NAME: &str = "lock";
 pub(crate) const ROOT_LOCK_FILE_NAME: &str = ".lock";
 pub(crate) const MOUNT_DIR_NAME: &str = "mount";
 pub(crate) const FUSE_PID_NAME: &str = "fuse.pid";
+pub(crate) const FUSE_LOG_NAME: &str = "fuse.log";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NsRuntimePaths {
@@ -24,6 +25,7 @@ pub(crate) struct NsRuntimePaths {
     pub(crate) lock_path: PathBuf,
     pub(crate) mount_dir: PathBuf,
     pub(crate) fuse_pid_path: PathBuf,
+    pub(crate) fuse_log_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,7 @@ pub(crate) fn paths_for(jail: &JailPaths) -> NsRuntimePaths {
         lock_path: jail.runtime_dir.join(LOCK_FILE_NAME),
         mount_dir: jail.runtime_dir.join(MOUNT_DIR_NAME),
         fuse_pid_path: jail.runtime_dir.join(FUSE_PID_NAME),
+        fuse_log_path: jail.runtime_dir.join(FUSE_LOG_NAME),
     }
 }
 
@@ -314,6 +317,7 @@ fn remove_known_runtime_artifacts(paths: &NsRuntimePaths) -> Result<()> {
     }
 
     remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.fuse_pid_path)?;
+    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.fuse_log_path)?;
     remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.lock_path)?;
     remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.mntns_path)?;
     remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.ipcns_path)?;
@@ -353,7 +357,7 @@ fn list_unknown_runtime_entries(paths: &NsRuntimePaths) -> Result<Vec<String>> {
         };
         if !matches!(
             name,
-            LOCK_FILE_NAME | MOUNT_DIR_NAME | FUSE_PID_NAME | "mntns" | "ipcns"
+            LOCK_FILE_NAME | MOUNT_DIR_NAME | FUSE_PID_NAME | FUSE_LOG_NAME | "mntns" | "ipcns"
         ) {
             unknown.push(name.to_string());
         }

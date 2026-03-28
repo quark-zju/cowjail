@@ -160,6 +160,10 @@ fn ns_runtime_paths_track_runtime_layout() {
         runtime.fuse_pid_path,
         Path::new("/run/cowjail-test/demo/fuse.pid")
     );
+    assert_eq!(
+        runtime.fuse_log_path,
+        Path::new("/run/cowjail-test/demo/fuse.log")
+    );
 }
 
 #[test]

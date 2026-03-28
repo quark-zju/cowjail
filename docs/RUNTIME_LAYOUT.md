@@ -32,6 +32,7 @@ Unknown files in state/runtime directories are treated conservatively during `rm
 - `lock`: runtime lock file for synchronization
 - `mount/`: FUSE mountpoint
 - `fuse.pid`: PID of background `_fuse` server
+- `fuse.log`: background `_fuse` stdout/stderr log
 - `ipcns` / `mntns`: reserved runtime artifacts; not used for current `run` IPC flow
 
 ## Lifecycle by Command

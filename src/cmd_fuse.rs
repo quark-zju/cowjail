@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use fs_err as fs;
+use std::time::Duration;
 
 use crate::cli::LowLevelFuseCommand;
 use crate::cowfs;
@@ -105,6 +106,14 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     crate::vlog!("_fuse: running as uid={} gid={}", uid, gid);
 
     loop {
-        std::thread::park();
+        std::thread::sleep(Duration::from_millis(400));
+        if !crate::ns_runtime::process_has_mount(pid, &cmd.mountpoint)? {
+            crate::vlog!(
+                "_fuse: mount {} is gone; exiting",
+                cmd.mountpoint.display()
+            );
+            break;
+        }
     }
+    Ok(())
 }

@@ -25,6 +25,11 @@ Run with verbose logging to inspect the step that failed:
 cowjail run -v --name <name> -- <command>
 ```
 
+If `_fuse` starts but fails later, inspect the runtime log:
+
+- `${XDG_RUNTIME_DIR}/cowjail/<name>/fuse.log`
+- fallback: `/run/user/<uid>/cowjail/<name>/fuse.log`
+
 ## `_suid` and setuid behavior
 
 ### `_suid` appears successful but privileged operations still fail
