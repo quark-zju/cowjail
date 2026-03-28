@@ -179,6 +179,13 @@ fn parse_lines(profile_src: &str, cwd: &Path) -> Result<Vec<ParsedRuleLine>> {
 fn normalize_pattern(token: &str, cwd: &Path) -> Result<String> {
     let normalized = if token == "." {
         cwd.to_path_buf()
+    } else if token == "~" || token.starts_with("~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is not set for '~' expansion"))?;
+        let suffix = token.strip_prefix("~/").unwrap_or("");
+        normalize_abs(&home.join(suffix))
+            .with_context(|| format!("invalid home-expanded pattern: {token}"))?
     } else {
         let path = Path::new(token);
         if path.is_absolute() {
@@ -330,6 +337,22 @@ mod tests {
     }
 
     #[test]
+    fn tilde_expands_to_home() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let profile = parse(
+            r#"
+            ~/tmp rw
+            "#,
+        );
+        assert_eq!(
+            profile.first_match_action(&home.join("tmp/file")),
+            Some(RuleAction::Passthrough)
+        );
+    }
+
+    #[test]
     fn parent_dir_is_implicitly_visible() {
         let profile = parse(
             r#"
@@ -407,6 +430,16 @@ mod tests {
         )
         .expect("normalize source");
         assert_eq!(normalized, "/etc ro\n/work rw\n");
+    }
+
+    #[test]
+    fn normalize_source_expands_tilde() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let normalized = normalize_source("~/x ro\n", Path::new("/work")).expect("normalize");
+        let expected = format!("{}/x ro\n", home.display());
+        assert_eq!(normalized, expected);
     }
 
     #[test]
