@@ -15,9 +15,10 @@ use crate::run_with_log;
 pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     privileges::require_root_euid("cowjail run")?;
 
-    let cwd = run_with_log(jail::current_pwd, || {
-        "resolve current working directory".to_string()
-    })?;
+    let cwd = run_with_log(
+        jail::current_pwd,
+        || "resolve current working directory".to_string(),
+    )?;
     let resolved = run_with_log(
         || {
             jail::resolve(
@@ -48,21 +49,12 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     )?;
 
     crate::vlog!(
-        "run: preparing child pivot_root to {} (root={}, old-root={}) then chdir to {}",
+        "run: preparing child chroot to {} then chdir to {}",
         runtime.ensured.paths.mount_dir.display(),
-        runtime.ensured.paths.mount_root_dir.display(),
-        runtime.ensured.paths.mount_old_root_dir.display(),
         cwd.display()
     );
     let status = run_with_log(
-        || {
-            run_child_in_chroot(
-                &run,
-                &runtime.ensured.paths.mount_dir,
-                &runtime.ensured.paths.mount_old_root_dir,
-                &cwd,
-            )
-        },
+        || run_child_in_chroot(&run, &runtime.ensured.paths.mount_dir, &cwd),
         || format!("execute jailed command {:?}", run.program),
     );
 
@@ -72,58 +64,23 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
 
 fn run_child_in_chroot(
     run: &RunCommand,
-    pivot_root: &Path,
-    put_old: &Path,
+    mountpoint: &Path,
     old_cwd: &Path,
 ) -> Result<std::process::ExitStatus> {
-    let pivot_root_c = CString::new(pivot_root.as_os_str().as_encoded_bytes())
-        .context("pivot root path contains interior NUL byte")?;
-    let put_old_c = CString::new(put_old.as_os_str().as_encoded_bytes())
-        .context("put_old path contains interior NUL byte")?;
+    let mount_c = CString::new(mountpoint.as_os_str().as_encoded_bytes())
+        .context("mount path contains interior NUL byte")?;
     let cwd_c = CString::new(old_cwd.as_os_str().as_encoded_bytes())
         .context("cwd contains interior NUL byte")?;
-    let slash = CString::new("/").expect("literal '/' cannot contain NUL");
-    let old_root_in_new =
-        CString::new("/old-root").expect("literal '/old-root' cannot contain NUL");
-    let new_root_in_new = CString::new("/root").expect("literal '/root' cannot contain NUL");
 
     let mut cmd = ProcessCommand::new(&run.program);
     cmd.args(&run.args);
     unsafe {
         cmd.pre_exec(move || {
-            if libc::unshare(libc::CLONE_NEWIPC | libc::CLONE_NEWNS) != 0 {
+            if libc::unshare(libc::CLONE_NEWIPC) != 0 {
                 let err = std::io::Error::last_os_error();
                 return Err(std::io::Error::new(
                     err.kind(),
-                    format!("unshare(CLONE_NEWIPC|CLONE_NEWNS) failed: {err}"),
-                ));
-            }
-            if libc::mount(
-                std::ptr::null(),
-                slash.as_ptr(),
-                std::ptr::null(),
-                (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
-                std::ptr::null(),
-            ) != 0
-            {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("mount(MS_PRIVATE) failed: {err}"),
-                ));
-            }
-            if libc::mount(
-                pivot_root_c.as_ptr(),
-                pivot_root_c.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND as libc::c_ulong,
-                std::ptr::null(),
-            ) != 0
-            {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("bind-mount pivot root failed: {err}"),
+                    format!("unshare(CLONE_NEWIPC) failed: {err}"),
                 ));
             }
             // FUSE mount access is keyed by fsuid/fsgid, not effective uid.
@@ -131,44 +88,11 @@ fn run_child_in_chroot(
             // FUSE permission checks do not reject the mount root with EACCES.
             libc::setfsgid(libc::getgid());
             libc::setfsuid(libc::getuid());
-            if libc::syscall(
-                libc::SYS_pivot_root as libc::c_long,
-                pivot_root_c.as_ptr(),
-                put_old_c.as_ptr(),
-            ) != 0
-            {
+            if libc::chroot(mount_c.as_ptr()) != 0 {
                 let err = std::io::Error::last_os_error();
                 return Err(std::io::Error::new(
                     err.kind(),
-                    format!("pivot_root failed: {err}"),
-                ));
-            }
-            if libc::chdir(slash.as_ptr()) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("chdir('/') after pivot_root failed: {err}"),
-                ));
-            }
-            if libc::umount2(old_root_in_new.as_ptr(), libc::MNT_DETACH) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("umount2('/old-root', MNT_DETACH) failed: {err}"),
-                ));
-            }
-            if libc::rmdir(old_root_in_new.as_ptr()) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("rmdir('/old-root') failed: {err}"),
-                ));
-            }
-            if libc::chroot(new_root_in_new.as_ptr()) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("chroot('/root') failed: {err}"),
+                    format!("chroot failed: {err}"),
                 ));
             }
             if libc::chdir(cwd_c.as_ptr()) != 0 {
@@ -176,7 +100,8 @@ fn run_child_in_chroot(
                 let not_found =
                     matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR | libc::EACCES));
                 if not_found {
-                    if libc::chdir(slash.as_ptr()) != 0 {
+                    let root = CString::new("/").expect("literal '/' cannot contain NUL");
+                    if libc::chdir(root.as_ptr()) != 0 {
                         let fallback_err = std::io::Error::last_os_error();
                         return Err(std::io::Error::new(
                             fallback_err.kind(),
@@ -213,19 +138,19 @@ fn ensure_fuse_server(
 ) -> Result<u32> {
     let _lock = ns_runtime::open_lock(jail_paths)?;
     if let Some(pid) = ns_runtime::read_fuse_pid(runtime_paths)?
-        && ns_runtime::process_has_mount(pid, &runtime_paths.mount_root_dir)?
+        && ns_runtime::process_has_mount(pid, &runtime_paths.mount_dir)?
     {
         crate::vlog!(
             "run: reusing fuse server pid={} mount={}",
             pid,
-            runtime_paths.mount_root_dir.display()
+            runtime_paths.mount_dir.display()
         );
         return Ok(pid);
     }
 
     crate::vlog!(
         "run: starting fuse server for mount {}",
-        runtime_paths.mount_root_dir.display()
+        runtime_paths.mount_dir.display()
     );
     let exe = std::env::current_exe().context("failed to locate current executable")?;
     let mut cmd = ProcessCommand::new(exe);
@@ -235,7 +160,7 @@ fn ensure_fuse_server(
         .arg("--record")
         .arg(record_path)
         .arg("--mountpoint")
-        .arg(&runtime_paths.mount_root_dir)
+        .arg(&runtime_paths.mount_dir)
         .arg("--pid-path")
         .arg(&runtime_paths.fuse_pid_path)
         // Detach _fuse from caller stdio; otherwise a failing `cowjail run` can
@@ -251,16 +176,13 @@ fn ensure_fuse_server(
         .spawn()
         .context("failed to spawn _fuse server process")?;
     let pid = child.id();
-    let ok = ns_runtime::wait_for_process_mount(
-        pid,
-        &runtime_paths.mount_root_dir,
-        Duration::from_secs(5),
-    )?;
+    let ok =
+        ns_runtime::wait_for_process_mount(pid, &runtime_paths.mount_dir, Duration::from_secs(5))?;
     if !ok {
         bail!(
             "fuse server pid={} did not mount {} within timeout",
             pid,
-            runtime_paths.mount_root_dir.display()
+            runtime_paths.mount_dir.display()
         );
     }
     Ok(pid)
