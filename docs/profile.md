@@ -17,7 +17,11 @@ Profile is line-based and evaluated with first-match-wins.
 - Rule format: `pattern action`
 - Comment: lines starting with `#`
 - Match order: top to bottom, first matched rule is used
-- Relative dot rule: `.` resolves to the current working directory at profile load time
+- Relative rules:
+  - `.` resolves to the current working directory at profile load time
+  - relative paths like `foo` and `./foo` resolve under the current working directory at profile load time
+- Home rule:
+  - `~` and `~/...` resolve under `$HOME`
 
 Example:
 
