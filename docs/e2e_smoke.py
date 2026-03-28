@@ -120,7 +120,7 @@ def prepare_inputs() -> None:
     # so high-level `run ... /bin/sh -lc ...` can resolve the shell and shared libs.
     PROFILE_PATH.write_text(
         (
-            f"{WORK_DIR} rw\n"
+            f"{WORK_DIR} cow\n"
             "/tmp ro\n"
             "/bin ro\n"
             "/usr ro\n"

@@ -735,7 +735,7 @@ fn load_profile_uses_builtin_default_profile() {
     );
     assert_eq!(
         loaded.profile.first_match_action(Path::new("/tmp")),
-        Some(profile::RuleAction::Passthrough)
+        Some(profile::RuleAction::Cow)
     );
 }
 

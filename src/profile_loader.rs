@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::{cli, jail, profile, record};
 
 const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
-/tmp rw
+/tmp cow
 /bin ro
 /sbin ro
 /usr ro
@@ -20,7 +20,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 /dev/random ro
 /proc ro
 /sys ro
-. rw
+. cow
 ";
 
 #[derive(Debug)]
