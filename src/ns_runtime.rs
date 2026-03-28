@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fs_err as fs;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -205,32 +205,7 @@ pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
     let paths = paths_for(jail);
     unmount_runtime_mount_dir(&paths)
         .with_context(|| format!("failed to unmount runtime mount {}", paths.mount_dir.display()))?;
-    match fs::remove_dir_all(&paths.runtime_dir) {
-        Ok(()) => Ok(()),
-        Err(err) if err.raw_os_error() == Some(libc::ENOTCONN) => {
-            // Stale FUSE mountpoints can surface as ENOTCONN on directory traversal.
-            // Retry one forced unmount pass, then remove again.
-            unmount_runtime_mount_dir(&paths).with_context(|| {
-                format!(
-                    "failed to recover stale mountpoint {} after ENOTCONN",
-                    paths.mount_dir.display()
-                )
-            })?;
-            fs::remove_dir_all(&paths.runtime_dir).with_context(|| {
-                format!(
-                    "failed to remove jail runtime directory {} after ENOTCONN recovery",
-                    paths.runtime_dir.display()
-                )
-            })
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| {
-            format!(
-                "failed to remove jail runtime directory {}",
-                paths.runtime_dir.display()
-            )
-        }),
-    }
+    remove_known_runtime_artifacts(&paths)
 }
 
 fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
@@ -275,6 +250,114 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
         output.status,
         stderr.trim()
     ))
+}
+
+fn remove_known_runtime_artifacts(paths: &NsRuntimePaths) -> Result<()> {
+    if !paths.runtime_dir.exists() {
+        return Ok(());
+    }
+
+    // If a stale FUSE mount survived, ENOTCONN can appear while traversing.
+    // Retry unmount once before declaring failure.
+    let unknown = match list_unknown_runtime_entries(paths) {
+        Ok(v) => v,
+        Err(err) if is_enotconn(&err) => {
+            unmount_runtime_mount_dir(paths).with_context(|| {
+                format!(
+                    "failed to recover stale mountpoint {} after ENOTCONN",
+                    paths.mount_dir.display()
+                )
+            })?;
+            list_unknown_runtime_entries(paths).with_context(|| {
+                format!(
+                    "failed to inspect runtime directory {} after ENOTCONN recovery",
+                    paths.runtime_dir.display()
+                )
+            })?
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to inspect runtime directory {}",
+                    paths.runtime_dir.display()
+                )
+            });
+        }
+    };
+
+    if !unknown.is_empty() {
+        bail!(
+            "refusing to remove runtime directory {}: found unknown entries: {}",
+            paths.runtime_dir.display(),
+            unknown.join(", ")
+        );
+    }
+
+    remove_file_if_exists(&paths.fuse_pid_path)?;
+    remove_file_if_exists(&paths.lock_path)?;
+    remove_file_if_exists(&paths.mntns_path)?;
+    remove_file_if_exists(&paths.ipcns_path)?;
+
+    match fs::remove_dir(&paths.mount_dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to remove runtime mount dir {}", paths.mount_dir.display())
+            });
+        }
+    }
+
+    match fs::remove_dir(&paths.runtime_dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to remove jail runtime directory {}",
+                paths.runtime_dir.display()
+            )
+        }),
+    }
+}
+
+fn list_unknown_runtime_entries(paths: &NsRuntimePaths) -> Result<Vec<String>> {
+    let mut unknown = Vec::new();
+    for entry in fs::read_dir(&paths.runtime_dir).with_context(|| {
+        format!(
+            "failed to read runtime directory {}",
+            paths.runtime_dir.display()
+        )
+    })? {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read entry in runtime directory {}",
+                paths.runtime_dir.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            unknown.push(format!("{:?}", name));
+            continue;
+        };
+        if !matches!(name, LOCK_FILE_NAME | MOUNT_DIR_NAME | FUSE_PID_NAME | "mntns" | "ipcns") {
+            unknown.push(name.to_string());
+        }
+    }
+    unknown.sort();
+    Ok(unknown)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove file {}", path.display())),
+    }
+}
+
+fn is_enotconn(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|ioe| ioe.raw_os_error() == Some(libc::ENOTCONN))
 }
 
 pub(crate) fn read_fuse_pid(paths: &NsRuntimePaths) -> Result<Option<u32>> {
