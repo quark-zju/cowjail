@@ -120,8 +120,9 @@ These are intentional design choices, not accidental omissions.
 - Known filesystem compatibility gaps:
   - hardlinks are not supported by the current FUSE layer.
   - mmap-heavy workloads may degrade or fail depending on access pattern.
-  - metadata fidelity is intentionally limited compared with a full kernel filesystem stack (`setattr` currently supports truncate, regular-file executable-bit mode updates, and in-memory atime updates only).
+  - metadata fidelity is intentionally limited compared with a full kernel filesystem stack (`setattr` supports `rw` passthrough truncate/chmod/atime/mtime, while `cow` mode only supports truncate + regular-file executable-bit updates and in-memory atime overrides).
   - host-visible atime changes are not a strict replay signal; read-side effects in FUSE/host path traversal can update atime even without `flush`.
+  - `/proc` is not fully virtualized. Current behavior includes a targeted compatibility shim: `/proc/self` `readlink` is rewritten to the requesting PID, and `/proc/thread-self` is hard-blocked (`ENOENT`).
 
 ## Lock Files
 
