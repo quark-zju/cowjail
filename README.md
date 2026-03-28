@@ -89,7 +89,7 @@ cowjail rm --name agent                              # remove jail
 ## More Docs
 
 - Technical overview: [`docs/TECHNICAL_OVERVIEW.md`](docs/TECHNICAL_OVERVIEW.md)
-- Implementation plan and progress: [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)
+- Troubleshooting: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 - E2E smoke test: [`docs/e2e_smoke.py`](docs/e2e_smoke.py)
 
 ## License
