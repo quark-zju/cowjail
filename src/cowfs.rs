@@ -377,6 +377,39 @@ impl CowFs {
         }
     }
 
+    fn ensure_path_absent(&self, path: &Path) -> Result<(), i32> {
+        match self.snapshot_node(path) {
+            Ok(Some(_)) => Err(EEXIST),
+            Ok(None) => Ok(()),
+            Err(code) => Err(code),
+        }
+    }
+
+    fn host_attr(&mut self, path: &Path) -> Result<FileAttr, i32> {
+        let meta = fs::symlink_metadata(path).map_err(|err| io_errno(&err))?;
+        Ok(self.attr_for_path(path, &meta))
+    }
+
+    fn record_write_file(&self, path: PathBuf, state: FileState) -> Result<(), i32> {
+        self.append_record(&Operation::WriteFile { path, state })
+    }
+
+    fn set_overlay_regular_and_record(
+        &mut self,
+        path: &Path,
+        data: Vec<u8>,
+        executable: bool,
+    ) -> Result<(), i32> {
+        self.overlay.insert(
+            path.to_path_buf(),
+            OverlayNode::Regular {
+                data: data.clone(),
+                executable,
+            },
+        );
+        self.record_write_file(path.to_path_buf(), regular_state(data, executable))
+    }
+
     fn apply_rename_paths(&mut self, from: &Path, to: &Path) -> Result<(), i32> {
         if from == to {
             return Ok(());
@@ -753,16 +786,9 @@ impl Filesystem for CowFs {
                 reply.error(EACCES);
             }
             WriteMode::Cow => {
-                match self.snapshot_node(&path) {
-                    Ok(Some(_)) => {
-                        reply.error(EEXIST);
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(code) => {
-                        reply.error(code);
-                        return;
-                    }
+                if let Err(code) = self.ensure_path_absent(&path) {
+                    reply.error(code);
+                    return;
                 }
                 let node = OverlayNode::Regular {
                     data: Vec::new(),
@@ -770,10 +796,7 @@ impl Filesystem for CowFs {
                 };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
-                    .append_record(&Operation::WriteFile {
-                        path: path.clone(),
-                        state: FileState::Regular(Vec::new()),
-                    })
+                    .record_write_file(path.clone(), FileState::Regular(Vec::new()))
                     .is_err()
                 {
                     reply.error(EIO);
@@ -794,14 +817,13 @@ impl Filesystem for CowFs {
                         return;
                     }
                 }
-                let meta = match fs::symlink_metadata(&path) {
-                    Ok(meta) => meta,
-                    Err(err) => {
-                        reply.error(io_errno(&err));
+                let attr = match self.host_attr(&path) {
+                    Ok(attr) => attr,
+                    Err(code) => {
+                        reply.error(code);
                         return;
                     }
                 };
-                let attr = self.attr_for_path(&path, &meta);
                 reply.created(&TTL, &attr, 0, 0, 0);
             }
         }
@@ -850,22 +872,8 @@ impl Filesystem for CowFs {
                 }
                 content[off..off + data.len()].copy_from_slice(data);
 
-                self.overlay.insert(
-                    path.clone(),
-                    OverlayNode::Regular {
-                        data: content.clone(),
-                        executable,
-                    },
-                );
                 if self
-                    .append_record(&Operation::WriteFile {
-                        path,
-                        state: if executable {
-                            FileState::Executable(content)
-                        } else {
-                            FileState::Regular(content)
-                        },
-                    })
+                    .set_overlay_regular_and_record(&path, content, executable)
                     .is_err()
                 {
                     reply.error(EIO);
@@ -915,13 +923,7 @@ impl Filesystem for CowFs {
             }
             WriteMode::Cow => {
                 self.overlay.insert(path.clone(), OverlayNode::Deleted);
-                if self
-                    .append_record(&Operation::WriteFile {
-                        path,
-                        state: FileState::Deleted,
-                    })
-                    .is_err()
-                {
+                if self.record_write_file(path, FileState::Deleted).is_err() {
                     reply.error(EIO);
                     return;
                 }
@@ -958,16 +960,9 @@ impl Filesystem for CowFs {
                 reply.error(EACCES);
             }
             WriteMode::Cow => {
-                match self.snapshot_node(&path) {
-                    Ok(Some(_)) => {
-                        reply.error(EEXIST);
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(code) => {
-                        reply.error(code);
-                        return;
-                    }
+                if let Err(code) = self.ensure_path_absent(&path) {
+                    reply.error(code);
+                    return;
                 }
                 let node = OverlayNode::Dir;
                 self.overlay.insert(path.clone(), node.clone());
@@ -986,14 +981,13 @@ impl Filesystem for CowFs {
                     reply.error(io_errno(&err));
                     return;
                 }
-                let meta = match fs::symlink_metadata(&path) {
-                    Ok(meta) => meta,
-                    Err(err) => {
-                        reply.error(io_errno(&err));
+                let attr = match self.host_attr(&path) {
+                    Ok(attr) => attr,
+                    Err(code) => {
+                        reply.error(code);
                         return;
                     }
                 };
-                let attr = self.attr_for_path(&path, &meta);
                 reply.entry(&TTL, &attr, 0);
             }
         }
@@ -1053,26 +1047,16 @@ impl Filesystem for CowFs {
                 reply.error(EACCES);
             }
             WriteMode::Cow => {
-                match self.snapshot_node(&path) {
-                    Ok(Some(_)) => {
-                        reply.error(EEXIST);
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(code) => {
-                        reply.error(code);
-                        return;
-                    }
+                if let Err(code) = self.ensure_path_absent(&path) {
+                    reply.error(code);
+                    return;
                 }
                 let node = OverlayNode::Symlink {
                     target: link.to_path_buf(),
                 };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
-                    .append_record(&Operation::WriteFile {
-                        path: path.clone(),
-                        state: FileState::Symlink(link.to_path_buf()),
-                    })
+                    .record_write_file(path.clone(), FileState::Symlink(link.to_path_buf()))
                     .is_err()
                 {
                     reply.error(EIO);
@@ -1086,14 +1070,13 @@ impl Filesystem for CowFs {
                     reply.error(io_errno(&err));
                     return;
                 }
-                let meta = match fs::symlink_metadata(&path) {
-                    Ok(meta) => meta,
-                    Err(err) => {
-                        reply.error(io_errno(&err));
+                let attr = match self.host_attr(&path) {
+                    Ok(attr) => attr,
+                    Err(code) => {
+                        reply.error(code);
                         return;
                     }
                 };
-                let attr = self.attr_for_path(&path, &meta);
                 reply.entry(&TTL, &attr, 0);
             }
         }
@@ -1193,16 +1176,8 @@ impl Filesystem for CowFs {
                     data: data.clone(),
                     executable,
                 };
-                self.overlay.insert(path.clone(), node.clone());
                 if self
-                    .append_record(&Operation::WriteFile {
-                        path: path.clone(),
-                        state: if executable {
-                            FileState::Executable(data)
-                        } else {
-                            FileState::Regular(data)
-                        },
-                    })
+                    .set_overlay_regular_and_record(&path, data, executable)
                     .is_err()
                 {
                     reply.error(EIO);
@@ -1280,6 +1255,14 @@ fn is_strict_descendant(parent: &Path, child: &Path) -> bool {
 
 fn io_errno(err: &std::io::Error) -> i32 {
     err.raw_os_error().unwrap_or(EIO)
+}
+
+fn regular_state(data: Vec<u8>, executable: bool) -> FileState {
+    if executable {
+        FileState::Executable(data)
+    } else {
+        FileState::Regular(data)
+    }
 }
 
 #[cfg(test)]
