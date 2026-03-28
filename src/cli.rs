@@ -48,6 +48,7 @@ pub struct ListCommand;
 pub struct RmCommand {
     pub name: Option<String>,
     pub profile: Option<String>,
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +222,7 @@ fn parse_rm(mut args: Arguments) -> Result<Command> {
             verbose: false,
         });
     }
+    let verbose = args.contains(["-v", "--verbose"]);
     let name_flag = args.opt_value_from_str("--name")?;
     let profile = args.opt_value_from_str("--profile")?;
     let extra = args.finish();
@@ -243,7 +245,11 @@ fn parse_rm(mut args: Arguments) -> Result<Command> {
     if name.is_none() && profile.is_none() {
         bail!("rm requires NAME, --name <name>, or --profile <profile>");
     }
-    Ok(Command::Rm(RmCommand { name, profile }))
+    Ok(Command::Rm(RmCommand {
+        name,
+        profile,
+        verbose,
+    }))
 }
 
 fn parse_mount(mut args: Arguments) -> Result<Command> {
@@ -407,7 +413,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "\n",
             "NAMED JAILS:\n",
             "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
-            "  cowjail rm (<name> | --name <name> | --profile <profile>)\n",
+            "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n",
             "  cowjail list\n",
             "\n",
             "LOW-LEVEL (DEBUG):\n",
@@ -427,7 +433,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n\n",
             "NAMED JAILS:\n",
             "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
-            "  cowjail rm (<name> | --name <name> | --profile <profile>)\n",
+            "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n",
             "  cowjail list\n\n",
             "Run `cowjail --help -v` to list low-level debugging commands.\n",
             "Run `cowjail <subcommand> --help` for details.",
@@ -446,12 +452,13 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
         HelpTopic::Rm => concat!(
             "cowjail rm\n\n",
             "USAGE:\n",
-            "  cowjail rm (<name> | --name <name> | --profile <profile>)\n\n",
+            "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n\n",
             "NOTES:\n",
             "  () means required choice, [] means optional\n\n",
             "OPTIONS:\n",
             "  --name <name>         Remove a jail by name (same as positional NAME)\n",
-            "  --profile <profile>   Remove the jail selected by profile-derived identity",
+            "  --profile <profile>   Remove the jail selected by profile-derived identity\n",
+            "  -v, --verbose         Print cleanup syscall progress",
         ),
         HelpTopic::Run => concat!(
             "cowjail run\n\n",
@@ -631,6 +638,18 @@ mod tests {
         };
         assert_eq!(rm.name.as_deref(), Some("agent"));
         assert!(rm.profile.is_none());
+        assert!(!rm.verbose);
+    }
+
+    #[test]
+    fn parse_rm_verbose_flag() {
+        let cmd = parse_from(os(&["rm", "-v", "agent"])).expect("rm with -v should parse");
+        let rm = match cmd {
+            Command::Rm(rm) => rm,
+            other => panic!("expected rm, got {other:?}"),
+        };
+        assert_eq!(rm.name.as_deref(), Some("agent"));
+        assert!(rm.verbose);
     }
 
     #[test]

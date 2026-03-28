@@ -8,6 +8,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::jail::JailPaths;
+use crate::vlog;
 
 pub(crate) const LOCK_FILE_NAME: &str = "lock";
 pub(crate) const ROOT_LOCK_FILE_NAME: &str = ".lock";
@@ -205,26 +206,60 @@ pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
 }
 
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
-    let paths = paths_for(jail);
-    unmount_runtime_mount_dir(&paths)
-        .with_context(|| format!("failed to unmount runtime mount {}", paths.mount_dir.display()))?;
-    remove_known_runtime_artifacts(&paths)
+    remove_runtime_with_verbose(jail, false)
 }
 
-fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
+pub(crate) fn remove_runtime_with_verbose(jail: &JailPaths, verbose: bool) -> Result<()> {
+    let paths = paths_for(jail);
+    log_step(verbose, &format!("unmount {}", paths.mount_dir.display()), || {
+        unmount_runtime_mount_dir(&paths, verbose).with_context(|| {
+            format!("failed to unmount runtime mount {}", paths.mount_dir.display())
+        })
+    })?;
+    log_step(
+        verbose,
+        &format!("remove runtime artifacts under {}", paths.runtime_dir.display()),
+        || remove_known_runtime_artifacts(&paths, verbose),
+    )
+}
+
+fn unmount_runtime_mount_dir(paths: &NsRuntimePaths, verbose: bool) -> Result<()> {
     if !paths.mount_dir.exists() {
+        vlog(
+            verbose,
+            format!("rm: skip umount (mount dir missing): {}", paths.mount_dir.display()),
+        );
         return Ok(());
     }
 
     let mnt = CString::new(paths.mount_dir.as_os_str().as_bytes())
         .context("mount path contains interior NUL byte")?;
+    vlog(
+        verbose,
+        format!(
+            "rm: syscall umount2({}, MNT_DETACH)",
+            paths.mount_dir.display()
+        ),
+    );
     let rc = unsafe { libc::umount2(mnt.as_ptr(), libc::MNT_DETACH) };
     if rc == 0 {
+        vlog(
+            verbose,
+            format!("rm: syscall umount2 succeeded: {}", paths.mount_dir.display()),
+        );
         return Ok(());
     }
     let err = std::io::Error::last_os_error();
     if matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOENT)) {
         // Not mounted (or already gone).
+        vlog(
+            verbose,
+            format!(
+                "rm: syscall umount2 reports not-mounted/already-gone for {}: {}",
+                paths.mount_dir.display(),
+                err
+            ),
+        );
         return Ok(());
     }
     if err.kind() != std::io::ErrorKind::PermissionDenied {
@@ -237,6 +272,13 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
     }
 
     // Non-root callers may need fusermount for FUSE unmounts.
+    vlog(
+        verbose,
+        format!(
+            "rm: exec fusermount -u -z {}",
+            paths.mount_dir.display()
+        ),
+    );
     let output = Command::new("fusermount")
         .arg("-u")
         .arg("-z")
@@ -244,6 +286,13 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
         .output()
         .with_context(|| "failed to execute fusermount -u".to_string())?;
     if output.status.success() {
+        vlog(
+            verbose,
+            format!(
+                "rm: fusermount succeeded for {}",
+                paths.mount_dir.display()
+            ),
+        );
         return Ok(());
     }
 
@@ -251,6 +300,13 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
     if stderr.contains("not found in /etc/mtab") && !is_mountpoint_in_mountinfo(&paths.mount_dir) {
         // fusermount consults mtab, which can be stale/absent for some setups.
         // If kernel mountinfo confirms it is already gone, treat as success.
+        vlog(
+            verbose,
+            format!(
+                "rm: fusermount mtab-miss but mountinfo clean, treating as success for {}",
+                paths.mount_dir.display()
+            ),
+        );
         return Ok(());
     }
     Err(anyhow::anyhow!(
@@ -261,7 +317,7 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
     ))
 }
 
-fn remove_known_runtime_artifacts(paths: &NsRuntimePaths) -> Result<()> {
+fn remove_known_runtime_artifacts(paths: &NsRuntimePaths, verbose: bool) -> Result<()> {
     if !paths.runtime_dir.exists() {
         return Ok(());
     }
@@ -271,7 +327,7 @@ fn remove_known_runtime_artifacts(paths: &NsRuntimePaths) -> Result<()> {
     let unknown = match list_unknown_runtime_entries(paths) {
         Ok(v) => v,
         Err(err) if is_enotconn(&err) => {
-            unmount_runtime_mount_dir(paths).with_context(|| {
+            unmount_runtime_mount_dir(paths, verbose).with_context(|| {
                 format!(
                     "failed to recover stale mountpoint {} after ENOTCONN",
                     paths.mount_dir.display()
@@ -302,12 +358,12 @@ fn remove_known_runtime_artifacts(paths: &NsRuntimePaths) -> Result<()> {
         );
     }
 
-    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.fuse_pid_path)?;
-    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.lock_path)?;
-    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.mntns_path)?;
-    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.ipcns_path)?;
+    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.fuse_pid_path, verbose)?;
+    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.lock_path, verbose)?;
+    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.mntns_path, verbose)?;
+    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.ipcns_path, verbose)?;
 
-    remove_mount_dir_with_retry(paths)?;
+    remove_mount_dir_with_retry(paths, verbose)?;
 
     match fs::remove_dir(&paths.runtime_dir) {
         Ok(()) => Ok(()),
@@ -356,36 +412,70 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-fn remove_file_if_exists_with_owner_fix(runtime_dir: &Path, path: &Path) -> Result<()> {
+fn remove_file_if_exists_with_owner_fix(runtime_dir: &Path, path: &Path, verbose: bool) -> Result<()> {
+    vlog(verbose, format!("rm: syscall unlink {}", path.display()));
     match remove_file_if_exists(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            vlog(verbose, format!("rm: unlink ok {}", path.display()));
+            Ok(())
+        }
         Err(err) if err
             .downcast_ref::<std::io::Error>()
             .is_some_and(|ioe| ioe.kind() == std::io::ErrorKind::PermissionDenied) =>
         {
             ensure_owned_by_real_user(runtime_dir)?;
-            remove_file_if_exists(path)
+            let retried = remove_file_if_exists(path);
+            if retried.is_ok() {
+                vlog(
+                    verbose,
+                    format!("rm: unlink ok after owner-fix {}", path.display()),
+                );
+            }
+            retried
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            vlog(verbose, format!("rm: unlink failed {}: {err:#}", path.display()));
+            Err(err)
+        }
     }
 }
 
-fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
+fn remove_mount_dir_with_retry(paths: &NsRuntimePaths, verbose: bool) -> Result<()> {
+    vlog(
+        verbose,
+        format!("rm: syscall rmdir {}", paths.mount_dir.display()),
+    );
     match fs::remove_dir(&paths.mount_dir) {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            vlog(
+                verbose,
+                format!("rm: rmdir ok {}", paths.mount_dir.display()),
+            );
+            return Ok(());
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {
             // Last chance for lingering mount references: stop the recorded
             // FUSE server first, then retry unmount and rmdir.
-            terminate_recorded_fuse_server(paths)?;
-            unmount_runtime_mount_dir(paths).with_context(|| {
+            vlog(
+                verbose,
+                format!("rm: mount dir busy, retry cleanup for {}", paths.mount_dir.display()),
+            );
+            terminate_recorded_fuse_server(paths, verbose)?;
+            unmount_runtime_mount_dir(paths, verbose).with_context(|| {
                 format!(
                     "failed to unmount busy runtime mount {}",
                     paths.mount_dir.display()
                 )
             })?;
             match fs::remove_dir(&paths.mount_dir) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    vlog(
+                        verbose,
+                        format!("rm: rmdir ok after retry {}", paths.mount_dir.display()),
+                    );
+                    return Ok(());
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(err) => {
                     return Err(err).with_context(|| {
@@ -405,10 +495,11 @@ fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
     }
 }
 
-fn terminate_recorded_fuse_server(paths: &NsRuntimePaths) -> Result<()> {
+fn terminate_recorded_fuse_server(paths: &NsRuntimePaths, verbose: bool) -> Result<()> {
     let Some(pid) = read_fuse_pid(paths)? else {
         return Ok(());
     };
+    vlog(verbose, format!("rm: syscall kill(SIGTERM,{pid})"));
     let kill_rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     if kill_rc != 0 {
         let err = std::io::Error::last_os_error();
@@ -416,6 +507,9 @@ fn terminate_recorded_fuse_server(paths: &NsRuntimePaths) -> Result<()> {
             return Err(err)
                 .with_context(|| format!("failed to SIGTERM fuse server pid={pid}"));
         }
+        vlog(verbose, format!("rm: kill skipped (pid not found): {pid}"));
+    } else {
+        vlog(verbose, format!("rm: kill ok pid={pid}"));
     }
     std::thread::sleep(Duration::from_millis(120));
     Ok(())
@@ -426,6 +520,23 @@ fn is_mountpoint_in_mountinfo(mountpoint: &Path) -> bool {
         return false;
     };
     mountinfo_has_mountpoint(&raw, mountpoint)
+}
+
+fn log_step<T, F>(verbose: bool, label: &str, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    vlog(verbose, format!("rm: begin {label}"));
+    match f() {
+        Ok(v) => {
+            vlog(verbose, format!("rm: ok {label}"));
+            Ok(v)
+        }
+        Err(err) => {
+            vlog(verbose, format!("rm: err {label}: {err:#}"));
+            Err(err)
+        }
+    }
 }
 
 fn ensure_owned_by_real_user(path: &Path) -> Result<()> {

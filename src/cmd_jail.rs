@@ -31,5 +31,5 @@ pub(crate) fn rm_command(rm: RmCommand) -> Result<()> {
         jail::ResolveMode::MustExist,
     )
     .context("failed to resolve jail to remove")?;
-    jail::remove_jail(&resolved.paths)
+    jail::remove_jail_with_verbose(&resolved.paths, rm.verbose)
 }
