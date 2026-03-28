@@ -26,9 +26,8 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 ~/.agents/ rw
 ~/.config/cowjail deny
 ~/.config/opencode rw
-~/.config ro
 ~/.local/state/cowjail deny
-~/.local/state/opencode/ rw
+~/.local/state/opencode rw
 ~/.gitconfig* ro
 ~/.gitignore* ro
 ~/.ssh deny
