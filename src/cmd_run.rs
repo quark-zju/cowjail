@@ -63,7 +63,14 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         cwd.display()
     );
     let status = run_with_log(
-        || run_child_in_chroot(&run, &runtime.ensured.paths.mount_dir, &cwd, mount_plan.clone()),
+        || {
+            run_child_in_chroot(
+                &run,
+                &runtime.ensured.paths.mount_dir,
+                &cwd,
+                mount_plan.clone(),
+            )
+        },
         || format!("execute jailed command {:?}", run.program),
     );
 
@@ -230,10 +237,7 @@ fn ensure_fuse_server(
     Ok(())
 }
 
-fn apply_mount_plan_in_namespace(
-    mount_root: &Path,
-    mount_plan: &[MountPlanEntry],
-) -> Result<()> {
+fn apply_mount_plan_in_namespace(mount_root: &Path, mount_plan: &[MountPlanEntry]) -> Result<()> {
     if mount_plan.is_empty() {
         return Ok(());
     }
@@ -266,10 +270,18 @@ fn apply_one_mount_in_namespace(mount_root: &Path, entry: &MountPlanEntry) -> Re
         return Ok(());
     }
 
-    let src_meta = std::fs::metadata(path)
-        .with_context(|| format!("bind source does not exist or is inaccessible: {}", path.display()))?;
-    let dst_meta = std::fs::metadata(&target)
-        .with_context(|| format!("bind target path does not exist in jail view: {}", target.display()))?;
+    let src_meta = std::fs::metadata(path).with_context(|| {
+        format!(
+            "bind source does not exist or is inaccessible: {}",
+            path.display()
+        )
+    })?;
+    let dst_meta = std::fs::metadata(&target).with_context(|| {
+        format!(
+            "bind target path does not exist in jail view: {}",
+            target.display()
+        )
+    })?;
 
     if src_meta.is_dir() != dst_meta.is_dir() {
         bail!(

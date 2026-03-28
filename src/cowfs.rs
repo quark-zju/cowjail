@@ -954,11 +954,8 @@ impl Filesystem for CowFs {
         if let Some(node) = self.overlay.get(&path) {
             match node {
                 OverlayNode::Symlink { target } => {
-                    let rewritten = rewrite_proc_exe_readlink_target(
-                        &path,
-                        target,
-                        self.mount_root.as_deref(),
-                    );
+                    let rewritten =
+                        rewrite_proc_exe_readlink_target(&path, target, self.mount_root.as_deref());
                     reply.data(rewritten.as_os_str().as_bytes());
                 }
                 OverlayNode::Deleted => reply.error(ENOENT),
@@ -1915,8 +1912,11 @@ mod tests {
     #[test]
     fn proc_exe_readlink_target_keeps_non_matching_target() {
         let target = Path::new("/usr/bin/readlink");
-        let rewritten =
-            rewrite_proc_exe_readlink_target(Path::new("/proc/123/exe"), target, Some(Path::new("/run/user/1000/cowjail/demo/mount")));
+        let rewritten = rewrite_proc_exe_readlink_target(
+            Path::new("/proc/123/exe"),
+            target,
+            Some(Path::new("/run/user/1000/cowjail/demo/mount")),
+        );
         assert_eq!(rewritten, target);
     }
 
@@ -1985,14 +1985,8 @@ mod tests {
         let (dir, _record_path, mut fs) = test_fs("/tmp/** rw");
         let path = dir.path().join("rw-mode-target");
         fs::write(&path, b"abc").expect("seed file");
-        fs.apply_passthrough_setattr_for_test(
-            &path,
-            None,
-            Some(0o700),
-            None,
-            None,
-        )
-        .expect("set mode on rw path");
+        fs.apply_passthrough_setattr_for_test(&path, None, Some(0o700), None, None)
+            .expect("set mode on rw path");
 
         let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);

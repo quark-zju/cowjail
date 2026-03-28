@@ -204,7 +204,10 @@ mod tests {
     #[test]
     fn dev_bind_root_rejects_descendant_rules() {
         let err = build_mount_plan("/dev/pts rw\n/dev/pts/0 ro\n").expect_err("must fail");
-        assert!(err.to_string().contains("conflicts with mounted root /dev/pts"));
+        assert!(
+            err.to_string()
+                .contains("conflicts with mounted root /dev/pts")
+        );
     }
 
     #[test]
@@ -219,7 +222,8 @@ mod tests {
             source: "profiles/base".to_string(),
             line: 42,
         }];
-        let err = build_mount_plan_with_sources("/proc/self ro\n", Some(&sources)).expect_err("must fail");
+        let err = build_mount_plan_with_sources("/proc/self ro\n", Some(&sources))
+            .expect_err("must fail");
         assert!(err.to_string().contains("profiles/base:42"));
     }
 }

@@ -77,7 +77,11 @@ fn remove_one_jail(name: Option<&str>, profile: Option<&str>, allow_dirty: bool)
         },
     )?;
     if !allow_dirty {
-        protect_dirty_remove(&resolved.name, &resolved.paths.record_path, DIRTY_RM_DELAY_SECS)?;
+        protect_dirty_remove(
+            &resolved.name,
+            &resolved.paths.record_path,
+            DIRTY_RM_DELAY_SECS,
+        )?;
     }
     run_with_log(
         || jail::remove_jail(&resolved.paths),

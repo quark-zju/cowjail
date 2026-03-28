@@ -602,5 +602,4 @@ mod tests {
         assert_eq!(lines[1].action, RuleAction::Passthrough);
         assert_eq!(lines[1].line_no, 2);
     }
-
 }

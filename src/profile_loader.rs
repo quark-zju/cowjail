@@ -110,7 +110,10 @@ pub(crate) fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
             if err.kind() == std::io::ErrorKind::NotFound
                 && profile_path == Path::new(cli::DEFAULT_PROFILE) =>
         {
-            ("builtin:default".to_string(), BUILTIN_DEFAULT_PROFILE_SOURCE.to_string())
+            (
+                "builtin:default".to_string(),
+                BUILTIN_DEFAULT_PROFILE_SOURCE.to_string(),
+            )
         }
         Err(err) => {
             return Err(err)
@@ -172,7 +175,12 @@ fn resolve_profile_path(profile_path: &Path) -> Result<PathBuf> {
 
 fn expand_includes(source: &str, source_name: &str) -> Result<Vec<ExpandedLine>> {
     let mut stack = Vec::new();
-    expand_includes_with(source, source_name, &mut stack, &mut read_named_profile_source)
+    expand_includes_with(
+        source,
+        source_name,
+        &mut stack,
+        &mut read_named_profile_source,
+    )
 }
 
 fn expand_includes_with<F>(
@@ -234,7 +242,7 @@ where
             stack,
             resolver,
         )
-            .with_context(|| format!("failed to expand include '{name}'"))?;
+        .with_context(|| format!("failed to expand include '{name}'"))?;
         stack.pop();
         out.extend(nested);
     }

@@ -120,16 +120,15 @@ fn read_profile_source_for_show(name: &str) -> Result<String> {
 fn read_profile_source_for_show_from_path(name: &str, path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(text),
-        Err(err)
-            if err.kind() == std::io::ErrorKind::NotFound && name == cli::DEFAULT_PROFILE =>
-        {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && name == cli::DEFAULT_PROFILE => {
             Ok(profile_loader::builtin_default_profile_source().to_string())
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             bail!("profile does not exist: {name}")
         }
-        Err(err) => Err(err)
-            .with_context(|| format!("failed to read profile file {}", path.display())),
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to read profile file {}", path.display()))
+        }
     }
 }
 
