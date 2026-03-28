@@ -14,7 +14,9 @@ pub(crate) fn require_root_euid(cmd: &str) -> Result<()> {
 
 pub(crate) fn drop_to_real_user() -> Result<()> {
     let uid = unsafe { libc::getuid() };
+    let euid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getgid() };
+    validate_drop_to_real_user_uids(uid, euid)?;
     crate::vlog!("privileges: drop to real user uid={} gid={}", uid, gid);
     drop_to_ids(uid, gid)
 }
@@ -118,4 +120,47 @@ fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
         return Err(anyhow::anyhow!("prctl(PR_SET_NO_NEW_PRIVS) failed: {err}"));
     }
     Ok(())
+}
+
+fn validate_drop_to_real_user_uids(uid: u32, euid: u32) -> Result<()> {
+    if euid != 0 {
+        if uid != euid {
+            bail!(
+                "refusing uid transition from non-root euid={euid} to uid={uid}; drop_to_real_user requires root euid"
+            );
+        }
+        bail!("drop_to_real_user requires root euid (current euid={euid})");
+    }
+    if uid == 0 {
+        bail!("drop_to_real_user requires non-root real uid target (current uid=0)");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_drop_to_real_user_uids;
+
+    #[test]
+    fn drop_validation_allows_root_to_non_root() {
+        validate_drop_to_real_user_uids(1000, 0).expect("root to non-root should be allowed");
+    }
+
+    #[test]
+    fn drop_validation_rejects_non_root_transition() {
+        let err = validate_drop_to_real_user_uids(1000, 1001).expect_err("must reject non-root");
+        assert!(err.to_string().contains("refusing uid transition from non-root"));
+    }
+
+    #[test]
+    fn drop_validation_rejects_non_root_noop() {
+        let err = validate_drop_to_real_user_uids(1000, 1000).expect_err("must require root");
+        assert!(err.to_string().contains("requires root euid"));
+    }
+
+    #[test]
+    fn drop_validation_rejects_root_target() {
+        let err = validate_drop_to_real_user_uids(0, 0).expect_err("must not target root");
+        assert!(err.to_string().contains("non-root real uid target"));
+    }
 }
