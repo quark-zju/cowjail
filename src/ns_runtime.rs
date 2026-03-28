@@ -288,13 +288,14 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths, verbose: bool) -> Result<()
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("not found in /etc/mtab") && !is_mountpoint_in_mountinfo(&paths.mount_dir) {
+    if stderr.contains("not found in /etc/mtab") {
         // fusermount consults mtab, which can be stale/absent for some setups.
-        // If kernel mountinfo confirms it is already gone, treat as success.
+        // Treat this as a soft failure and let later rmdir+retry logic decide
+        // whether a live mount still exists (EBUSY path).
         vlog(
             verbose,
             format!(
-                "rm: fusermount mtab-miss but mountinfo clean, treating as success for {}",
+                "rm: fusermount mtab-miss, treating as soft success for {}",
                 paths.mount_dir.display()
             ),
         );
@@ -504,13 +505,6 @@ fn terminate_recorded_fuse_server(paths: &NsRuntimePaths, verbose: bool) -> Resu
     }
     std::thread::sleep(Duration::from_millis(120));
     Ok(())
-}
-
-fn is_mountpoint_in_mountinfo(mountpoint: &Path) -> bool {
-    let Ok(raw) = fs::read_to_string("/proc/self/mountinfo") else {
-        return false;
-    };
-    mountinfo_has_mountpoint(&raw, mountpoint)
 }
 
 fn log_step<T, F>(verbose: bool, label: &str, f: F) -> Result<T>
