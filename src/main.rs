@@ -17,6 +17,9 @@ mod record;
 
 use anyhow::{Context, Result};
 use cli::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static VERBOSE_LOG: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     match try_main() {
@@ -31,47 +34,63 @@ fn main() {
 fn try_main() -> Result<i32> {
     match cli::parse_env()? {
         Command::Help { topic, verbose } => {
+            set_verbose(verbose);
             cmd_help::print_help(topic, verbose);
             Ok(0)
         }
         Command::Add(add) => {
+            set_verbose(false);
             cmd_jail::add_command(add).context("add subcommand failed")?;
             Ok(0)
         }
         Command::List(list) => {
+            set_verbose(false);
             cmd_jail::list_command(list).context("list subcommand failed")?;
             Ok(0)
         }
         Command::Rm(rm) => {
+            set_verbose(rm.verbose);
             cmd_jail::rm_command(rm).context("rm subcommand failed")?;
             Ok(0)
         }
-        Command::Run(run) => cmd_run::run_command(run).context("run subcommand failed"),
+        Command::Run(run) => {
+            set_verbose(run.verbose);
+            cmd_run::run_command(run).context("run subcommand failed")
+        }
         Command::LowLevelMount(mount) => {
+            set_verbose(mount.verbose);
             cmd_mount::mount_command(mount).context("_mount subcommand failed")?;
             Ok(0)
         }
         Command::Flush(flush) => {
+            set_verbose(flush.verbose);
             cmd_flush::flush_command(flush).context("flush subcommand failed")?;
             Ok(0)
         }
         Command::LowLevelFlush(flush) => {
+            set_verbose(flush.verbose);
             cmd_flush::low_level_flush_command(flush).context("_flush subcommand failed")?;
             Ok(0)
         }
         Command::LowLevelFuse(fuse) => {
+            set_verbose(fuse.verbose);
             cmd_fuse::fuse_command(fuse).context("_fuse subcommand failed")?;
             Ok(0)
         }
         Command::LowLevelSuid(suid) => {
+            set_verbose(suid.verbose);
             cmd_suid::suid_command(suid).context("_suid subcommand failed")?;
             Ok(0)
         }
     }
 }
 
+pub(crate) fn set_verbose(enabled: bool) {
+    VERBOSE_LOG.store(enabled, Ordering::Relaxed);
+}
+
 pub(crate) fn vlog(verbose: bool, msg: String) {
-    if verbose {
+    if verbose || VERBOSE_LOG.load(Ordering::Relaxed) {
         eprintln!("{msg}");
     }
 }
