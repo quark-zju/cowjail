@@ -20,10 +20,10 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         || format!("stat current executable {}", exe.display()),
     )?;
     if is_suid_root(&meta) {
-        vlog(
-            cmd.verbose,
-            format!("_suid: {} is already setuid-root, skipping", exe.display()),
-        );
+        vlog(format!(
+            "_suid: {} is already setuid-root, skipping",
+            exe.display()
+        ));
         return Ok(());
     }
 
@@ -34,10 +34,7 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         if cmd.verbose {
             sudo.arg("--verbose");
         }
-        vlog(
-            cmd.verbose,
-            format!("_suid: reinvoking via sudo for {}", exe.display()),
-        );
+        vlog(format!("_suid: reinvoking via sudo for {}", exe.display()));
         let status = run_with_log(
             || Ok(sudo.status()?),
             || "start sudo for _suid self-reexec".to_string(),
@@ -74,10 +71,7 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         );
     }
 
-    vlog(
-        cmd.verbose,
-        format!("_suid: setuid-root ready for {}", exe.display()),
-    );
+    vlog(format!("_suid: setuid-root ready for {}", exe.display()));
     Ok(())
 }
 

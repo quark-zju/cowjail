@@ -47,7 +47,7 @@ pub(crate) fn rm_command(rm: RmCommand) -> Result<()> {
         || "resolve jail".to_string(),
     )?;
     run_with_log(
-        || jail::remove_jail_with_verbose(&resolved.paths, rm.verbose),
+        || jail::remove_jail(&resolved.paths),
         || "remove jail runtime/state artifacts".to_string(),
     )
 }

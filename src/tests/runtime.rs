@@ -103,7 +103,7 @@ fn remove_jail_can_follow_profile_selected_generated_identity() {
     .expect("reselect generated jail");
     assert_eq!(selected.name, created.name);
 
-    jail::remove_jail_with_verbose(&selected.paths, false).expect("remove jail");
+    jail::remove_jail(&selected.paths).expect("remove jail");
     assert!(!selected.paths.state_dir.exists());
     assert!(!selected.paths.runtime_dir.exists());
 }
@@ -191,7 +191,7 @@ fn ns_runtime_helpers_manage_temp_runtime_dir() {
     assert_eq!(lock.path(), runtime.lock_path.as_path());
 
     drop(lock);
-    ns_runtime::remove_runtime_with_verbose(&jail_paths, false).expect("remove runtime");
+    ns_runtime::remove_runtime(&jail_paths).expect("remove runtime");
     let removed = ns_runtime::inspect(&jail_paths).expect("inspect removed");
     assert!(!removed.runtime_dir_exists);
     assert!(!removed.lock_exists);
@@ -386,4 +386,3 @@ fn ns_runtime_mountinfo_parser_handles_escaped_mountpoints() {
         Path::new("/run/cowjail/demo/missing")
     ));
 }
-

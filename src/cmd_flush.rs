@@ -51,20 +51,17 @@ pub(crate) fn flush_command(flush: FlushCommand) -> Result<()> {
         || flush_record_with_policy(&record_path, flush.dry_run, Some(replay_profile)),
         || format!("flush record file {}", record_path.display()),
     )?;
-    vlog(
-        flush.verbose,
-        format!(
-            "flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
-            record_path.display(),
-            stats.total,
-            stats.pending,
-            stats.skipped,
-            stats.optimized,
-            stats.blocked,
-            stats.marked,
-            flush.dry_run
-        ),
-    );
+    vlog(format!(
+        "flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
+        record_path.display(),
+        stats.total,
+        stats.pending,
+        stats.skipped,
+        stats.optimized,
+        stats.blocked,
+        stats.marked,
+        flush.dry_run
+    ));
     println!(
         "record: {} | total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         record_path.display(),
@@ -84,20 +81,17 @@ pub(crate) fn low_level_flush_command(flush: LowLevelFlushCommand) -> Result<()>
         || flush_record(&flush.record, flush.dry_run, flush.profile.as_deref()),
         || format!("flush record file {}", flush.record.display()),
     )?;
-    vlog(
-        flush.verbose,
-        format!(
-            "_flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
-            flush.record.display(),
-            stats.total,
-            stats.pending,
-            stats.skipped,
-            stats.optimized,
-            stats.blocked,
-            stats.marked,
-            flush.dry_run
-        ),
-    );
+    vlog(format!(
+        "_flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
+        flush.record.display(),
+        stats.total,
+        stats.pending,
+        stats.skipped,
+        stats.optimized,
+        stats.blocked,
+        stats.marked,
+        flush.dry_run
+    ));
     println!(
         "record: {} | total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         flush.record.display(),

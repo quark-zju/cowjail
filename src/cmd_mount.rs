@@ -26,14 +26,11 @@ pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
     )?;
 
     let fs = cowfs::CowFs::new(loaded.profile, writer);
-    vlog(
-        mount.verbose,
-        format!(
-            "mount: mounting fuse at {} with record {}",
-            mount.path.display(),
-            mount.record.display()
-        ),
-    );
+    vlog(format!(
+        "mount: mounting fuse at {} with record {}",
+        mount.path.display(),
+        mount.record.display()
+    ));
     run_with_log(
         || fs.mount(&mount.path, false),
         || format!("mount fuse at {}", mount.path.display()),

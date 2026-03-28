@@ -90,8 +90,8 @@ pub(crate) fn set_verbose(enabled: bool) {
     VERBOSE_LOG.store(enabled, Ordering::Relaxed);
 }
 
-pub(crate) fn vlog(verbose: bool, msg: String) {
-    if verbose || VERBOSE_LOG.load(Ordering::Relaxed) {
+pub(crate) fn vlog(msg: String) {
+    if VERBOSE_LOG.load(Ordering::Relaxed) {
         eprintln!("{msg}");
     }
 }

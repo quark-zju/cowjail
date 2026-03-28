@@ -58,31 +58,24 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     )?;
     let mut fs = cowfs::CowFs::new(loaded.profile, writer);
     let replay = fs.replay_from_record_frames(&frames);
-    vlog(
-        cmd.verbose,
-        format!(
-            "_fuse: replay record={} total_frames={} pending_ops={} applied_ops={} skipped_frames={} skipped_ops={}",
-            cmd.record.display(),
-            replay.total_frames,
-            replay.pending_ops,
-            replay.applied_ops,
-            replay.skipped_frames,
-            replay.skipped_ops
-        ),
-    );
-    vlog(
-        cmd.verbose,
-        format!(
-            "_fuse: mounting fuse at {} with record {}",
-            cmd.mountpoint.display(),
-            cmd.record.display()
-        ),
-    );
+    vlog(format!(
+        "_fuse: replay record={} total_frames={} pending_ops={} applied_ops={} skipped_frames={} skipped_ops={}",
+        cmd.record.display(),
+        replay.total_frames,
+        replay.pending_ops,
+        replay.applied_ops,
+        replay.skipped_frames,
+        replay.skipped_ops
+    ));
+    vlog(format!(
+        "_fuse: mounting fuse at {} with record {}",
+        cmd.mountpoint.display(),
+        cmd.record.display()
+    ));
     let needs_real_root_for_allow_other =
         !cowfs::allow_other_enabled_in_fuse_conf() && unsafe { libc::getuid() } != 0;
     if needs_real_root_for_allow_other {
         vlog(
-            cmd.verbose,
             "_fuse: user_allow_other not set; temporarily switching real uid/gid to root for allow_other mount".to_string(),
         );
     }
@@ -110,10 +103,7 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     )?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-    vlog(
-        cmd.verbose,
-        format!("_fuse: running as uid={} gid={}", uid, gid),
-    );
+    vlog(format!("_fuse: running as uid={} gid={}", uid, gid));
 
     loop {
         std::thread::park();
