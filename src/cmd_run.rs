@@ -146,6 +146,7 @@ fn run_child_in_chroot(
             if let Err(err) = privileges::drop_to_real_user() {
                 return Err(std::io::Error::other(err.to_string()));
             }
+            close_fds_best_effort_from(3);
             Ok(())
         });
     }
@@ -163,7 +164,7 @@ fn enter_pid_namespace_worker_or_reap() -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("fork for pidns worker failed");
     }
     if worker_pid > 0 {
-        close_all_fds_best_effort();
+        close_fds_best_effort_from(0);
         if let Err(_err) = privileges::drop_to_real_user() {
             unsafe { libc::_exit(1) };
         }
@@ -216,12 +217,12 @@ fn exit_from_wait_status(status: libc::c_int) -> ! {
     unsafe { libc::_exit(1) }
 }
 
-fn close_all_fds_best_effort() {
-    if try_close_range(0).is_ok() {
+fn close_fds_best_effort_from(first: libc::c_uint) {
+    if try_close_range(first).is_ok() {
         return;
     }
     let max_fd: i32 = 65536;
-    for fd in 0..max_fd {
+    for fd in first as i32..max_fd {
         unsafe {
             libc::close(fd);
         }
