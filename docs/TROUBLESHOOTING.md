@@ -30,6 +30,14 @@ If `_fuse` starts but fails later, inspect the runtime log:
 - `${XDG_RUNTIME_DIR}/cowjail/<name>/fuse.log`
 - fallback: `/run/user/<uid>/cowjail/<name>/fuse.log`
 
+You can also enable vendored `fuse` crate logs for `_fuse` using:
+
+```bash
+COWJAIL_FUSE_LOG=debug cowjail run -v --name <name> -- <command>
+```
+
+Accepted levels follow `env_logger` filter syntax (for example: `error`, `warn`, `info`, `debug`, `trace`).
+
 ## `_suid` and setuid behavior
 
 ### `_suid` appears successful but privileged operations still fail
