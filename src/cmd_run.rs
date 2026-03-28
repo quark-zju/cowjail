@@ -62,6 +62,10 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         runtime.ensured.paths.mount_dir.display(),
         cwd.display()
     );
+    run_with_log(
+        setup_run_namespaces,
+        || "unshare run namespaces".to_string(),
+    )?;
     let status = run_with_log(
         || {
             run_child_in_chroot(
@@ -94,17 +98,10 @@ fn run_child_in_chroot(
     cmd.args(&run.args);
     unsafe {
         cmd.pre_exec(move || {
-            if libc::unshare(libc::CLONE_NEWIPC | libc::CLONE_NEWNS | libc::CLONE_NEWPID) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID) failed: {err}"),
-                ));
-            }
             if let Err(err) = make_mounts_private() {
                 return Err(std::io::Error::other(err.to_string()));
             }
-            if let Err(err) = apply_mount_plan_before_pidns(&mount_root, &mount_plan) {
+            if let Err(err) = apply_mount_plan_in_namespace(&mount_root, &mount_plan) {
                 return Err(std::io::Error::other(err.to_string()));
             }
             // FUSE mount access is keyed by fsuid/fsgid, not effective uid.
@@ -141,12 +138,9 @@ fn run_child_in_chroot(
                     ));
                 }
             }
-            // CLONE_NEWPID takes effect for subsequent children only.
-            // Fork after mount/chroot so both pidns PID 1 and worker share that setup.
-            if let Err(err) = enter_pid_namespace_worker_or_exit_parent() {
-                return Err(std::io::Error::other(err.to_string()));
-            }
-            if let Err(err) = apply_proc_mounts_after_pidns(&mount_plan) {
+            // Child is already PID 1 in the new pid namespace; fork a worker so
+            // PID 1 can remain as a minimal child reaper.
+            if let Err(err) = enter_pid_namespace_worker_or_reap() {
                 return Err(std::io::Error::other(err.to_string()));
             }
             if let Err(err) = privileges::drop_to_real_user() {
@@ -161,29 +155,7 @@ fn run_child_in_chroot(
     child.wait().context("failed waiting for child command")
 }
 
-fn enter_pid_namespace_worker_or_exit_parent() -> Result<()> {
-    let fork_pid = unsafe { libc::fork() };
-    if fork_pid < 0 {
-        return Err(std::io::Error::last_os_error()).context("fork for pid namespace failed");
-    }
-    if fork_pid > 0 {
-        let mut status: libc::c_int = 0;
-        loop {
-            let rc = unsafe { libc::waitpid(fork_pid, &mut status, 0) };
-            if rc == fork_pid {
-                break;
-            }
-            if rc < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(err).context("waitpid for pid-namespace init child failed");
-            }
-        }
-        exit_from_wait_status(status);
-    }
-
+fn enter_pid_namespace_worker_or_reap() -> Result<()> {
     // We are PID 1 in the new namespace. Keep this process as a minimal init
     // that reaps all children and exits with the worker's status.
     let worker_pid = unsafe { libc::fork() };
@@ -195,6 +167,16 @@ fn enter_pid_namespace_worker_or_exit_parent() -> Result<()> {
             unsafe { libc::_exit(1) };
         }
         run_pidns_init_reaper(worker_pid);
+    }
+    Ok(())
+}
+
+fn setup_run_namespaces() -> Result<()> {
+    let flags = libc::CLONE_NEWIPC | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+    let rc = unsafe { libc::unshare(flags) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID) failed");
     }
     Ok(())
 }
@@ -317,30 +299,12 @@ fn ensure_fuse_server(
     Ok(())
 }
 
-fn apply_mount_plan_before_pidns(mount_root: &Path, mount_plan: &[MountPlanEntry]) -> Result<()> {
+fn apply_mount_plan_in_namespace(mount_root: &Path, mount_plan: &[MountPlanEntry]) -> Result<()> {
     if mount_plan.is_empty() {
         return Ok(());
     }
     for entry in mount_plan {
-        if matches!(entry, MountPlanEntry::Proc { .. }) {
-            continue;
-        }
         apply_one_mount_in_namespace(mount_root, entry)?;
-    }
-    Ok(())
-}
-
-fn apply_proc_mounts_after_pidns(mount_plan: &[MountPlanEntry]) -> Result<()> {
-    for entry in mount_plan {
-        let MountPlanEntry::Proc { path, read_only } = entry else {
-            continue;
-        };
-        let target = if path == Path::new("/proc") {
-            Path::new("/proc")
-        } else {
-            path.as_path()
-        };
-        mount_procfs(target, *read_only)?;
     }
     Ok(())
 }
