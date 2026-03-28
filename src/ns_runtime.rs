@@ -205,10 +205,6 @@ pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
     Ok(ExecRuntime { ensured })
 }
 
-pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
-    remove_runtime_with_verbose(jail, false)
-}
-
 pub(crate) fn remove_runtime_with_verbose(jail: &JailPaths, verbose: bool) -> Result<()> {
     let paths = paths_for(jail);
     log_step(verbose, &format!("unmount {}", paths.mount_dir.display()), || {

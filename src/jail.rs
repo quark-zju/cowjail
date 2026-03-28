@@ -261,10 +261,6 @@ pub(crate) fn materialize_jail(paths: &JailPaths, normalized_profile: &str) -> R
     Ok(())
 }
 
-pub(crate) fn remove_jail(paths: &JailPaths) -> Result<()> {
-    remove_jail_with_verbose(paths, false)
-}
-
 pub(crate) fn remove_jail_with_verbose(paths: &JailPaths, verbose: bool) -> Result<()> {
     crate::ns_runtime::remove_runtime_with_verbose(paths, verbose)?;
     remove_known_state_artifacts(paths)
