@@ -65,27 +65,8 @@ When `--profile default` is used (or `run/add/flush` omit `--profile`), `cowjail
 1. `~/.config/cowjail/profiles/default` when the file exists
 2. built-in fallback source when the file is missing
 
-Built-in fallback source:
+To inspect the currently effective on-disk default profile, use:
 
-```text
-/tmp rw
-/bin ro
-/sbin ro
-/usr ro
-/lib ro
-/lib64 ro
-/etc ro
-/dev/stdin ro
-/dev/stdout ro
-/dev/null rw
-/dev/urandom ro
-/dev/random ro
-~/bin ro
-~/.claude rw
-~/.codex rw
-~/.config ro
-~/.gitconfig* ro
-~/.gitignore* ro
-~/.ssh deny
-. cow
+```bash
+cowjail profile show
 ```
