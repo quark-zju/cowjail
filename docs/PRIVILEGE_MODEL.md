@@ -59,6 +59,10 @@ This sets real/effective/saved IDs explicitly and closes obvious privilege-regai
 
 `privileges::with_temporary_real_root` exists for narrow internal cases (currently `_fuse` mount path with `allow_other` handling).
 
+`allow_other` is primarily a `chroot` compatibility requirement: `chroot` is performed while still root, and without `allow_other` a FUSE mount is generally only accessible to the mounting user, which can block root-side `chroot`/path traversal in the `run` setup flow.
+
+Exposure is constrained by runtime path placement and ownership checks: mounts live under `${XDG_RUNTIME_DIR}/cowjail` (or `/run/user/<uid>/cowjail` fallback), so other users are blocked by the per-user runtime directory boundary rather than by omitting `allow_other`.
+
 It:
 
 1. captures current uid/gid triplets
