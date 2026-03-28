@@ -102,15 +102,15 @@ fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
         let err = std::io::Error::last_os_error();
         return Err(anyhow::anyhow!("setgroups([]) failed: {err}"));
     }
-    crate::vlog!("privileges: setgid({gid})");
-    if unsafe { libc::setgid(gid) } != 0 {
+    crate::vlog!("privileges: setresgid({gid},{gid},{gid})");
+    if unsafe { libc::setresgid(gid, gid, gid) } != 0 {
         let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setgid({gid}) failed: {err}"));
+        return Err(anyhow::anyhow!("setresgid({gid},{gid},{gid}) failed: {err}"));
     }
-    crate::vlog!("privileges: setuid({uid})");
-    if unsafe { libc::setuid(uid) } != 0 {
+    crate::vlog!("privileges: setresuid({uid},{uid},{uid})");
+    if unsafe { libc::setresuid(uid, uid, uid) } != 0 {
         let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setuid({uid}) failed: {err}"));
+        return Err(anyhow::anyhow!("setresuid({uid},{uid},{uid}) failed: {err}"));
     }
     crate::vlog!("privileges: prctl(PR_SET_NO_NEW_PRIVS,1)");
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
