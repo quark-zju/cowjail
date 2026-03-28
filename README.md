@@ -47,7 +47,8 @@ cowjail _suid
 
 ### Simple
 
-Use `cowjail run` to run a command. It uses the default profile - only the current directory is writable, and various parts of the filesystem like `~/.ssh` is hidden.
+Use `cowjail run` to run a command. It uses the built-in `default` profile.
+Profile syntax, actions, size config, and default profile source are documented in [`docs/profile.md`](docs/profile.md).
 
 ```bash
 cowjail run -- your-command arg1 arg2  # run inside jail
@@ -64,22 +65,7 @@ Changes are designed to survive reboots. But it's still recommended to flush ear
 
 ### Custom profile
 
-Create a custom profile file:
-
-```text
-# ~/my-profile
-/bin ro
-/lib ro
-/lib64 ro
-/usr ro
-/etc ro
-/tmp rw
-/home/*/.ssh deny
-. cow
-```
-
-`rw` means passthrough write (applies to host immediately), while `cow` means delayed write (visible in jail first, applied by `flush`).
-`deny` means path remains visible but access returns permission denied. `hide` means path is hidden as if it does not exist.
+Create a custom profile file using the rules in [`docs/profile.md`](docs/profile.md).
 
 ```bash
 cowjail run --profile ~/my-profile -- your-command   # select jail by profile
@@ -106,6 +92,7 @@ cowjail rm 'unnamed-*'                               # remove jails by name glob
 ## More Docs
 
 - Technical overview: [`docs/TECHNICAL_OVERVIEW.md`](docs/TECHNICAL_OVERVIEW.md)
+- Profile guide (syntax, size config, default profile): [`docs/profile.md`](docs/profile.md)
 - Runtime layout: [`docs/RUNTIME_LAYOUT.md`](docs/RUNTIME_LAYOUT.md)
 - Privilege model: [`docs/PRIVILEGE_MODEL.md`](docs/PRIVILEGE_MODEL.md)
 - Troubleshooting: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)

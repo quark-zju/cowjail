@@ -67,17 +67,8 @@ There are two replay paths:
 
 ## Profiles
 
-Profile lines are `pattern action` with first-match-wins.
-
-Actions:
-
-- `ro`
-- `rw` (writable passthrough; applies to host immediately)
-- `cow` (writable copy-on-write; captured and applied by `flush`)
-- `deny` (visible but blocked with `EACCES`)
-- `hide` (hidden with `ENOENT`)
-
-`.` resolves relative to current working directory at profile load time.
+Profile semantics are part of the filesystem policy model (path visibility filtering and write mode decisions).  
+For syntax, action semantics, size configuration, and the built-in default profile, see [`docs/profile.md`](profile.md).
 
 ## Internal vs Public CLI
 
