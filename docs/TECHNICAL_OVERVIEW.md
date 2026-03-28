@@ -98,3 +98,8 @@ These low-level commands are intentionally separate from normal workflow docs.
 - `_fuse` mounts a per-jail FUSE view under the runtime directory (`.../mount`).
 - `run` creates a fresh IPC namespace for the child (`unshare(CLONE_NEWIPC)`), then `chroot`s to the jail mount, then drops privileges to the real user.
 - `rm` unmounts runtime FUSE mountpoints and removes known runtime/state artifacts conservatively.
+
+## See Also
+
+- Runtime paths and lifecycle details: [`docs/RUNTIME_LAYOUT.md`](RUNTIME_LAYOUT.md)
+- Privilege transition model: [`docs/PRIVILEGE_MODEL.md`](PRIVILEGE_MODEL.md)

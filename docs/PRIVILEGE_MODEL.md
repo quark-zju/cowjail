@@ -1,0 +1,85 @@
+# Privilege Model
+
+This document describes how `cowjail` handles privilege transitions and why.
+
+## Goals
+
+- Keep high-risk operations gated behind root euid checks.
+- Drop privileges before running untrusted user commands.
+- Make transitions observable in verbose mode.
+
+## Entry Points Requiring Root EUID
+
+- `cowjail run`
+- `cowjail rm`
+- low-level `_fuse`
+
+These commands fail fast when `euid != 0`.
+
+## `_suid` Bootstrap
+
+`cowjail _suid` ensures the current binary is setuid-root:
+
+1. If binary is already `root` + `u+s`, it exits.
+2. If caller is not root euid, it reinvokes itself with `sudo`.
+3. As root, it runs `chown root:root` and sets the setuid bit.
+4. It verifies final metadata before success.
+
+This avoids requiring users to manually run separate `chown`/`chmod` commands.
+
+## Runtime Privilege Flow (`run`)
+
+For `cowjail run`, the child setup path is:
+
+1. unshare IPC namespace (`unshare(CLONE_NEWIPC)`)
+2. adjust fs credentials (`setfsuid/setfsgid`) for FUSE access checks
+3. `chroot` into jail mount and `chdir`
+4. drop to real user via `privileges::drop_to_real_user()`
+
+After step 4, the command executes as the invoking real user.
+
+## Drop Logic (`drop_to_real_user`)
+
+`drop_to_real_user` is intentionally strict:
+
+- It requires current `euid == 0`.
+- It requires target real uid to be non-root (`uid != 0`).
+- It rejects non-root uid transitions (for example `euid=1000 -> uid=1001`).
+
+Actual syscall sequence:
+
+1. `setgroups([])`
+2. `setresgid(gid, gid, gid)`
+3. `setresuid(uid, uid, uid)`
+4. `prctl(PR_SET_NO_NEW_PRIVS, 1)`
+
+This sets real/effective/saved IDs explicitly and closes obvious privilege-regain paths.
+
+## Temporary Real-Root Escalation
+
+`privileges::with_temporary_real_root` exists for narrow internal cases (currently `_fuse` mount path with `allow_other` handling).
+
+It:
+
+1. captures current uid/gid triplets
+2. switches triplets to root
+3. runs a closure
+4. restores original triplets
+
+If restoration fails, it returns an error.
+
+## Verbose Observability
+
+When `--verbose` is enabled, privilege transitions are logged via `vlog!`, including:
+
+- temporary escalation start/restore points
+- drop-to-real-user target IDs
+- key credential syscalls
+
+## Non-Goals
+
+`cowjail` is not a full process sandbox. It does not currently provide:
+
+- seccomp policy isolation
+- capability-minimization beyond current uid/gid handling
+- network namespace isolation

@@ -90,6 +90,8 @@ cowjail rm --name agent                              # remove jail
 ## More Docs
 
 - Technical overview: [`docs/TECHNICAL_OVERVIEW.md`](docs/TECHNICAL_OVERVIEW.md)
+- Runtime layout: [`docs/RUNTIME_LAYOUT.md`](docs/RUNTIME_LAYOUT.md)
+- Privilege model: [`docs/PRIVILEGE_MODEL.md`](docs/PRIVILEGE_MODEL.md)
 - Troubleshooting: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 - E2E smoke test: [`docs/e2e_smoke.py`](docs/e2e_smoke.py)
 
