@@ -8,7 +8,6 @@ use fs_err as fs;
 
 use crate::cli::LowLevelSuidCommand;
 use crate::run_with_log;
-use crate::vlog;
 
 pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
     let exe = run_with_log(
@@ -20,10 +19,10 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         || format!("stat current executable {}", exe.display()),
     )?;
     if is_suid_root(&meta) {
-        vlog(format!(
+        crate::vlog!(
             "_suid: {} is already setuid-root, skipping",
             exe.display()
-        ));
+        );
         return Ok(());
     }
 
@@ -34,7 +33,7 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         if cmd.verbose {
             sudo.arg("--verbose");
         }
-        vlog(format!("_suid: reinvoking via sudo for {}", exe.display()));
+        crate::vlog!("_suid: reinvoking via sudo for {}", exe.display());
         let status = run_with_log(
             || Ok(sudo.status()?),
             || "start sudo for _suid self-reexec".to_string(),
@@ -71,7 +70,7 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         );
     }
 
-    vlog(format!("_suid: setuid-root ready for {}", exe.display()));
+    crate::vlog!("_suid: setuid-root ready for {}", exe.display());
     Ok(())
 }
 

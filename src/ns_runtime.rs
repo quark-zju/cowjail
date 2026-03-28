@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use crate::jail::JailPaths;
 use crate::run_with_log;
-use crate::vlog;
 
 pub(crate) const LOCK_FILE_NAME: &str = "lock";
 pub(crate) const ROOT_LOCK_FILE_NAME: &str = ".lock";
@@ -220,34 +219,34 @@ pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
 fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
     let mnt = CString::new(paths.mount_dir.as_os_str().as_bytes())
         .context("mount path contains interior NUL byte")?;
-    vlog(format!(
+    crate::vlog!(
         "rm: syscall umount2({}, MNT_DETACH)",
         paths.mount_dir.display()
-    ));
+    );
     let rc = unsafe { libc::umount2(mnt.as_ptr(), libc::MNT_DETACH) };
     if rc == 0 {
-        vlog(format!(
+        crate::vlog!(
             "rm: syscall umount2 succeeded: {}",
             paths.mount_dir.display()
-        ));
+        );
         return Ok(());
     }
     let err = std::io::Error::last_os_error();
-    vlog(format!(
+    crate::vlog!(
         "rm: syscall umount2 failed for {}: {}",
         paths.mount_dir.display(),
         err
-    ));
+    );
     if matches!(
         err.raw_os_error(),
         Some(libc::EINVAL | libc::ENOENT | libc::ENOTCONN)
     ) {
         // Not mounted, already gone, or stale/disconnected endpoint.
-        vlog(format!(
+        crate::vlog!(
             "rm: syscall umount2 reports already handled for {}: {}",
             paths.mount_dir.display(),
             err
-        ));
+        );
         return Ok(());
     }
     if err.kind() != std::io::ErrorKind::PermissionDenied {
@@ -362,10 +361,10 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 fn remove_file_if_exists_with_owner_fix(runtime_dir: &Path, path: &Path) -> Result<()> {
-    vlog(format!("rm: syscall unlink {}", path.display()));
+    crate::vlog!("rm: syscall unlink {}", path.display());
     match remove_file_if_exists(path) {
         Ok(()) => {
-            vlog(format!("rm: unlink ok {}", path.display()));
+            crate::vlog!("rm: unlink ok {}", path.display());
             Ok(())
         }
         Err(err) if err
@@ -375,32 +374,32 @@ fn remove_file_if_exists_with_owner_fix(runtime_dir: &Path, path: &Path) -> Resu
             ensure_owned_by_real_user(runtime_dir)?;
             let retried = remove_file_if_exists(path);
             if retried.is_ok() {
-                vlog(format!("rm: unlink ok after owner-fix {}", path.display()));
+                crate::vlog!("rm: unlink ok after owner-fix {}", path.display());
             }
             retried
         }
         Err(err) => {
-            vlog(format!("rm: unlink failed {}: {err:#}", path.display()));
+            crate::vlog!("rm: unlink failed {}: {err:#}", path.display());
             Err(err)
         }
     }
 }
 
 fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
-    vlog(format!("rm: syscall rmdir {}", paths.mount_dir.display()));
+    crate::vlog!("rm: syscall rmdir {}", paths.mount_dir.display());
     match fs::remove_dir(&paths.mount_dir) {
         Ok(()) => {
-            vlog(format!("rm: rmdir ok {}", paths.mount_dir.display()));
+            crate::vlog!("rm: rmdir ok {}", paths.mount_dir.display());
             Ok(())
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {
             // Last chance for lingering mount references: stop the recorded
             // FUSE server first, then retry unmount and rmdir.
-            vlog(format!(
+            crate::vlog!(
                 "rm: mount dir busy, retry cleanup for {}",
                 paths.mount_dir.display()
-            ));
+            );
             terminate_recorded_fuse_server(paths)?;
             unmount_runtime_mount_dir(paths).with_context(|| {
                 format!(
@@ -410,7 +409,7 @@ fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
             })?;
             match fs::remove_dir(&paths.mount_dir) {
                 Ok(()) => {
-                    vlog(format!("rm: rmdir ok after retry {}", paths.mount_dir.display()));
+                    crate::vlog!("rm: rmdir ok after retry {}", paths.mount_dir.display());
                     Ok(())
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -432,7 +431,7 @@ fn terminate_recorded_fuse_server(paths: &NsRuntimePaths) -> Result<()> {
     let Some(pid) = read_fuse_pid(paths)? else {
         return Ok(());
     };
-    vlog(format!("rm: syscall kill(SIGTERM,{pid})"));
+    crate::vlog!("rm: syscall kill(SIGTERM,{pid})");
     let kill_rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     if kill_rc != 0 {
         let err = std::io::Error::last_os_error();
@@ -440,9 +439,9 @@ fn terminate_recorded_fuse_server(paths: &NsRuntimePaths) -> Result<()> {
             return Err(err)
                 .with_context(|| format!("failed to SIGTERM fuse server pid={pid}"));
         }
-        vlog(format!("rm: kill skipped (pid not found): {pid}"));
+        crate::vlog!("rm: kill skipped (pid not found): {pid}");
     } else {
-        vlog(format!("rm: kill ok pid={pid}"));
+        crate::vlog!("rm: kill ok pid={pid}");
     }
     std::thread::sleep(Duration::from_millis(120));
     Ok(())

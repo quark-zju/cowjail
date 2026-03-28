@@ -5,7 +5,6 @@ use crate::cowfs;
 use crate::profile_loader::{append_profile_header, ensure_record_parent_dir, load_profile};
 use crate::record;
 use crate::run_with_log;
-use crate::vlog;
 
 pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
     let loaded = run_with_log(
@@ -26,11 +25,11 @@ pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
     )?;
 
     let fs = cowfs::CowFs::new(loaded.profile, writer);
-    vlog(format!(
+    crate::vlog!(
         "mount: mounting fuse at {} with record {}",
         mount.path.display(),
         mount.record.display()
-    ));
+    );
     run_with_log(
         || fs.mount(&mount.path, false),
         || format!("mount fuse at {}", mount.path.display()),

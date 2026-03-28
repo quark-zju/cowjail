@@ -22,6 +22,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static VERBOSE_LOG: AtomicBool = AtomicBool::new(false);
 
+pub(crate) fn is_verbose() -> bool {
+    VERBOSE_LOG.load(Ordering::Relaxed)
+}
+
+macro_rules! vlog {
+    ($($arg:tt)*) => {{
+        if $crate::is_verbose() {
+            eprintln!($($arg)*);
+        }
+    }};
+}
+pub(crate) use vlog;
+
 fn main() {
     match try_main() {
         Ok(code) => std::process::exit(code),
@@ -88,12 +101,6 @@ fn try_main() -> Result<i32> {
 
 pub(crate) fn set_verbose(enabled: bool) {
     VERBOSE_LOG.store(enabled, Ordering::Relaxed);
-}
-
-pub(crate) fn vlog(msg: String) {
-    if VERBOSE_LOG.load(Ordering::Relaxed) {
-        eprintln!("{msg}");
-    }
 }
 
 pub(crate) fn run_with_log<T, F, D>(func: F, desc: D) -> Result<T>

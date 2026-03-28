@@ -12,7 +12,6 @@ use crate::profile_loader::{
 };
 use crate::record;
 use crate::run_with_log;
-use crate::vlog;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushStats {
@@ -51,7 +50,7 @@ pub(crate) fn flush_command(flush: FlushCommand) -> Result<()> {
         || flush_record_with_policy(&record_path, flush.dry_run, Some(replay_profile)),
         || format!("flush record file {}", record_path.display()),
     )?;
-    vlog(format!(
+    crate::vlog!(
         "flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         record_path.display(),
         stats.total,
@@ -61,7 +60,7 @@ pub(crate) fn flush_command(flush: FlushCommand) -> Result<()> {
         stats.blocked,
         stats.marked,
         flush.dry_run
-    ));
+    );
     println!(
         "record: {} | total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         record_path.display(),
@@ -81,7 +80,7 @@ pub(crate) fn low_level_flush_command(flush: LowLevelFlushCommand) -> Result<()>
         || flush_record(&flush.record, flush.dry_run, flush.profile.as_deref()),
         || format!("flush record file {}", flush.record.display()),
     )?;
-    vlog(format!(
+    crate::vlog!(
         "_flush: record={} total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         flush.record.display(),
         stats.total,
@@ -91,7 +90,7 @@ pub(crate) fn low_level_flush_command(flush: LowLevelFlushCommand) -> Result<()>
         stats.blocked,
         stats.marked,
         flush.dry_run
-    ));
+    );
     println!(
         "record: {} | total={} pending={} skipped={} optimized={} blocked={} marked={} dry_run={}",
         flush.record.display(),

@@ -13,7 +13,6 @@ use crate::jail;
 use crate::ns_runtime;
 use crate::privileges;
 use crate::run_with_log;
-use crate::vlog;
 
 pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     privileges::require_root_euid("cowjail run")?;
@@ -36,13 +35,13 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         || ns_runtime::ensure_runtime_for_exec(&resolved.paths),
         || "ensure runtime".to_string(),
     )?;
-    vlog(format!(
+    crate::vlog!(
         "run: runtime={} state_before={:?} state_after={:?} rebuilt={}",
         runtime.ensured.paths.runtime_dir.display(),
         runtime.ensured.state_before,
         runtime.ensured.state_after,
         runtime.ensured.rebuilt
-    ));
+    );
     let fuse_pid = ensure_fuse_server(
         &resolved.paths,
         &runtime.ensured.paths,
@@ -55,11 +54,11 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         || format!("open ipc namespace from fuse pid {fuse_pid}"),
     )?;
 
-    vlog(format!(
+    crate::vlog!(
         "run: preparing child chroot to {} then chdir to {}",
         runtime.ensured.paths.mount_dir.display(),
         cwd.display()
-    ));
+    );
     let status = run_with_log(
         || run_child_in_chroot(&run, &runtime.ensured.paths.mount_dir, &cwd, ipcns_file),
         || format!("execute jailed command {:?}", run.program),
@@ -149,18 +148,18 @@ fn ensure_fuse_server(
     if let Some(pid) = ns_runtime::read_fuse_pid(runtime_paths)?
         && ns_runtime::process_has_mount(pid, &runtime_paths.mount_dir)?
     {
-        vlog(format!(
+        crate::vlog!(
             "run: reusing fuse server pid={} mount={}",
             pid,
             runtime_paths.mount_dir.display()
-        ));
+        );
         return Ok(pid);
     }
 
-    vlog(format!(
+    crate::vlog!(
         "run: starting fuse server for mount {}",
         runtime_paths.mount_dir.display()
-    ));
+    );
     let exe = std::env::current_exe().context("failed to locate current executable")?;
     let mut cmd = ProcessCommand::new(exe);
     cmd.arg("_fuse")
