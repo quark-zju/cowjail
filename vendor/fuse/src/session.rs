@@ -9,6 +9,9 @@ use std::io;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{PathBuf, Path};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thread_scoped::{scoped, JoinGuard};
 use libc::{EAGAIN, EINTR, ENODEV, ENOENT};
 use log::{error, info};
@@ -119,6 +122,10 @@ pub struct BackgroundSession<'a> {
     pub mountpoint: PathBuf,
     /// Thread guard of the background session
     pub guard: JoinGuard<'a, io::Result<()>>,
+    /// True while the session thread is running.
+    pub alive: Arc<AtomicBool>,
+    /// Last raw_os_error observed from the session loop.
+    pub last_error_code: Arc<Mutex<Option<i32>>>,
 }
 
 impl<'a> BackgroundSession<'a> {
@@ -127,11 +134,43 @@ impl<'a> BackgroundSession<'a> {
     /// the filesystem is unmounted and the given session ends.
     pub unsafe fn new<FS: Filesystem + Send + 'a>(se: Session<FS>) -> io::Result<BackgroundSession<'a>> {
         let mountpoint = se.mountpoint().to_path_buf();
+        let alive = Arc::new(AtomicBool::new(true));
+        let last_error_code = Arc::new(Mutex::new(None));
+        let alive_for_thread = Arc::clone(&alive);
+        let last_error_for_thread = Arc::clone(&last_error_code);
         let guard = scoped(move || {
+            struct SessionThreadState(Arc<AtomicBool>);
+            impl Drop for SessionThreadState {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _state = SessionThreadState(alive_for_thread);
             let mut se = se;
-            se.run()
+            let out = se.run();
+            if let Err(ref err) = out {
+                if let Ok(mut slot) = last_error_for_thread.lock() {
+                    *slot = err.raw_os_error();
+                }
+            }
+            out
         });
-        Ok(BackgroundSession { mountpoint: mountpoint, guard: guard })
+        Ok(BackgroundSession {
+            mountpoint: mountpoint,
+            guard: guard,
+            alive: alive,
+            last_error_code: last_error_code,
+        })
+    }
+
+    /// Return whether the background session thread is still running.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+
+    /// Return the last raw OS error code reported by the session loop.
+    pub fn last_error_code(&self) -> Option<i32> {
+        self.last_error_code.lock().ok().and_then(|slot| *slot)
     }
 }
 

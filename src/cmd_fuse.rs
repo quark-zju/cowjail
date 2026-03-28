@@ -76,7 +76,7 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
     // spawned by mount_background also lose root credentials after the drop.
     // If that kernel/userspace assumption changes, this ordering must be
     // revisited because the mount thread is created before drop_to_real_user().
-    let _session = if needs_real_root_for_allow_other {
+    let session = if needs_real_root_for_allow_other {
         run_with_log(
             || {
                 privileges::with_temporary_real_root(|| unsafe {
@@ -107,12 +107,16 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
 
     loop {
         std::thread::sleep(Duration::from_millis(400));
+        let session_alive = session.is_alive();
+        let session_error = session.last_error_code();
         let host_has_mount = crate::ns_runtime::process_has_mount(1, &cmd.mountpoint)?;
         let self_has_mount = crate::ns_runtime::process_has_mount(pid, &cmd.mountpoint)?;
         let mountpoint_healthy = mountpoint_connection_healthy(&cmd.mountpoint)?;
-        if !host_has_mount || !self_has_mount || !mountpoint_healthy {
+        if !session_alive || !host_has_mount || !self_has_mount || !mountpoint_healthy {
             crate::vlog!(
-                "_fuse: exiting because mount liveness failed (host_pid1_has_mount={} self_has_mount={} mountpoint_healthy={}) for {}",
+                "_fuse: exiting because mount liveness failed (session_alive={} session_error={:?} host_pid1_has_mount={} self_has_mount={} mountpoint_healthy={}) for {}",
+                session_alive,
+                session_error,
                 host_has_mount,
                 self_has_mount,
                 mountpoint_healthy,
