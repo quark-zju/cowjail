@@ -23,6 +23,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 ~/bin ro
 ~/.claude rw
 ~/.codex rw
+~/.config/opencode rw
 ~/.config ro
 ~/.gitconfig* ro
 ~/.gitignore* ro
