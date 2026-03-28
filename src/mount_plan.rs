@@ -18,10 +18,6 @@ struct RuleLine {
     line_no: usize,
 }
 
-pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlanEntry>> {
-    build_mount_plan_with_sources(normalized_profile, None)
-}
-
 pub(crate) fn build_mount_plan_with_sources(
     normalized_profile: &str,
     sources: Option<&[RuleSource]>,
@@ -159,39 +155,39 @@ mod tests {
 
     #[test]
     fn proc_rule_must_be_exact_and_ro_or_rw() {
-        let err = build_mount_plan("/proc/self ro\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/proc/self ro\n", None).expect_err("must fail");
         assert!(err.to_string().contains("exact path /proc"));
-        let err = build_mount_plan("/proc deny\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/proc deny\n", None).expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
-        let err = build_mount_plan("/proc cow\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/proc cow\n", None).expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
     }
 
     #[test]
     fn proc_subrule_conflicts_with_proc_mount_root() {
-        let err = build_mount_plan("/proc ro\n/proc/sys ro\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/proc ro\n/proc/sys ro\n", None).expect_err("must fail");
         assert!(err.to_string().contains("exact path /proc"));
     }
 
     #[test]
     fn sys_rule_must_be_exact_and_ro_or_rw() {
-        let err = build_mount_plan("/sys/kernel ro\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/sys/kernel ro\n", None).expect_err("must fail");
         assert!(err.to_string().contains("exact path /sys"));
-        let err = build_mount_plan("/sys deny\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/sys deny\n", None).expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
-        let err = build_mount_plan("/sys cow\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/sys cow\n", None).expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
     }
 
     #[test]
     fn dev_rule_disallows_cow() {
-        let err = build_mount_plan("/dev/null cow\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/dev/null cow\n", None).expect_err("must fail");
         assert!(err.to_string().contains("/dev does not support cow"));
     }
 
     #[test]
     fn dev_char_or_dir_rule_becomes_bind_mount() {
-        let plan = build_mount_plan("/dev/pts rw\n").expect("plan");
+        let plan = build_mount_plan_with_sources("/dev/pts rw\n", None).expect("plan");
         assert_eq!(
             plan,
             vec![MountPlanEntry::Bind {
@@ -203,7 +199,8 @@ mod tests {
 
     #[test]
     fn dev_bind_root_rejects_descendant_rules() {
-        let err = build_mount_plan("/dev/pts rw\n/dev/pts/0 ro\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/dev/pts rw\n/dev/pts/0 ro\n", None)
+            .expect_err("must fail");
         assert!(
             err.to_string()
                 .contains("conflicts with mounted root /dev/pts")
@@ -212,7 +209,7 @@ mod tests {
 
     #[test]
     fn sys_root_rejects_descendant_rules() {
-        let err = build_mount_plan("/sys ro\n/sys/fs ro\n").expect_err("must fail");
+        let err = build_mount_plan_with_sources("/sys ro\n/sys/fs ro\n", None).expect_err("must fail");
         assert!(err.to_string().contains("exact path /sys"));
     }
 
