@@ -69,6 +69,7 @@ Example:
   - implemented as `sysfs` mount in the child mount namespace
 - `/dev`:
   - glob is not allowed; use explicit paths
+  - `cow` is not supported under `/dev`
   - for `ro`/`rw` rules that point to a host character device or directory, `cowjail` automatically plans bind mounts in the child mount namespace
   - once a path is auto-promoted to bind mount root (for example `/dev/pts`), descendant profile rules under that root are rejected as conflicts
 

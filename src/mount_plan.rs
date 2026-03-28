@@ -48,6 +48,9 @@ pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlan
         if under_sys && has_glob {
             bail!("line {}: /sys rules do not allow glob patterns", rule.line_no);
         }
+        if under_dev && rule.action == RuleAction::Cow {
+            bail!("line {}: /dev does not support cow", rule.line_no);
+        }
 
         if under_proc {
             if rule.path != Path::new("/proc") {
@@ -138,6 +141,8 @@ mod tests {
         assert!(err.to_string().contains("exact path /proc"));
         let err = build_mount_plan("/proc deny\n").expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
+        let err = build_mount_plan("/proc cow\n").expect_err("must fail");
+        assert!(err.to_string().contains("only supports ro or rw"));
     }
 
     #[test]
@@ -152,6 +157,14 @@ mod tests {
         assert!(err.to_string().contains("exact path /sys"));
         let err = build_mount_plan("/sys deny\n").expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
+        let err = build_mount_plan("/sys cow\n").expect_err("must fail");
+        assert!(err.to_string().contains("only supports ro or rw"));
+    }
+
+    #[test]
+    fn dev_rule_disallows_cow() {
+        let err = build_mount_plan("/dev/null cow\n").expect_err("must fail");
+        assert!(err.to_string().contains("/dev does not support cow"));
     }
 
     #[test]
