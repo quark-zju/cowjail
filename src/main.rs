@@ -95,5 +95,24 @@ pub(crate) fn vlog(verbose: bool, msg: String) {
     }
 }
 
+pub(crate) fn run_with_log<T, F, D>(func: F, desc: D) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+    D: Fn() -> String,
+{
+    let label = desc();
+    vlog(false, format!("begin {label}"));
+    match func() {
+        Ok(v) => {
+            vlog(false, format!("ok {label}"));
+            Ok(v)
+        }
+        Err(err) => {
+            vlog(false, format!("err {label}: {err:#}"));
+            Err(err).with_context(|| label)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
