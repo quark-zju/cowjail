@@ -18,6 +18,65 @@ pub(crate) fn drop_to_real_user() -> Result<()> {
     drop_to_ids(uid, gid)
 }
 
+pub(crate) fn with_temporary_real_root<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let mut ruid: libc::uid_t = 0;
+    let mut euid: libc::uid_t = 0;
+    let mut suid: libc::uid_t = 0;
+    let mut rgid: libc::gid_t = 0;
+    let mut egid: libc::gid_t = 0;
+    let mut sgid: libc::gid_t = 0;
+
+    let get_uid_rc = unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) };
+    if get_uid_rc != 0 {
+        bail!(
+            "failed to read current uid triplet: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let get_gid_rc = unsafe { libc::getresgid(&mut rgid, &mut egid, &mut sgid) };
+    if get_gid_rc != 0 {
+        bail!(
+            "failed to read current gid triplet: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    let set_gid_root_rc = unsafe { libc::setresgid(0, 0, 0) };
+    if set_gid_root_rc != 0 {
+        bail!(
+            "failed to switch gid triplet to root: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let set_uid_root_rc = unsafe { libc::setresuid(0, 0, 0) };
+    if set_uid_root_rc != 0 {
+        let _ = unsafe { libc::setresgid(rgid, egid, sgid) };
+        bail!(
+            "failed to switch uid triplet to root: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    let run_result = f();
+
+    let restore_uid_rc = unsafe { libc::setresuid(ruid, euid, suid) };
+    let restore_uid_err = std::io::Error::last_os_error();
+    let restore_gid_rc = unsafe { libc::setresgid(rgid, egid, sgid) };
+    let restore_gid_err = std::io::Error::last_os_error();
+
+    if restore_uid_rc != 0 {
+        bail!("failed to restore uid triplet: {}", restore_uid_err);
+    }
+    if restore_gid_rc != 0 {
+        bail!("failed to restore gid triplet: {}", restore_gid_err);
+    }
+
+    run_result
+}
+
 fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
     if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
         let err = std::io::Error::last_os_error();
