@@ -207,6 +207,22 @@ pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
         .with_context(|| format!("failed to unmount runtime mount {}", paths.mount_dir.display()))?;
     match fs::remove_dir_all(&paths.runtime_dir) {
         Ok(()) => Ok(()),
+        Err(err) if err.raw_os_error() == Some(libc::ENOTCONN) => {
+            // Stale FUSE mountpoints can surface as ENOTCONN on directory traversal.
+            // Retry one forced unmount pass, then remove again.
+            unmount_runtime_mount_dir(&paths).with_context(|| {
+                format!(
+                    "failed to recover stale mountpoint {} after ENOTCONN",
+                    paths.mount_dir.display()
+                )
+            })?;
+            fs::remove_dir_all(&paths.runtime_dir).with_context(|| {
+                format!(
+                    "failed to remove jail runtime directory {} after ENOTCONN recovery",
+                    paths.runtime_dir.display()
+                )
+            })
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| {
             format!(
@@ -221,9 +237,6 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
     if !paths.mount_dir.exists() {
         return Ok(());
     }
-    if !mountinfo_has_mountpoint(&fs::read_to_string("/proc/self/mountinfo")?, &paths.mount_dir) {
-        return Ok(());
-    }
 
     let mnt = CString::new(paths.mount_dir.as_os_str().as_bytes())
         .context("mount path contains interior NUL byte")?;
@@ -232,6 +245,10 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths) -> Result<()> {
         return Ok(());
     }
     let err = std::io::Error::last_os_error();
+    if matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOENT)) {
+        // Not mounted (or already gone).
+        return Ok(());
+    }
     if err.kind() != std::io::ErrorKind::PermissionDenied {
         return Err(err).with_context(|| {
             format!(
