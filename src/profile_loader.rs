@@ -32,6 +32,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 ~/.gitconfig* ro
 ~/.gitignore* ro
 ~/.ssh deny
+%include default.local
 . cow
 ";
 
