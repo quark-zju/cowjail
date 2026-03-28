@@ -238,6 +238,14 @@ fn unmount_runtime_mount_dir(paths: &NsRuntimePaths, verbose: bool) -> Result<()
         return Ok(());
     }
     let err = std::io::Error::last_os_error();
+    vlog(
+        verbose,
+        format!(
+            "rm: syscall umount2 failed for {}: {}",
+            paths.mount_dir.display(),
+            err
+        ),
+    );
     if matches!(
         err.raw_os_error(),
         Some(libc::EINVAL | libc::ENOENT | libc::ENOTCONN)
