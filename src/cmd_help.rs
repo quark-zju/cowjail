@@ -222,7 +222,9 @@ fn root_help_text(verbose: bool) -> String {
 
 fn profile_help_text() -> String {
     let mut out = String::from(help_text(HelpTopic::Profile, false));
-    out.push_str("\n\nDEFAULT PROFILE (`~/.config/cowjail/profiles/default`, fallback built-in):\n");
+    out.push_str(
+        "\n\nDEFAULT PROFILE (`~/.config/cowjail/profiles/default`, fallback built-in):\n",
+    );
     for line in profile_loader::default_profile_source_for_help().lines() {
         out.push_str("  ");
         out.push_str(line);

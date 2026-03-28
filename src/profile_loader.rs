@@ -148,7 +148,11 @@ fn expand_includes(source: &str) -> Result<String> {
     expand_includes_with(source, &mut stack, &mut read_named_profile_source)
 }
 
-fn expand_includes_with<F>(source: &str, stack: &mut Vec<String>, resolver: &mut F) -> Result<String>
+fn expand_includes_with<F>(
+    source: &str,
+    stack: &mut Vec<String>,
+    resolver: &mut F,
+) -> Result<String>
 where
     F: FnMut(&str) -> Result<Option<String>>,
 {
