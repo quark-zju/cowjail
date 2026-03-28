@@ -34,7 +34,12 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         || "ensure runtime".to_string(),
     )?;
     let mount_plan = run_with_log(
-        || mount_plan::build_mount_plan(&resolved.normalized_profile),
+        || {
+            mount_plan::build_mount_plan_with_sources(
+                &resolved.normalized_profile,
+                resolved.normalized_rule_sources.as_deref(),
+            )
+        },
         || "build run mount plan".to_string(),
     )?;
     crate::vlog!(

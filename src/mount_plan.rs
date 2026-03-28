@@ -1,4 +1,5 @@
 use crate::profile::{self, RuleAction};
+use crate::profile_loader::RuleSource;
 use anyhow::{Result, bail};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,13 @@ struct RuleLine {
 }
 
 pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlanEntry>> {
+    build_mount_plan_with_sources(normalized_profile, None)
+}
+
+pub(crate) fn build_mount_plan_with_sources(
+    normalized_profile: &str,
+    sources: Option<&[RuleSource]>,
+) -> Result<Vec<MountPlanEntry>> {
     let parsed = profile::parse_normalized_rule_lines(normalized_profile)?;
     let rules: Vec<RuleLine> = parsed
         .into_iter()
@@ -28,7 +36,6 @@ pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlan
         })
         .collect();
     let mut plan = Vec::new();
-
     for rule in &rules {
         let path_str = rule
             .path
@@ -38,28 +45,29 @@ pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlan
         let under_dev = rule.path.starts_with("/dev");
         let under_proc = rule.path.starts_with("/proc");
         let under_sys = rule.path.starts_with("/sys");
+        let loc = rule_loc(rule.line_no, sources);
 
         if under_dev && has_glob {
-            bail!("line {}: /dev rules do not allow glob patterns", rule.line_no);
+            bail!("{loc}: /dev rules do not allow glob patterns");
         }
         if under_proc && has_glob {
-            bail!("line {}: /proc rules do not allow glob patterns", rule.line_no);
+            bail!("{loc}: /proc rules do not allow glob patterns");
         }
         if under_sys && has_glob {
-            bail!("line {}: /sys rules do not allow glob patterns", rule.line_no);
+            bail!("{loc}: /sys rules do not allow glob patterns");
         }
         if under_dev && rule.action == RuleAction::Cow {
-            bail!("line {}: /dev does not support cow", rule.line_no);
+            bail!("{loc}: /dev does not support cow");
         }
 
         if under_proc {
             if rule.path != Path::new("/proc") {
-                bail!("line {}: /proc only allows the exact path /proc", rule.line_no);
+                bail!("{loc}: /proc only allows the exact path /proc");
             }
             let read_only = match rule.action {
                 RuleAction::ReadOnly => true,
                 RuleAction::Passthrough => false,
-                _ => bail!("line {}: /proc only supports ro or rw", rule.line_no),
+                _ => bail!("{loc}: /proc only supports ro or rw"),
             };
             plan.push(MountPlanEntry::Proc {
                 path: rule.path.clone(),
@@ -69,12 +77,12 @@ pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlan
         }
         if under_sys {
             if rule.path != Path::new("/sys") {
-                bail!("line {}: /sys only allows the exact path /sys", rule.line_no);
+                bail!("{loc}: /sys only allows the exact path /sys");
             }
             let read_only = match rule.action {
                 RuleAction::ReadOnly => true,
                 RuleAction::Passthrough => false,
-                _ => bail!("line {}: /sys only supports ro or rw", rule.line_no),
+                _ => bail!("{loc}: /sys only supports ro or rw"),
             };
             plan.push(MountPlanEntry::Sys {
                 path: rule.path.clone(),
@@ -99,11 +107,15 @@ pub(crate) fn build_mount_plan(normalized_profile: &str) -> Result<Vec<MountPlan
         }
     }
 
-    validate_bind_conflicts(&rules, &plan)?;
+    validate_bind_conflicts(&rules, &plan, sources)?;
     Ok(plan)
 }
 
-fn validate_bind_conflicts(rules: &[RuleLine], plan: &[MountPlanEntry]) -> Result<()> {
+fn validate_bind_conflicts(
+    rules: &[RuleLine],
+    plan: &[MountPlanEntry],
+    sources: Option<&[RuleSource]>,
+) -> Result<()> {
     for entry in plan {
         let bind_root = match entry {
             MountPlanEntry::Bind { path, .. }
@@ -115,9 +127,10 @@ fn validate_bind_conflicts(rules: &[RuleLine], plan: &[MountPlanEntry]) -> Resul
                 continue;
             }
             if rule.path.starts_with(bind_root) {
+                let loc = rule_loc(rule.line_no, sources);
                 bail!(
-                    "line {}: rule {} conflicts with mounted root {}",
-                    rule.line_no,
+                    "{}: rule {} conflicts with mounted root {}",
+                    loc,
                     rule.path.display(),
                     bind_root.display()
                 );
@@ -129,6 +142,15 @@ fn validate_bind_conflicts(rules: &[RuleLine], plan: &[MountPlanEntry]) -> Resul
 
 fn has_glob_syntax(value: &str) -> bool {
     value.contains('*') || value.contains('?') || value.contains('[')
+}
+
+fn rule_loc(line_no: usize, sources: Option<&[RuleSource]>) -> String {
+    if let Some(sources) = sources
+        && let Some(src) = sources.get(line_no.saturating_sub(1))
+    {
+        return format!("{}:{} (expanded line {})", src.source, src.line, line_no);
+    }
+    format!("line {line_no}")
 }
 
 #[cfg(test)]
@@ -189,5 +211,15 @@ mod tests {
     fn sys_root_rejects_descendant_rules() {
         let err = build_mount_plan("/sys ro\n/sys/fs ro\n").expect_err("must fail");
         assert!(err.to_string().contains("exact path /sys"));
+    }
+
+    #[test]
+    fn source_locations_are_used_when_available() {
+        let sources = vec![RuleSource {
+            source: "profiles/base".to_string(),
+            line: 42,
+        }];
+        let err = build_mount_plan_with_sources("/proc/self ro\n", Some(&sources)).expect_err("must fail");
+        assert!(err.to_string().contains("profiles/base:42"));
     }
 }

@@ -31,6 +31,7 @@ State layout:
 
 - persistent state: `~/.local/state/cowjail/<NAME>/...`
 - runtime state: `${XDG_RUNTIME_DIR}/cowjail/<NAME>/...` if `XDG_RUNTIME_DIR` exists, otherwise `/run/user/<uid>/cowjail/<NAME>/...`
+- profile source map: `state/<name>/profile.sources` (CBOR), mapping normalized rule index back to original `source:path + line` across `%include` expansion
 
 ## Record Model
 
@@ -123,6 +124,7 @@ These are intentional design choices, not accidental omissions.
   - metadata fidelity is intentionally limited compared with a full kernel filesystem stack (`setattr` supports `rw` passthrough truncate/chmod/atime/mtime, while `cow` mode only supports truncate + regular-file executable-bit updates and in-memory atime overrides).
   - host-visible atime changes are not a strict replay signal; read-side effects in FUSE/host path traversal can update atime even without `flush`.
   - `/proc` is not fully virtualized. Current behavior includes a targeted compatibility shim: `/proc/self` `readlink` is rewritten to the requesting PID, and `/proc/thread-self` is hard-blocked (`ENOENT`).
+  - mount-plan validation errors use normalized line numbers by default, and upgrade to `source:line` when `profile.sources` is available.
 
 ## Lock Files
 

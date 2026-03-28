@@ -31,8 +31,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 ~/.gitconfig* ro
 ~/.gitignore* ro
 ~/.ssh deny
-/proc/self ro
-/proc/*/exe ro
+/proc ro
 %include default.local
 . cow
 ";
@@ -55,7 +54,27 @@ pub(crate) fn default_profile_source_for_help() -> String {
 pub(crate) struct LoadedProfile {
     pub(crate) profile: profile::Profile,
     pub(crate) normalized_source: String,
+    pub(crate) normalized_rule_sources: Vec<RuleSource>,
     pub(crate) record_max_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RuleSource {
+    pub(crate) source: String,
+    pub(crate) line: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ExpandedLine {
+    text: String,
+    source: String,
+    line_no: usize,
+}
+
+#[derive(Debug, Clone)]
+struct IncludedSource {
+    source_name: String,
+    content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,21 +101,23 @@ pub(crate) fn append_profile_header(
 pub(crate) fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
     let cwd = jail::current_pwd()?;
     let resolved = resolve_profile_path(profile_path)?;
-    let source = match fs::read_to_string(&resolved) {
-        Ok(raw) => raw,
+    let (source_name, source) = match fs::read_to_string(&resolved) {
+        Ok(raw) => (resolved.display().to_string(), raw),
         Err(err)
             if err.kind() == std::io::ErrorKind::NotFound
                 && profile_path == Path::new(cli::DEFAULT_PROFILE) =>
         {
-            BUILTIN_DEFAULT_PROFILE_SOURCE.to_string()
+            ("builtin:default".to_string(), BUILTIN_DEFAULT_PROFILE_SOURCE.to_string())
         }
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("failed to read profile file: {}", resolved.display()));
         }
     };
-    let expanded_source = expand_includes(&source)?;
+    let expanded = expand_includes(&source, &source_name)?;
+    let expanded_source = expanded_to_string(&expanded);
     let parse_source = strip_directive_lines(&expanded_source);
+    let normalized_rule_sources = effective_rule_sources(&expanded);
 
     let source_name = format!("profile file: {}", resolved.display());
     let profile = profile::Profile::parse(&parse_source, &cwd)
@@ -112,6 +133,7 @@ pub(crate) fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
     Ok(LoadedProfile {
         profile,
         normalized_source,
+        normalized_rule_sources,
         record_max_size_bytes,
     })
 }
@@ -145,31 +167,38 @@ fn resolve_profile_path(profile_path: &Path) -> Result<PathBuf> {
     jail::profile_definition_path(name)
 }
 
-fn expand_includes(source: &str) -> Result<String> {
+fn expand_includes(source: &str, source_name: &str) -> Result<Vec<ExpandedLine>> {
     let mut stack = Vec::new();
-    expand_includes_with(source, &mut stack, &mut read_named_profile_source)
+    expand_includes_with(source, source_name, &mut stack, &mut read_named_profile_source)
 }
 
 fn expand_includes_with<F>(
     source: &str,
+    source_name: &str,
     stack: &mut Vec<String>,
     resolver: &mut F,
-) -> Result<String>
+) -> Result<Vec<ExpandedLine>>
 where
-    F: FnMut(&str) -> Result<Option<String>>,
+    F: FnMut(&str) -> Result<Option<IncludedSource>>,
 {
-    let mut out = String::new();
+    let mut out = Vec::new();
     for (idx, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         let Some(body) = trimmed.strip_prefix('%') else {
-            out.push_str(line);
-            out.push('\n');
+            out.push(ExpandedLine {
+                text: line.to_string(),
+                source: source_name.to_string(),
+                line_no: idx + 1,
+            });
             continue;
         };
         let directive = body.trim();
         if directive.starts_with("set ") {
-            out.push_str(line);
-            out.push('\n');
+            out.push(ExpandedLine {
+                text: line.to_string(),
+                source: source_name.to_string(),
+                line_no: idx + 1,
+            });
             continue;
         }
         if !directive.starts_with("include") {
@@ -196,23 +225,55 @@ where
             continue;
         };
         stack.push(name.to_string());
-        let nested = expand_includes_with(&included_source, stack, resolver)
+        let nested = expand_includes_with(
+            &included_source.content,
+            &included_source.source_name,
+            stack,
+            resolver,
+        )
             .with_context(|| format!("failed to expand include '{name}'"))?;
         stack.pop();
-        out.push_str(&nested);
+        out.extend(nested);
     }
     Ok(out)
 }
 
-fn read_named_profile_source(name: &str) -> Result<Option<String>> {
+fn read_named_profile_source(name: &str) -> Result<Option<IncludedSource>> {
     let path = jail::profile_definition_path(name)?;
     match fs::read_to_string(&path) {
-        Ok(raw) => Ok(Some(raw)),
+        Ok(raw) => Ok(Some(IncludedSource {
+            source_name: path.display().to_string(),
+            content: raw,
+        })),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => {
             Err(err).with_context(|| format!("failed to read included profile {}", path.display()))
         }
     }
+}
+
+fn expanded_to_string(lines: &[ExpandedLine]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line.text);
+        out.push('\n');
+    }
+    out
+}
+
+fn effective_rule_sources(lines: &[ExpandedLine]) -> Vec<RuleSource> {
+    let mut out = Vec::new();
+    for line in lines {
+        let trimmed = line.text.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('%') {
+            continue;
+        }
+        out.push(RuleSource {
+            source: line.source.clone(),
+            line: line.line_no,
+        });
+    }
+    out
 }
 
 fn strip_directive_lines(source: &str) -> String {
@@ -301,7 +362,7 @@ fn parse_byte_size(raw: &str) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_RECORD_MAX_SIZE_BYTES, expand_includes_with, parse_byte_size,
+        DEFAULT_RECORD_MAX_SIZE_BYTES, IncludedSource, expand_includes_with, parse_byte_size,
         parse_record_max_size_override, strip_directive_lines,
     };
     use std::collections::BTreeMap;
@@ -331,30 +392,72 @@ mod tests {
     fn include_expands_named_profile_inline() {
         let mut includes = BTreeMap::new();
         includes.insert("base".to_string(), "/etc ro\n".to_string());
-        let mut resolver = |name: &str| Ok(includes.get(name).cloned());
+        let mut resolver = |name: &str| {
+            Ok(includes.get(name).cloned().map(|content| IncludedSource {
+                source_name: name.to_string(),
+                content,
+            }))
+        };
         let mut stack = Vec::new();
-        let expanded = expand_includes_with("%include base\n/tmp rw\n", &mut stack, &mut resolver)
-            .expect("include should expand");
-        assert_eq!(expanded, "/etc ro\n/tmp rw\n");
+        let expanded = expand_includes_with(
+            "%include base\n/tmp rw\n",
+            "root",
+            &mut stack,
+            &mut resolver,
+        )
+        .expect("include should expand");
+        let joined = super::expanded_to_string(&expanded);
+        assert_eq!(joined, "/etc ro\n/tmp rw\n");
     }
 
     #[test]
     fn include_missing_profile_is_ignored() {
-        let mut resolver = |_name: &str| Ok(None);
+        let mut resolver = |_name: &str| Ok(None::<IncludedSource>);
         let mut stack = Vec::new();
-        let expanded =
-            expand_includes_with("%include missing\n/tmp rw\n", &mut stack, &mut resolver)
-                .expect("missing include should be ignored");
-        assert_eq!(expanded, "/tmp rw\n");
+        let expanded = expand_includes_with(
+            "%include missing\n/tmp rw\n",
+            "root",
+            &mut stack,
+            &mut resolver,
+        )
+        .expect("missing include should be ignored");
+        let joined = super::expanded_to_string(&expanded);
+        assert_eq!(joined, "/tmp rw\n");
     }
 
     #[test]
     fn include_rejects_non_short_name() {
-        let mut resolver = |_name: &str| Ok(None);
+        let mut resolver = |_name: &str| Ok(None::<IncludedSource>);
         let mut stack = Vec::new();
-        let err = expand_includes_with("%include nested/base\n", &mut stack, &mut resolver)
+        let err = expand_includes_with("%include nested/base\n", "root", &mut stack, &mut resolver)
             .expect_err("include name with slash should fail");
         assert!(err.to_string().contains("invalid include profile name"));
+    }
+
+    #[test]
+    fn effective_rule_sources_track_include_origin() {
+        let mut includes = BTreeMap::new();
+        includes.insert("base".to_string(), "/etc ro\n".to_string());
+        let mut resolver = |name: &str| {
+            Ok(includes.get(name).cloned().map(|content| IncludedSource {
+                source_name: "base.profile".to_string(),
+                content,
+            }))
+        };
+        let mut stack = Vec::new();
+        let expanded = expand_includes_with(
+            "%include base\n/tmp rw\n",
+            "root.profile",
+            &mut stack,
+            &mut resolver,
+        )
+        .expect("expand");
+        let sources = super::effective_rule_sources(&expanded);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].source, "base.profile");
+        assert_eq!(sources[0].line, 1);
+        assert_eq!(sources[1].source, "root.profile");
+        assert_eq!(sources[1].line, 2);
     }
 
     #[test]
