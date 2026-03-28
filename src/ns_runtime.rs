@@ -375,7 +375,9 @@ fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
         Ok(()) => return Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) if err.raw_os_error() == Some(libc::EBUSY) => {
-            // Last chance for lingering mount references.
+            // Last chance for lingering mount references: stop the recorded
+            // FUSE server first, then retry unmount and rmdir.
+            terminate_recorded_fuse_server(paths)?;
             unmount_runtime_mount_dir(paths).with_context(|| {
                 format!(
                     "failed to unmount busy runtime mount {}",
@@ -401,6 +403,22 @@ fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
             });
         }
     }
+}
+
+fn terminate_recorded_fuse_server(paths: &NsRuntimePaths) -> Result<()> {
+    let Some(pid) = read_fuse_pid(paths)? else {
+        return Ok(());
+    };
+    let kill_rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if kill_rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(err)
+                .with_context(|| format!("failed to SIGTERM fuse server pid={pid}"));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(120));
+    Ok(())
 }
 
 fn is_mountpoint_in_mountinfo(mountpoint: &Path) -> bool {
