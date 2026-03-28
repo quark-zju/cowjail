@@ -1,4 +1,5 @@
 mod cli;
+mod cmd_help;
 mod cmd_flush;
 mod cmd_fuse;
 mod cmd_jail;
@@ -30,7 +31,7 @@ fn main() {
 fn try_main() -> Result<i32> {
     match cli::parse_env()? {
         Command::Help { topic, verbose } => {
-            println!("{}", cli::help_text(topic, verbose));
+            cmd_help::print_help(topic, verbose);
             Ok(0)
         }
         Command::Add(add) => {
