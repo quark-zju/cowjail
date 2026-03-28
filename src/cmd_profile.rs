@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
+use std::path::Path;
 use std::process::Command as ProcessCommand;
 
 use crate::cli::{self, ProfileAction, ProfileCommand};
@@ -71,9 +72,7 @@ fn edit_profile(name: &str) -> Result<()> {
 }
 
 fn show_profile(name: &str) -> Result<()> {
-    let path = resolved_profile_path(name)?;
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read profile file {}", path.display()))?;
+    let text = read_profile_source_for_show(name)?;
     print!("{text}");
     if !text.ends_with('\n') {
         println!();
@@ -112,21 +111,49 @@ fn rm_profile(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolved_profile_path(name: &str) -> Result<std::path::PathBuf> {
+fn read_profile_source_for_show(name: &str) -> Result<String> {
     jail::validate_explicit_name(name).context("invalid profile name")?;
     let path = jail::profile_definition_path(name)?;
-    if path.exists() {
-        return Ok(path);
-    }
-    if name == cli::DEFAULT_PROFILE {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create profiles dir {}", parent.display()))?;
+    read_profile_source_for_show_from_path(name, &path)
+}
+
+fn read_profile_source_for_show_from_path(name: &str, path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound && name == cli::DEFAULT_PROFILE =>
+        {
+            Ok(profile_loader::builtin_default_profile_source().to_string())
         }
-        fs::write(&path, profile_loader::builtin_default_profile_source()).with_context(|| {
-            format!("failed to initialize default profile at {}", path.display())
-        })?;
-        return Ok(path);
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!("profile does not exist: {name}")
+        }
+        Err(err) => Err(err)
+            .with_context(|| format!("failed to read profile file {}", path.display())),
     }
-    bail!("profile does not exist: {name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn show_falls_back_to_builtin_default_without_creating_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("default");
+        let text = read_profile_source_for_show_from_path(cli::DEFAULT_PROFILE, &path)
+            .expect("default fallback source");
+        assert_eq!(text, profile_loader::builtin_default_profile_source());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn show_missing_non_default_profile_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("demo");
+        let err = read_profile_source_for_show_from_path("demo", &path)
+            .expect_err("missing non-default should fail");
+        assert!(err.to_string().contains("profile does not exist: demo"));
+    }
 }
