@@ -21,15 +21,16 @@ Out of scope:
 
 Main components:
 
-- `run`: resolve/select jail, ensure runtime namespace handles, ensure per-jail FUSE server, execute command in jail
+- `run`: resolve/select jail, ensure per-jail runtime + FUSE server, join server IPC namespace, execute command in jail
 - `_fuse` (hidden): internal long-lived FUSE server entrypoint for a jail runtime
 - `flush`: replay pending record operations onto host filesystem
 - `add` / `rm` / `list`: named jail lifecycle
+- `_suid` (hidden): ensure current binary is setuid-root (self-reexec via `sudo` when needed)
 
 State layout:
 
 - persistent state: `~/.local/state/cowjail/<NAME>/...`
-- runtime state: `/run/cowjail/<NAME>/...`
+- runtime state: `${XDG_RUNTIME_DIR}/cowjail/<NAME>/...` if `XDG_RUNTIME_DIR` exists, otherwise `/run/user/<uid>/cowjail/<NAME>/...`
 
 ## Record Model
 
@@ -64,7 +65,8 @@ Profile lines are `pattern action` with first-match-wins.
 Actions:
 
 - `ro`
-- `rw`
+- `rw` (writable passthrough; applies to host immediately)
+- `cow` (writable copy-on-write; captured and applied by `flush`)
 - `deny`
 
 `.` resolves relative to current working directory at profile load time.
@@ -78,11 +80,20 @@ Public:
 - `add`
 - `rm`
 - `list`
+- `help`
 
 Hidden low-level (debug/recovery):
 
 - `_fuse`
 - `_mount`
 - `_flush`
+- `_suid`
 
 These low-level commands are intentionally separate from normal workflow docs.
+
+## Runtime Execution Notes
+
+- `run` does not persist a separate mount namespace handle for jail reuse.
+- `_fuse` mounts a per-jail FUSE view under the runtime directory (`.../mount`).
+- `run` joins the FUSE server IPC namespace (`setns(CLONE_NEWIPC)`), then `chroot`s to that mount, then drops privileges to the real user.
+- `rm` unmounts runtime FUSE mountpoints and removes known runtime/state artifacts conservatively.
