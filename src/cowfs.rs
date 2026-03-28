@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use fs_err as fs;
-use fuse::{
+use fuser::{
     self, FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
@@ -75,7 +75,7 @@ impl CowFs {
 
     pub fn mount(self, mountpoint: &Path, allow_other: bool) -> Result<()> {
         let options = fuse_mount_options(allow_other);
-        fuse::mount2(self, mountpoint, &options).with_context(|| {
+        fuser::mount2(self, mountpoint, &options).with_context(|| {
             format!(
                 "failed to mount fuse filesystem at {}",
                 mountpoint.display()
@@ -87,9 +87,9 @@ impl CowFs {
         self,
         mountpoint: &Path,
         allow_other: bool,
-    ) -> Result<fuse::BackgroundSession> {
+    ) -> Result<fuser::BackgroundSession> {
         let options = fuse_mount_options(allow_other);
-        fuse::spawn_mount2(self, mountpoint, &options).with_context(|| {
+        fuser::spawn_mount2(self, mountpoint, &options).with_context(|| {
             format!(
                 "failed to mount fuse filesystem in background at {}",
                 mountpoint.display()
@@ -621,13 +621,13 @@ impl CowFs {
     }
 }
 
-fn fuse_mount_options(allow_other: bool) -> Vec<fuse::MountOption> {
+fn fuse_mount_options(allow_other: bool) -> Vec<fuser::MountOption> {
     let mut options = Vec::with_capacity(3);
-    options.push(fuse::MountOption::DefaultPermissions);
+    options.push(fuser::MountOption::DefaultPermissions);
     if allow_other {
-        options.push(fuse::MountOption::AllowOther);
+        options.push(fuser::MountOption::AllowOther);
     }
-    options.push(fuse::MountOption::FSName("cowjail".to_string()));
+    options.push(fuser::MountOption::FSName("cowjail".to_string()));
     options
 }
 
