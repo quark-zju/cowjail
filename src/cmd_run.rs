@@ -220,18 +220,7 @@ fn close_all_fds_best_effort() {
     if try_close_range(0).is_ok() {
         return;
     }
-    let mut lim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    let max_fd: i32 = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0
-        && lim.rlim_cur > 0
-        && lim.rlim_cur < i32::MAX as libc::rlim_t
-    {
-        lim.rlim_cur as i32
-    } else {
-        65536
-    };
+    let max_fd: i32 = 65536;
     for fd in 0..max_fd {
         unsafe {
             libc::close(fd);
