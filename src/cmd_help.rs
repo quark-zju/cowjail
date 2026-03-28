@@ -3,6 +3,7 @@ use crate::profile_loader;
 
 const HELP_TOPIC_NAMES: &[(&str, HelpTopic)] = &[
     ("profile", HelpTopic::Profile),
+    ("completion", HelpTopic::Completion),
     ("add", HelpTopic::Add),
     ("list", HelpTopic::List),
     ("show", HelpTopic::Show),
@@ -58,6 +59,17 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
             "  /tmp rw\n",
             "  . cow\n",
             "  /home/*/.ssh deny",
+        )
+        .to_string(),
+        HelpTopic::Completion => concat!(
+            "cowjail completion\n\n",
+            "USAGE:\n",
+            "  cowjail completion [bash|zsh|fish]\n\n",
+            "DESCRIPTION:\n",
+            "  Print shell completion script to stdout.\n",
+            "  If shell is omitted, detect from SHELL.\n\n",
+            "EXAMPLE:\n",
+            "  source <(cowjail completion)\n",
         )
         .to_string(),
         HelpTopic::Add => concat!(

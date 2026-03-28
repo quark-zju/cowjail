@@ -4,6 +4,7 @@ mod cmd_fuse;
 mod cmd_help;
 mod cmd_jail;
 mod cmd_mount;
+mod cmd_completion;
 mod cmd_profile;
 mod cmd_run;
 mod cmd_show;
@@ -61,6 +62,11 @@ fn try_main() -> Result<i32> {
             cmd_help::print_help(topic, verbose);
             Ok(0)
         }
+        Command::Completion(completion) => {
+            cmd_completion::completion_command(completion)
+                .context("completion subcommand failed")?;
+            Ok(0)
+        }
         Command::Profile(profile) => {
             cmd_profile::profile_command(profile).context("profile subcommand failed")?;
             Ok(0)
@@ -112,6 +118,7 @@ fn try_main() -> Result<i32> {
 fn command_verbose(cmd: &Command) -> bool {
     match cmd {
         Command::Help { verbose, .. } => *verbose,
+        Command::Completion(_) => false,
         Command::Profile(_) => false,
         Command::Show(show) => show.verbose,
         Command::Rm(rm) => rm.verbose,
@@ -132,6 +139,7 @@ fn require_priviledge_reason(cmd: &Command) -> Option<&'static str> {
         Command::LowLevelFuse(_) => Some("_fuse requires root euid to mount FUSE daemon"),
         Command::LowLevelSuid(_) => Some("_suid updates binary ownership/mode"),
         Command::Help { .. }
+        | Command::Completion(_)
         | Command::Profile(_)
         | Command::Add(_)
         | Command::List(_)

@@ -10,6 +10,7 @@ pub const DEFAULT_PROFILE: &str = "default";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help { topic: HelpTopic, verbose: bool },
+    Completion(CompletionCommand),
     Profile(ProfileCommand),
     Add(AddCommand),
     List(ListCommand),
@@ -33,6 +34,7 @@ pub enum HelpTopic {
     Rm,
     Run,
     Flush,
+    Completion,
     LowLevelMount,
     LowLevelFlush,
     LowLevelFuse,
@@ -120,6 +122,11 @@ pub struct LowLevelSuidCommand {
     pub verbose: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionCommand {
+    pub shell: Option<String>,
+}
+
 pub fn parse_from<I>(argv: I) -> Result<Command>
 where
     I: IntoIterator<Item = OsString>,
@@ -136,12 +143,13 @@ where
     let mut args = Arguments::from_vec(raw);
     let subcmd = args.subcommand()?.ok_or_else(|| {
         anyhow::anyhow!(
-            "missing subcommand (expected: profile, add, list, show, rm, run, flush)"
+            "missing subcommand (expected: completion, profile, add, list, show, rm, run, flush)"
         )
     })?;
 
     let command = match subcmd.as_str() {
         "help" => parse_help(args)?,
+        "completion" => parse_completion(args)?,
         "profile" => parse_profile(args)?,
         "add" => parse_add(args)?,
         "list" => parse_list(args)?,
@@ -173,6 +181,25 @@ fn parse_help(args: Arguments) -> Result<Command> {
     let topic = crate::cmd_help::topic_from_name(topic)
         .ok_or_else(|| anyhow::anyhow!("unknown help topic: {topic}"))?;
     Ok(help_command(topic, false))
+}
+
+fn parse_completion(mut args: Arguments) -> Result<Command> {
+    if args.contains(["-h", "--help"]) {
+        return Ok(help_command(HelpTopic::Completion, false));
+    }
+    let extra = args.finish();
+    if extra.len() > 1 {
+        bail!("completion got unexpected trailing arguments");
+    }
+    let shell = extra
+        .first()
+        .map(|raw| {
+            raw.to_str()
+                .ok_or_else(|| anyhow::anyhow!("completion SHELL must be valid UTF-8"))
+                .map(ToOwned::to_owned)
+        })
+        .transpose()?;
+    Ok(Command::Completion(CompletionCommand { shell }))
 }
 
 fn parse_profile(mut args: Arguments) -> Result<Command> {
@@ -558,6 +585,23 @@ mod tests {
             cmd,
             Command::Profile(ProfileCommand {
                 action: ProfileAction::List
+            })
+        );
+    }
+
+    #[test]
+    fn parse_completion_without_shell() {
+        let cmd = parse_from(os(&["completion"])).expect("completion should parse");
+        assert_eq!(cmd, Command::Completion(CompletionCommand { shell: None }));
+    }
+
+    #[test]
+    fn parse_completion_with_shell() {
+        let cmd = parse_from(os(&["completion", "bash"])).expect("completion shell should parse");
+        assert_eq!(
+            cmd,
+            Command::Completion(CompletionCommand {
+                shell: Some("bash".to_string())
             })
         );
     }
