@@ -7,12 +7,18 @@ use anyhow::{Context, Result, bail};
 use fs_err as fs;
 
 use crate::cli::LowLevelSuidCommand;
+use crate::run_with_log;
 use crate::vlog;
 
 pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
-    let exe = std::env::current_exe().context("failed to resolve current executable path")?;
-    let meta = fs::symlink_metadata(&exe)
-        .with_context(|| format!("failed to stat current executable {}", exe.display()))?;
+    let exe = run_with_log(
+        || Ok(std::env::current_exe()?),
+        || "resolve current executable path".to_string(),
+    )?;
+    let meta = run_with_log(
+        || Ok(fs::symlink_metadata(&exe)?),
+        || format!("stat current executable {}", exe.display()),
+    )?;
     if is_suid_root(&meta) {
         vlog(
             cmd.verbose,
@@ -32,16 +38,18 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
             cmd.verbose,
             format!("_suid: reinvoking via sudo for {}", exe.display()),
         );
-        let status = sudo
-            .status()
-            .context("failed to start sudo for _suid self-reexec")?;
+        let status = run_with_log(
+            || Ok(sudo.status()?),
+            || "start sudo for _suid self-reexec".to_string(),
+        )?;
         if !status.success() {
             bail!("sudo _suid failed with status {status}");
         }
 
-        let meta = fs::symlink_metadata(&exe).with_context(|| {
-            format!("failed to stat current executable after sudo {}", exe.display())
-        })?;
+        let meta = run_with_log(
+            || Ok(fs::symlink_metadata(&exe)?),
+            || format!("stat current executable after sudo {}", exe.display()),
+        )?;
         if is_suid_root(&meta) {
             return Ok(());
         }
@@ -51,9 +59,14 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         );
     }
 
-    apply_setuid_root(&exe)?;
-    let meta = fs::symlink_metadata(&exe)
-        .with_context(|| format!("failed to stat executable after _suid {}", exe.display()))?;
+    run_with_log(
+        || apply_setuid_root(&exe),
+        || format!("apply setuid root to {}", exe.display()),
+    )?;
+    let meta = run_with_log(
+        || Ok(fs::symlink_metadata(&exe)?),
+        || format!("stat executable after _suid {}", exe.display()),
+    )?;
     if !is_suid_root(&meta) {
         bail!(
             "_suid attempted updates but binary is still not setuid-root: {}",

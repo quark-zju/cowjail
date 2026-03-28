@@ -1,27 +1,29 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::cli::MountCommand;
 use crate::cowfs;
 use crate::profile_loader::{append_profile_header, ensure_record_parent_dir, load_profile};
 use crate::record;
+use crate::run_with_log;
 use crate::vlog;
 
 pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
-    let loaded = load_profile(std::path::Path::new(&mount.profile))
-        .with_context(|| format!("failed to load mount profile '{}'", mount.profile))?;
-    ensure_record_parent_dir(&mount.record)?;
-    let writer = record::Writer::open_append(&mount.record).with_context(|| {
-        format!(
-            "failed to open mount record writer at {}",
-            mount.record.display()
-        )
-    })?;
-    append_profile_header(&writer, &loaded.normalized_source).with_context(|| {
-        format!(
-            "failed to append mount profile header into {}",
-            mount.record.display()
-        )
-    })?;
+    let loaded = run_with_log(
+        || load_profile(std::path::Path::new(&mount.profile)),
+        || format!("load mount profile '{}'", mount.profile),
+    )?;
+    run_with_log(
+        || ensure_record_parent_dir(&mount.record),
+        || format!("prepare record parent dir {}", mount.record.display()),
+    )?;
+    let writer = run_with_log(
+        || record::Writer::open_append(&mount.record),
+        || format!("open mount record writer {}", mount.record.display()),
+    )?;
+    run_with_log(
+        || append_profile_header(&writer, &loaded.normalized_source),
+        || format!("append mount profile header into {}", mount.record.display()),
+    )?;
 
     let fs = cowfs::CowFs::new(loaded.profile, writer);
     vlog(
@@ -32,5 +34,8 @@ pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
             mount.record.display()
         ),
     );
-    fs.mount(&mount.path, false)
+    run_with_log(
+        || fs.mount(&mount.path, false),
+        || format!("mount fuse at {}", mount.path.display()),
+    )
 }

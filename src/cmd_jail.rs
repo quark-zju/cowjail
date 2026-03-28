@@ -7,20 +7,28 @@ use crate::run_with_log;
 
 pub(crate) fn add_command(add: AddCommand) -> Result<()> {
     if let Some(name) = add.name.as_deref() {
-        jail::validate_explicit_name(name)
-            .with_context(|| format!("invalid jail name '{name}'"))?;
+        run_with_log(
+            || jail::validate_explicit_name(name),
+            || format!("validate jail name '{name}'"),
+        )
+        .with_context(|| format!("invalid jail name '{name}'"))?;
     }
-    jail::resolve(
-        add.name.as_deref(),
-        add.profile.as_deref(),
-        jail::ResolveMode::EnsureExists,
-    )
-    .context("failed to create or reuse explicit jail")?;
+    run_with_log(
+        || {
+            jail::resolve(
+                add.name.as_deref(),
+                add.profile.as_deref(),
+                jail::ResolveMode::EnsureExists,
+            )
+        },
+        || "create or reuse explicit jail".to_string(),
+    )?;
     Ok(())
 }
 
 pub(crate) fn list_command(_list: ListCommand) -> Result<()> {
-    for name in jail::list_named_jails()? {
+    let names = run_with_log(jail::list_named_jails, || "list named jails".to_string())?;
+    for name in names {
         println!("{}", name.to_string_lossy());
     }
     Ok(())

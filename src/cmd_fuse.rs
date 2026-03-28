@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use fs_err as fs;
 
 use crate::cli::LowLevelFuseCommand;
@@ -6,6 +6,7 @@ use crate::cowfs;
 use crate::privileges;
 use crate::profile_loader::{append_profile_header, ensure_record_parent_dir, load_profile};
 use crate::record;
+use crate::run_with_log;
 use crate::vlog;
 
 pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
@@ -23,35 +24,38 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
         }
     }
 
-    fs::create_dir_all(&cmd.mountpoint).with_context(|| {
-        format!(
-            "failed to create mountpoint directory {}",
-            cmd.mountpoint.display()
-        )
-    })?;
+    run_with_log(
+        || Ok(fs::create_dir_all(&cmd.mountpoint)?),
+        || format!("create mountpoint directory {}", cmd.mountpoint.display()),
+    )?;
     if let Some(parent) = cmd.pid_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create pid file directory {}", parent.display()))?;
+        run_with_log(
+            || Ok(fs::create_dir_all(parent)?),
+            || format!("create pid file directory {}", parent.display()),
+        )?;
     }
 
-    let loaded = load_profile(std::path::Path::new(&cmd.profile))
-        .with_context(|| format!("failed to load fuse profile '{}'", cmd.profile))?;
-    ensure_record_parent_dir(&cmd.record)?;
-    let writer = record::Writer::open_append(&cmd.record).with_context(|| {
-        format!(
-            "failed to open fuse record writer at {}",
-            cmd.record.display()
-        )
-    })?;
-    append_profile_header(&writer, &loaded.normalized_source).with_context(|| {
-        format!(
-            "failed to append fuse profile header into {}",
-            cmd.record.display()
-        )
-    })?;
+    let loaded = run_with_log(
+        || load_profile(std::path::Path::new(&cmd.profile)),
+        || format!("load fuse profile '{}'", cmd.profile),
+    )?;
+    run_with_log(
+        || ensure_record_parent_dir(&cmd.record),
+        || format!("prepare fuse record parent dir {}", cmd.record.display()),
+    )?;
+    let writer = run_with_log(
+        || record::Writer::open_append(&cmd.record),
+        || format!("open fuse record writer {}", cmd.record.display()),
+    )?;
+    run_with_log(
+        || append_profile_header(&writer, &loaded.normalized_source),
+        || format!("append fuse profile header into {}", cmd.record.display()),
+    )?;
 
-    let frames = record::read_frames_best_effort(&cmd.record)
-        .with_context(|| format!("failed to read record frames from {}", cmd.record.display()))?;
+    let frames = run_with_log(
+        || record::read_frames_best_effort(&cmd.record),
+        || format!("read record frames from {}", cmd.record.display()),
+    )?;
     let mut fs = cowfs::CowFs::new(loaded.profile, writer);
     let replay = fs.replay_from_record_frames(&frames);
     vlog(
@@ -83,16 +87,27 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
         );
     }
     let _session = if needs_real_root_for_allow_other {
-        with_temporary_real_root(|| unsafe { fs.mount_background(&cmd.mountpoint, true) })?
+        run_with_log(
+            || with_temporary_real_root(|| unsafe { fs.mount_background(&cmd.mountpoint, true) }),
+            || format!("mount fuse at {}", cmd.mountpoint.display()),
+        )?
     } else {
-        unsafe { fs.mount_background(&cmd.mountpoint, true) }?
+        run_with_log(
+            || unsafe { fs.mount_background(&cmd.mountpoint, true) },
+            || format!("mount fuse at {}", cmd.mountpoint.display()),
+        )?
     };
 
     let pid = std::process::id();
-    fs::write(&cmd.pid_path, format!("{pid}\n"))
-        .with_context(|| format!("failed to write fuse pid file {}", cmd.pid_path.display()))?;
+    run_with_log(
+        || Ok(fs::write(&cmd.pid_path, format!("{pid}\n"))?),
+        || format!("write fuse pid file {}", cmd.pid_path.display()),
+    )?;
 
-    privileges::drop_to_real_user()?;
+    run_with_log(
+        privileges::drop_to_real_user,
+        || "drop to real user".to_string(),
+    )?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     vlog(
