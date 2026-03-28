@@ -130,6 +130,7 @@ These are intentional design choices, not accidental omissions.
   - hardlinks are not supported by the current FUSE layer.
   - mmap-heavy workloads may degrade or fail depending on access pattern.
   - metadata fidelity is intentionally limited compared with a full kernel filesystem stack (`setattr` currently supports truncate, regular-file executable-bit mode updates, and in-memory atime updates only).
+  - host-visible atime changes are not a strict replay signal; read-side effects in FUSE/host path traversal can update atime even without `flush`.
 
 ## Lock Files
 
