@@ -135,7 +135,9 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "OPTIONS:\n",
             "  --name <name>         Reuse or create an explicit jail name\n",
             "  --profile <profile>   Select/create the profile-derived jail identity\n",
-            "  -v, --verbose         Print progress logs",
+            "  -v, --verbose         Print progress logs\n\n",
+            "TROUBLESHOOTING:\n",
+            "  Profile behavior and rule matching: cowjail help profile",
         ),
         HelpTopic::LowLevelMount => concat!(
             "cowjail _mount\n\n",

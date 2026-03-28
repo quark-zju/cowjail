@@ -97,6 +97,12 @@ cowjail rm 'unnamed-*'                               # remove jails by name glob
 - Troubleshooting: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 - E2E smoke test: [`docs/e2e_smoke.py`](docs/e2e_smoke.py)
 
+## Known Limitations
+
+- hardlinks are not supported by the current FUSE layer
+- mmap-heavy workloads may degrade or fail
+- metadata behavior is partial (for example, only truncate is currently handled in `setattr`)
+
 ## License
 
 MIT. See `LICENSE`.
