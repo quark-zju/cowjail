@@ -15,11 +15,14 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 /lib ro
 /lib64 ro
 /etc ro
+/dev/null rw
+/dev/ptmx rw
+/dev/pts rw
+/dev/random ro
+/dev/stderr ro
 /dev/stdin ro
 /dev/stdout ro
-/dev/null rw
 /dev/urandom ro
-/dev/random ro
 ~/bin ro
 ~/.claude rw
 ~/.codex rw
@@ -31,7 +34,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 ~/.gitconfig* ro
 ~/.gitignore* ro
 ~/.ssh deny
-/proc ro
+/proc rw
 %include default.local
 . cow
 ";
