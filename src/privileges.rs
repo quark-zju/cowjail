@@ -21,6 +21,16 @@ pub(crate) fn drop_to_real_user() -> Result<()> {
     drop_to_ids(uid, gid)
 }
 
+pub(crate) fn drop_root_euid_if_needed() -> Result<bool> {
+    let uid = unsafe { libc::getuid() };
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 && uid != 0 {
+        drop_to_real_user()?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 pub(crate) fn with_temporary_real_root<T, F>(f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T>,
@@ -139,7 +149,7 @@ fn validate_drop_to_real_user_uids(uid: u32, euid: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_drop_to_real_user_uids;
+    use super::{drop_root_euid_if_needed, validate_drop_to_real_user_uids};
 
     #[test]
     fn drop_validation_allows_root_to_non_root() {
@@ -162,5 +172,11 @@ mod tests {
     fn drop_validation_rejects_root_target() {
         let err = validate_drop_to_real_user_uids(0, 0).expect_err("must not target root");
         assert!(err.to_string().contains("non-root real uid target"));
+    }
+
+    #[test]
+    fn conditional_drop_is_noop_without_setuid_root() {
+        let dropped = drop_root_euid_if_needed().expect("conditional drop should not fail");
+        assert!(!dropped);
     }
 }

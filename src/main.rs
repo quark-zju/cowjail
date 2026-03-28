@@ -50,21 +50,25 @@ fn try_main() -> Result<i32> {
     match cli::parse_env()? {
         Command::Help { topic, verbose } => {
             set_verbose(verbose);
+            drop_privileges_for_unprivileged_command("help")?;
             cmd_help::print_help(topic, verbose);
             Ok(0)
         }
         Command::Add(add) => {
             set_verbose(false);
+            drop_privileges_for_unprivileged_command("add")?;
             cmd_jail::add_command(add).context("add subcommand failed")?;
             Ok(0)
         }
         Command::List(list) => {
             set_verbose(false);
+            drop_privileges_for_unprivileged_command("list")?;
             cmd_jail::list_command(list).context("list subcommand failed")?;
             Ok(0)
         }
         Command::Show(show) => {
             set_verbose(show.verbose);
+            drop_privileges_for_unprivileged_command("show")?;
             cmd_show::show_command(show).context("show subcommand failed")?;
             Ok(0)
         }
@@ -79,16 +83,19 @@ fn try_main() -> Result<i32> {
         }
         Command::LowLevelMount(mount) => {
             set_verbose(mount.verbose);
+            drop_privileges_for_unprivileged_command("_mount")?;
             cmd_mount::mount_command(mount).context("_mount subcommand failed")?;
             Ok(0)
         }
         Command::Flush(flush) => {
             set_verbose(flush.verbose);
+            drop_privileges_for_unprivileged_command("flush")?;
             cmd_flush::flush_command(flush).context("flush subcommand failed")?;
             Ok(0)
         }
         Command::LowLevelFlush(flush) => {
             set_verbose(flush.verbose);
+            drop_privileges_for_unprivileged_command("_flush")?;
             cmd_flush::low_level_flush_command(flush).context("_flush subcommand failed")?;
             Ok(0)
         }
@@ -103,6 +110,14 @@ fn try_main() -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn drop_privileges_for_unprivileged_command(command: &str) -> Result<()> {
+    run_with_log(
+        privileges::drop_root_euid_if_needed,
+        || format!("drop elevated privileges before '{command}'"),
+    )?;
+    Ok(())
 }
 
 pub(crate) fn set_verbose(enabled: bool) {
