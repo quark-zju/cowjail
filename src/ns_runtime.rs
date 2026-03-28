@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::jail::JailPaths;
+use crate::run_with_log;
 use crate::vlog;
 
 pub(crate) const LOCK_FILE_NAME: &str = "lock";
@@ -206,15 +207,13 @@ pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
 
 pub(crate) fn remove_runtime_with_verbose(jail: &JailPaths, verbose: bool) -> Result<()> {
     let paths = paths_for(jail);
-    log_step(verbose, &format!("unmount {}", paths.mount_dir.display()), || {
-        unmount_runtime_mount_dir(&paths, verbose).with_context(|| {
-            format!("failed to unmount runtime mount {}", paths.mount_dir.display())
-        })
-    })?;
-    log_step(
-        verbose,
-        &format!("remove runtime artifacts under {}", paths.runtime_dir.display()),
+    run_with_log(
+        || unmount_runtime_mount_dir(&paths, verbose),
+        || format!("unmount {}", paths.mount_dir.display()),
+    )?;
+    run_with_log(
         || remove_known_runtime_artifacts(&paths, verbose),
+        || format!("remove runtime artifacts under {}", paths.runtime_dir.display()),
     )
 }
 
@@ -468,23 +467,6 @@ fn terminate_recorded_fuse_server(paths: &NsRuntimePaths, verbose: bool) -> Resu
     }
     std::thread::sleep(Duration::from_millis(120));
     Ok(())
-}
-
-fn log_step<T, F>(verbose: bool, label: &str, f: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T>,
-{
-    vlog(verbose, format!("rm: begin {label}"));
-    match f() {
-        Ok(v) => {
-            vlog(verbose, format!("rm: ok {label}"));
-            Ok(v)
-        }
-        Err(err) => {
-            vlog(verbose, format!("rm: err {label}: {err:#}"));
-            Err(err)
-        }
-    }
 }
 
 fn ensure_owned_by_real_user(path: &Path) -> Result<()> {
