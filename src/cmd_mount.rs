@@ -21,7 +21,12 @@ pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
     )?;
     run_with_log(
         || append_profile_header(&writer, &loaded.normalized_source),
-        || format!("append mount profile header into {}", mount.record.display()),
+        || {
+            format!(
+                "append mount profile header into {}",
+                mount.record.display()
+            )
+        },
     )?;
 
     let fs = cowfs::CowFs::new(loaded.profile, writer);

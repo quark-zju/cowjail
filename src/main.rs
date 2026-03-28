@@ -1,7 +1,7 @@
 mod cli;
-mod cmd_help;
 mod cmd_flush;
 mod cmd_fuse;
+mod cmd_help;
 mod cmd_jail;
 mod cmd_mount;
 mod cmd_run;
@@ -76,9 +76,7 @@ fn try_main() -> Result<i32> {
             cmd_jail::rm_command(rm).context("rm subcommand failed")?;
             Ok(0)
         }
-        Command::Run(run) => {
-            cmd_run::run_command(run).context("run subcommand failed")
-        }
+        Command::Run(run) => cmd_run::run_command(run).context("run subcommand failed"),
         Command::LowLevelMount(mount) => {
             cmd_mount::mount_command(mount).context("_mount subcommand failed")?;
             Ok(0)
@@ -134,10 +132,9 @@ fn require_priviledge_reason(cmd: &Command) -> Option<&'static str> {
 }
 
 fn drop_privileges_for_unprivileged_command() -> Result<()> {
-    run_with_log(
-        privileges::drop_root_euid_if_needed,
-        || "drop elevated privileges for unprivileged command".to_string(),
-    )?;
+    run_with_log(privileges::drop_root_euid_if_needed, || {
+        "drop elevated privileges for unprivileged command".to_string()
+    })?;
     Ok(())
 }
 

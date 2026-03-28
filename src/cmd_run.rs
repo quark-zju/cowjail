@@ -15,10 +15,9 @@ use crate::run_with_log;
 pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     privileges::require_root_euid("cowjail run")?;
 
-    let cwd = run_with_log(
-        jail::current_pwd,
-        || "resolve current working directory".to_string(),
-    )?;
+    let cwd = run_with_log(jail::current_pwd, || {
+        "resolve current working directory".to_string()
+    })?;
     let resolved = run_with_log(
         || {
             jail::resolve(

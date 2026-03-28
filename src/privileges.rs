@@ -117,12 +117,16 @@ fn drop_to_ids(uid: u32, gid: u32) -> Result<()> {
     crate::vlog!("privileges: setresgid({gid},{gid},{gid})");
     if unsafe { libc::setresgid(gid, gid, gid) } != 0 {
         let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setresgid({gid},{gid},{gid}) failed: {err}"));
+        return Err(anyhow::anyhow!(
+            "setresgid({gid},{gid},{gid}) failed: {err}"
+        ));
     }
     crate::vlog!("privileges: setresuid({uid},{uid},{uid})");
     if unsafe { libc::setresuid(uid, uid, uid) } != 0 {
         let err = std::io::Error::last_os_error();
-        return Err(anyhow::anyhow!("setresuid({uid},{uid},{uid}) failed: {err}"));
+        return Err(anyhow::anyhow!(
+            "setresuid({uid},{uid},{uid}) failed: {err}"
+        ));
     }
     crate::vlog!("privileges: prctl(PR_SET_NO_NEW_PRIVS,1)");
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -159,7 +163,10 @@ mod tests {
     #[test]
     fn drop_validation_rejects_non_root_transition() {
         let err = validate_drop_to_real_user_uids(1000, 1001).expect_err("must reject non-root");
-        assert!(err.to_string().contains("refusing uid transition from non-root"));
+        assert!(
+            err.to_string()
+                .contains("refusing uid transition from non-root")
+        );
     }
 
     #[test]

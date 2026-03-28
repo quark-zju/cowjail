@@ -315,10 +315,7 @@ fn ns_runtime_ensure_runtime_with_repairs_partial_runtime() {
     })
     .expect("repair runtime");
 
-    assert_eq!(
-        ensured.state_before,
-        ns_runtime::RuntimeState::Ready
-    );
+    assert_eq!(ensured.state_before, ns_runtime::RuntimeState::Ready);
     assert_eq!(ensured.state_after, ns_runtime::RuntimeState::Ready);
     assert!(!ensured.rebuilt);
 }
@@ -345,7 +342,10 @@ fn ns_runtime_ensure_runtime_for_exec_succeeds() {
     let jail_paths = jail::jail_paths_in(&layout, "demo");
     let runtime_paths = ns_runtime::ensure_runtime_dir(&jail_paths).expect("ensure runtime");
     let exec_runtime = ns_runtime::ensure_runtime_for_exec(&jail_paths).expect("ensure exec");
-    assert_eq!(exec_runtime.ensured.paths.runtime_dir, runtime_paths.runtime_dir);
+    assert_eq!(
+        exec_runtime.ensured.paths.runtime_dir,
+        runtime_paths.runtime_dir
+    );
 }
 
 #[test]

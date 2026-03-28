@@ -603,8 +603,8 @@ mod tests {
 
     #[test]
     fn parse_flush_accepts_positional_name() {
-        let cmd = parse_from(os(&["flush", "agent"]))
-            .expect("flush with positional name should parse");
+        let cmd =
+            parse_from(os(&["flush", "agent"])).expect("flush with positional name should parse");
         let flush = match cmd {
             Command::Flush(flush) => flush,
             other => panic!("expected flush, got {other:?}"),

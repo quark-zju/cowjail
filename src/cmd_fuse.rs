@@ -92,10 +92,9 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
         || format!("write fuse pid file {}", cmd.pid_path.display()),
     )?;
 
-    run_with_log(
-        privileges::drop_to_real_user,
-        || "drop to real user".to_string(),
-    )?;
+    run_with_log(privileges::drop_to_real_user, || {
+        "drop to real user".to_string()
+    })?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     crate::vlog!("_fuse: running as uid={} gid={}", uid, gid);

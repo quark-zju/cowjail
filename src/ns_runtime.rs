@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
-use std::fs::TryLockError;
 use std::ffi::CString;
+use std::fs::TryLockError;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -213,7 +213,12 @@ pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
     )?;
     run_with_log(
         || remove_known_runtime_artifacts(&paths),
-        || format!("remove runtime artifacts under {}", paths.runtime_dir.display()),
+        || {
+            format!(
+                "remove runtime artifacts under {}",
+                paths.runtime_dir.display()
+            )
+        },
     )
 }
 
@@ -345,7 +350,10 @@ fn list_unknown_runtime_entries(paths: &NsRuntimePaths) -> Result<Vec<String>> {
             unknown.push(format!("{:?}", name));
             continue;
         };
-        if !matches!(name, LOCK_FILE_NAME | MOUNT_DIR_NAME | FUSE_PID_NAME | "mntns" | "ipcns") {
+        if !matches!(
+            name,
+            LOCK_FILE_NAME | MOUNT_DIR_NAME | FUSE_PID_NAME | "mntns" | "ipcns"
+        ) {
             unknown.push(name.to_string());
         }
     }
@@ -368,9 +376,10 @@ fn remove_file_if_exists_with_owner_fix(runtime_dir: &Path, path: &Path) -> Resu
             crate::vlog!("rm: unlink ok {}", path.display());
             Ok(())
         }
-        Err(err) if err
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|ioe| ioe.kind() == std::io::ErrorKind::PermissionDenied) =>
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|ioe| ioe.kind() == std::io::ErrorKind::PermissionDenied) =>
         {
             ensure_owned_by_real_user(runtime_dir)?;
             let retried = remove_file_if_exists(path);
@@ -423,7 +432,10 @@ fn remove_mount_dir_with_retry(paths: &NsRuntimePaths) -> Result<()> {
             }
         }
         Err(err) => Err(err).with_context(|| {
-            format!("failed to remove runtime mount dir {}", paths.mount_dir.display())
+            format!(
+                "failed to remove runtime mount dir {}",
+                paths.mount_dir.display()
+            )
         }),
     }
 }
@@ -437,8 +449,7 @@ fn terminate_recorded_fuse_server(paths: &NsRuntimePaths) -> Result<()> {
     if kill_rc != 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() != Some(libc::ESRCH) {
-            return Err(err)
-                .with_context(|| format!("failed to SIGTERM fuse server pid={pid}"));
+            return Err(err).with_context(|| format!("failed to SIGTERM fuse server pid={pid}"));
         }
         crate::vlog!("rm: kill skipped (pid not found): {pid}");
     } else {
@@ -453,8 +464,7 @@ fn ensure_owned_by_real_user(path: &Path) -> Result<()> {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to stat {}", path.display()));
+            return Err(err).with_context(|| format!("failed to stat {}", path.display()));
         }
     };
 
@@ -472,8 +482,12 @@ fn ensure_owned_by_real_user(path: &Path) -> Result<()> {
         .context("path contains interior NUL byte while fixing ownership")?;
     let rc = unsafe { libc::chown(c_path.as_ptr(), target_uid, target_gid) };
     if rc != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to chown {} to {target_uid}:{target_gid}", path.display()));
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to chown {} to {target_uid}:{target_gid}",
+                path.display()
+            )
+        });
     }
     Ok(())
 }

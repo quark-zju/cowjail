@@ -15,5 +15,5 @@ pub(super) fn temp_profile_path(name: &str, content: &str) -> (tempfile::TempDir
     (root, p)
 }
 
-mod runtime;
 mod flush;
+mod runtime;

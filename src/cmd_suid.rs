@@ -20,10 +20,7 @@ pub(crate) fn suid_command(cmd: LowLevelSuidCommand) -> Result<()> {
         || format!("stat current executable {}", exe.display()),
     )?;
     if is_suid_root(&meta) {
-        crate::vlog!(
-            "_suid: {} is already setuid-root, skipping",
-            exe.display()
-        );
+        crate::vlog!("_suid: {} is already setuid-root, skipping", exe.display());
         return Ok(());
     }
 
