@@ -7,7 +7,8 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleAction {
     ReadOnly,
-    ReadWrite,
+    Passthrough,
+    Cow,
     Deny,
 }
 
@@ -128,16 +129,18 @@ pub fn normalize_source(profile_src: &str, launch_cwd: &Path) -> Result<String> 
 fn parse_action(token: &str) -> Result<RuleAction> {
     match token {
         "ro" => Ok(RuleAction::ReadOnly),
-        "rw" => Ok(RuleAction::ReadWrite),
+        "rw" => Ok(RuleAction::Passthrough),
+        "cow" => Ok(RuleAction::Cow),
         "deny" => Ok(RuleAction::Deny),
-        _ => bail!("action must be one of ro/rw/deny"),
+        _ => bail!("action must be one of ro/rw/cow/deny"),
     }
 }
 
 fn action_to_str(action: RuleAction) -> &'static str {
     match action {
         RuleAction::ReadOnly => "ro",
-        RuleAction::ReadWrite => "rw",
+        RuleAction::Passthrough => "rw",
+        RuleAction::Cow => "cow",
         RuleAction::Deny => "deny",
     }
 }
@@ -296,7 +299,7 @@ mod tests {
         );
         assert_eq!(
             profile.first_match_action(Path::new("/etc/passwd")),
-            Some(RuleAction::ReadWrite)
+            Some(RuleAction::Passthrough)
         );
     }
 
@@ -319,7 +322,7 @@ mod tests {
         );
         assert_eq!(
             profile.first_match_action(Path::new("/work/foo")),
-            Some(RuleAction::ReadWrite)
+            Some(RuleAction::Passthrough)
         );
     }
 
@@ -336,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             profile.first_match_action(Path::new("/foo/bar/baz")),
-            Some(RuleAction::ReadWrite)
+            Some(RuleAction::Passthrough)
         );
     }
 
@@ -384,7 +387,7 @@ mod tests {
         );
         assert_eq!(
             profile.first_match_action(Path::new("/work/file.txt")),
-            Some(RuleAction::ReadWrite)
+            Some(RuleAction::Passthrough)
         );
     }
 
@@ -401,5 +404,18 @@ mod tests {
         )
         .expect("normalize source");
         assert_eq!(normalized, "/etc ro\n/work rw\n");
+    }
+
+    #[test]
+    fn parse_cow_action() {
+        let profile = parse(
+            r#"
+            /work cow
+            "#,
+        );
+        assert_eq!(
+            profile.first_match_action(Path::new("/work/file.txt")),
+            Some(RuleAction::Cow)
+        );
     }
 }

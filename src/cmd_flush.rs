@@ -202,7 +202,7 @@ fn op_allowed_by_profile(policy: Option<&profile::Profile>, op: &op::Operation) 
         return true;
     };
     for path in op_paths(op) {
-        if policy.first_match_action(path) != Some(profile::RuleAction::ReadWrite) {
+        if policy.first_match_action(path) != Some(profile::RuleAction::Cow) {
             return false;
         }
     }

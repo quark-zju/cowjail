@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::Metadata;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -45,6 +45,13 @@ enum OverlayNode {
     Dir,
     Regular { data: Vec<u8>, executable: bool },
     Symlink { target: PathBuf },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteMode {
+    Forbidden,
+    Passthrough,
+    Cow,
 }
 
 impl CowFs {
@@ -112,8 +119,12 @@ impl CowFs {
         )
     }
 
-    fn is_rw(&self, path: &Path) -> bool {
-        self.profile.first_match_action(path) == Some(RuleAction::ReadWrite)
+    fn write_mode(&self, path: &Path) -> WriteMode {
+        match self.profile.first_match_action(path) {
+            Some(RuleAction::Cow) => WriteMode::Cow,
+            Some(RuleAction::Passthrough) => WriteMode::Passthrough,
+            _ => WriteMode::Forbidden,
+        }
     }
 
     fn attr_for_path(&mut self, path: &Path, metadata: &Metadata) -> FileAttr {
@@ -607,9 +618,9 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        // allow write open only for rw rules; actual writes land in overlay.
+        // allow write open only for writable rules.
         if flags & libc::O_ACCMODE as u32 != libc::O_RDONLY as u32
-            && self.profile.first_match_action(path) != Some(RuleAction::ReadWrite)
+            && self.write_mode(path) == WriteMode::Forbidden
         {
             reply.error(EACCES);
             return;
@@ -737,38 +748,64 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        match self.snapshot_node(&path) {
-            Ok(Some(_)) => {
-                reply.error(EEXIST);
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
                 return;
             }
-            Ok(None) => {}
-            Err(code) => {
-                reply.error(code);
-                return;
+            WriteMode::Cow => {
+                match self.snapshot_node(&path) {
+                    Ok(Some(_)) => {
+                        reply.error(EEXIST);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(code) => {
+                        reply.error(code);
+                        return;
+                    }
+                }
+                let node = OverlayNode::Regular {
+                    data: Vec::new(),
+                    executable: false,
+                };
+                self.overlay.insert(path.clone(), node.clone());
+                if self
+                    .append_record(&Operation::WriteFile {
+                        path: path.clone(),
+                        state: FileState::Regular(Vec::new()),
+                    })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+                let attr = self.attr_for_overlay(&path, &node);
+                reply.created(&TTL, &attr, 0, 0, 0);
+            }
+            WriteMode::Passthrough => {
+                match fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&path)
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                }
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                };
+                let attr = self.attr_for_path(&path, &meta);
+                reply.created(&TTL, &attr, 0, 0, 0);
             }
         }
-        let node = OverlayNode::Regular {
-            data: Vec::new(),
-            executable: false,
-        };
-        self.overlay.insert(path.clone(), node.clone());
-        if self
-            .append_record(&Operation::WriteFile {
-                path: path.clone(),
-                state: FileState::Regular(Vec::new()),
-            })
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
-        }
-        let attr = self.attr_for_overlay(&path, &node);
-        reply.created(&TTL, &attr, 0, 0, 0);
     }
 
     fn write(
@@ -785,56 +822,82 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         };
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        if offset < 0 {
-            reply.error(EIO);
-            return;
-        }
-        let (mut content, executable) = match self.current_regular(&path) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                reply.error(ENOENT);
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
                 return;
             }
-            Err(code) => {
-                reply.error(code);
-                return;
-            }
-        };
-        let off = offset as usize;
-        if content.len() < off {
-            content.resize(off, 0);
-        }
-        if content.len() < off + data.len() {
-            content.resize(off + data.len(), 0);
-        }
-        content[off..off + data.len()].copy_from_slice(data);
+            WriteMode::Cow => {
+                if offset < 0 {
+                    reply.error(EIO);
+                    return;
+                }
+                let (mut content, executable) = match self.current_regular(&path) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                    Err(code) => {
+                        reply.error(code);
+                        return;
+                    }
+                };
+                let off = offset as usize;
+                if content.len() < off {
+                    content.resize(off, 0);
+                }
+                if content.len() < off + data.len() {
+                    content.resize(off + data.len(), 0);
+                }
+                content[off..off + data.len()].copy_from_slice(data);
 
-        self.overlay.insert(
-            path.clone(),
-            OverlayNode::Regular {
-                data: content.clone(),
-                executable,
-            },
-        );
-        if self
-            .append_record(&Operation::WriteFile {
-                path,
-                state: if executable {
-                    FileState::Executable(content)
-                } else {
-                    FileState::Regular(content)
-                },
-            })
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
+                self.overlay.insert(
+                    path.clone(),
+                    OverlayNode::Regular {
+                        data: content.clone(),
+                        executable,
+                    },
+                );
+                if self
+                    .append_record(&Operation::WriteFile {
+                        path,
+                        state: if executable {
+                            FileState::Executable(content)
+                        } else {
+                            FileState::Regular(content)
+                        },
+                    })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+                reply.written(data.len() as u32);
+            }
+            WriteMode::Passthrough => {
+                if offset < 0 {
+                    reply.error(EIO);
+                    return;
+                }
+                let mut file = match fs::OpenOptions::new().write(true).open(&path) {
+                    Ok(file) => file,
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                };
+                if let Err(err) = file.seek(SeekFrom::Start(offset as u64)) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+                if let Err(err) = file.write_all(data) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+                reply.written(data.len() as u32);
+            }
         }
-        reply.written(data.len() as u32);
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
@@ -847,20 +910,30 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        self.overlay.insert(path.clone(), OverlayNode::Deleted);
-        if self
-            .append_record(&Operation::WriteFile {
-                path,
-                state: FileState::Deleted,
-            })
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
+                return;
+            }
+            WriteMode::Cow => {
+                self.overlay.insert(path.clone(), OverlayNode::Deleted);
+                if self
+                    .append_record(&Operation::WriteFile {
+                        path,
+                        state: FileState::Deleted,
+                    })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+            }
+            WriteMode::Passthrough => {
+                if let Err(err) = fs::remove_file(&path) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+            }
         }
         reply.ok();
     }
@@ -882,32 +955,51 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        match self.snapshot_node(&path) {
-            Ok(Some(_)) => {
-                reply.error(EEXIST);
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
                 return;
             }
-            Ok(None) => {}
-            Err(code) => {
-                reply.error(code);
-                return;
+            WriteMode::Cow => {
+                match self.snapshot_node(&path) {
+                    Ok(Some(_)) => {
+                        reply.error(EEXIST);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(code) => {
+                        reply.error(code);
+                        return;
+                    }
+                }
+                let node = OverlayNode::Dir;
+                self.overlay.insert(path.clone(), node.clone());
+                if self
+                    .append_record(&Operation::CreateDir { path: path.clone() })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+                let attr = self.attr_for_overlay(&path, &node);
+                reply.entry(&TTL, &attr, 0);
+            }
+            WriteMode::Passthrough => {
+                if let Err(err) = fs::create_dir(&path) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                };
+                let attr = self.attr_for_path(&path, &meta);
+                reply.entry(&TTL, &attr, 0);
             }
         }
-        let node = OverlayNode::Dir;
-        self.overlay.insert(path.clone(), node.clone());
-        if self
-            .append_record(&Operation::CreateDir { path: path.clone() })
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
-        }
-        let attr = self.attr_for_overlay(&path, &node);
-        reply.entry(&TTL, &attr, 0);
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
@@ -920,14 +1012,24 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        self.overlay.insert(path.clone(), OverlayNode::Deleted);
-        if self.append_record(&Operation::RemoveDir { path }).is_err() {
-            reply.error(EIO);
-            return;
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
+                return;
+            }
+            WriteMode::Cow => {
+                self.overlay.insert(path.clone(), OverlayNode::Deleted);
+                if self.append_record(&Operation::RemoveDir { path }).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+            }
+            WriteMode::Passthrough => {
+                if let Err(err) = fs::remove_dir(&path) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+            }
         }
         reply.ok();
     }
@@ -949,37 +1051,56 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        match self.snapshot_node(&path) {
-            Ok(Some(_)) => {
-                reply.error(EEXIST);
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
                 return;
             }
-            Ok(None) => {}
-            Err(code) => {
-                reply.error(code);
-                return;
+            WriteMode::Cow => {
+                match self.snapshot_node(&path) {
+                    Ok(Some(_)) => {
+                        reply.error(EEXIST);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(code) => {
+                        reply.error(code);
+                        return;
+                    }
+                }
+                let node = OverlayNode::Symlink {
+                    target: link.to_path_buf(),
+                };
+                self.overlay.insert(path.clone(), node.clone());
+                if self
+                    .append_record(&Operation::WriteFile {
+                        path: path.clone(),
+                        state: FileState::Symlink(link.to_path_buf()),
+                    })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+                let attr = self.attr_for_overlay(&path, &node);
+                reply.entry(&TTL, &attr, 0);
+            }
+            WriteMode::Passthrough => {
+                if let Err(err) = std::os::unix::fs::symlink(link, &path) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                };
+                let attr = self.attr_for_path(&path, &meta);
+                reply.entry(&TTL, &attr, 0);
             }
         }
-        let node = OverlayNode::Symlink {
-            target: link.to_path_buf(),
-        };
-        self.overlay.insert(path.clone(), node.clone());
-        if self
-            .append_record(&Operation::WriteFile {
-                path: path.clone(),
-                state: FileState::Symlink(link.to_path_buf()),
-            })
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
-        }
-        let attr = self.attr_for_overlay(&path, &node);
-        reply.entry(&TTL, &attr, 0);
     }
 
     fn rename(
@@ -1005,17 +1126,27 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         }
-        if !self.is_rw(&from) || !self.is_rw(&to) {
-            reply.error(EACCES);
-            return;
-        }
-        if let Err(code) = self.apply_rename_paths(&from, &to) {
-            reply.error(code);
-            return;
-        }
-        if self.append_record(&Operation::Rename { from, to }).is_err() {
-            reply.error(EIO);
-            return;
+        match (self.write_mode(&from), self.write_mode(&to)) {
+            (WriteMode::Cow, WriteMode::Cow) => {
+                if let Err(code) = self.apply_rename_paths(&from, &to) {
+                    reply.error(code);
+                    return;
+                }
+                if self.append_record(&Operation::Rename { from, to }).is_err() {
+                    reply.error(EIO);
+                    return;
+                }
+            }
+            (WriteMode::Passthrough, WriteMode::Passthrough) => {
+                if let Err(err) = fs::rename(&from, &to) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+            }
+            _ => {
+                reply.error(EACCES);
+                return;
+            }
         }
         reply.ok();
     }
@@ -1045,43 +1176,69 @@ impl Filesystem for CowFs {
             reply.error(ENOENT);
             return;
         };
-        if !self.is_rw(&path) {
-            reply.error(EACCES);
-            return;
-        }
-        let (mut data, executable) = match self.current_regular(&path) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                reply.error(ENOENT);
+        match self.write_mode(&path) {
+            WriteMode::Forbidden => {
+                reply.error(EACCES);
                 return;
             }
-            Err(code) => {
-                reply.error(code);
-                return;
+            WriteMode::Cow => {
+                let (mut data, executable) = match self.current_regular(&path) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                    Err(code) => {
+                        reply.error(code);
+                        return;
+                    }
+                };
+                data.resize(size as usize, 0);
+                let node = OverlayNode::Regular {
+                    data: data.clone(),
+                    executable,
+                };
+                self.overlay.insert(path.clone(), node.clone());
+                if self
+                    .append_record(&Operation::WriteFile {
+                        path: path.clone(),
+                        state: if executable {
+                            FileState::Executable(data)
+                        } else {
+                            FileState::Regular(data)
+                        },
+                    })
+                    .is_err()
+                {
+                    reply.error(EIO);
+                    return;
+                }
+                let attr = self.attr_for_overlay(&path, &node);
+                reply.attr(&TTL, &attr);
             }
-        };
-        data.resize(size as usize, 0);
-        let node = OverlayNode::Regular {
-            data: data.clone(),
-            executable,
-        };
-        self.overlay.insert(path.clone(), node.clone());
-        if self
-            .append_record(&Operation::WriteFile {
-                path: path.clone(),
-                state: if executable {
-                    FileState::Executable(data)
-                } else {
-                    FileState::Regular(data)
-                },
-            })
-            .is_err()
-        {
-            reply.error(EIO);
-            return;
+            WriteMode::Passthrough => {
+                let file = match fs::OpenOptions::new().write(true).open(&path) {
+                    Ok(file) => file,
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                };
+                if let Err(err) = file.set_len(size) {
+                    reply.error(io_errno(&err));
+                    return;
+                }
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        reply.error(io_errno(&err));
+                        return;
+                    }
+                };
+                let attr = self.attr_for_path(&path, &meta);
+                reply.attr(&TTL, &attr);
+            }
         }
-        let attr = self.attr_for_overlay(&path, &node);
-        reply.attr(&TTL, &attr);
     }
 }
 
@@ -1126,6 +1283,10 @@ fn is_strict_descendant(parent: &Path, child: &Path) -> bool {
     child != parent && child.starts_with(parent)
 }
 
+fn io_errno(err: &std::io::Error) -> i32 {
+    err.raw_os_error().unwrap_or(EIO)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1148,7 +1309,7 @@ mod tests {
 
     #[test]
     fn overlay_deleted_hides_host_file() {
-        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let path = PathBuf::from("/tmp/cowjail-overlay-deleted");
         std::fs::write(&path, b"host").expect("seed host");
         fs.overlay_set(path.clone(), OverlayNode::Deleted);
@@ -1159,7 +1320,7 @@ mod tests {
 
     #[test]
     fn overlay_regular_overrides_host_file() {
-        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let path = PathBuf::from("/tmp/cowjail-overlay-regular");
         std::fs::write(&path, b"host").expect("seed host");
         fs.overlay_set(
@@ -1181,7 +1342,7 @@ mod tests {
 
     #[test]
     fn overlay_readdir_includes_new_children() {
-        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let dir = PathBuf::from("/tmp/cowjail-overlay-dir");
         let _ = std::fs::create_dir_all(&dir);
         let new_file = dir.join("from-overlay");
@@ -1222,7 +1383,7 @@ mod tests {
 
     #[test]
     fn rename_moves_overlay_subtree() {
-        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let from = PathBuf::from("/tmp/cowjail-rename-from");
         let to = PathBuf::from("/tmp/cowjail-rename-to");
         let child = from.join("child.txt");
@@ -1247,7 +1408,7 @@ mod tests {
 
     #[test]
     fn rename_dir_into_own_subpath_fails() {
-        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let from = PathBuf::from("/tmp/cowjail-self-rename");
         let to = from.join("sub");
         fs.overlay_set(from.clone(), OverlayNode::Dir);
@@ -1293,7 +1454,7 @@ mod tests {
         writer.sync().expect("sync record");
 
         let frames = record::read_frames(&record_path).expect("read frames");
-        let mut fs = CowFs::new(parse_profile("/tmp/** rw"), writer);
+        let mut fs = CowFs::new(parse_profile("/tmp/** cow"), writer);
         let stats = fs.replay_from_record_frames(&frames);
         assert_eq!(stats.pending_ops, 3);
         assert_eq!(stats.applied_ops, 3);
@@ -1338,7 +1499,7 @@ mod tests {
         record::mark_flushed(&record_path, flushed_offset).expect("mark flushed");
 
         let frames = record::read_frames(&record_path).expect("read frames");
-        let mut fs = CowFs::new(parse_profile("/tmp/** rw"), writer);
+        let mut fs = CowFs::new(parse_profile("/tmp/** cow"), writer);
         let stats = fs.replay_from_record_frames(&frames);
         assert_eq!(stats.pending_ops, 1);
         assert_eq!(stats.applied_ops, 1);
@@ -1388,7 +1549,7 @@ mod tests {
         mount1_writer.sync().expect("sync first writer");
 
         let mount1_frames = record::read_frames(&record_path).expect("read first mount frames");
-        let mut mount1_fs = CowFs::new(parse_profile("/tmp/** rw"), mount1_writer);
+        let mut mount1_fs = CowFs::new(parse_profile("/tmp/** cow"), mount1_writer);
         let mount1_stats = mount1_fs.replay_from_record_frames(&mount1_frames);
         assert_eq!(mount1_stats.pending_ops, 3);
         assert_eq!(mount1_stats.applied_ops, 3);
@@ -1407,7 +1568,7 @@ mod tests {
 
         let mount2_writer = record::Writer::open_append(&record_path).expect("open second writer");
         let mount2_frames = record::read_frames(&record_path).expect("read second mount frames");
-        let mut mount2_fs = CowFs::new(parse_profile("/tmp/** rw"), mount2_writer);
+        let mut mount2_fs = CowFs::new(parse_profile("/tmp/** cow"), mount2_writer);
         let mount2_stats = mount2_fs.replay_from_record_frames(&mount2_frames);
         assert_eq!(mount2_stats.pending_ops, 3);
         assert_eq!(mount2_stats.applied_ops, 3);

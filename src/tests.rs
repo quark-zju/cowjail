@@ -716,7 +716,7 @@ fn flush_profile_override_can_allow_previously_blocked_write() {
     assert_eq!(first.marked, 0);
 
     let (_profile_root, override_profile) =
-        temp_profile_path("profile-override", &format!("{} rw\n", target.display()));
+        temp_profile_path("profile-override", &format!("{} cow\n", target.display()));
     let override_profile_str = override_profile.to_string_lossy().to_string();
     let second = cmd_flush::flush_record(&path, false, Some(&override_profile_str))
         .expect("flush with override");
@@ -735,7 +735,7 @@ fn load_profile_uses_builtin_default_profile() {
     );
     assert_eq!(
         loaded.profile.first_match_action(Path::new("/tmp")),
-        Some(profile::RuleAction::ReadWrite)
+        Some(profile::RuleAction::Passthrough)
     );
 }
 
@@ -824,7 +824,7 @@ fn flush_rename_to_blocked_target_is_rejected() {
 
     let writer = record::Writer::open_append(&record).expect("writer open");
     let header = ProfileHeaderFrame {
-        normalized_profile: format!("{} rw\n{} ro\n", from.display(), to.display()),
+        normalized_profile: format!("{} cow\n{} ro\n", from.display(), to.display()),
     };
     writer
         .append_cbor(record::TAG_PROFILE_HEADER, &header)
