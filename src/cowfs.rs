@@ -114,10 +114,11 @@ impl CowFs {
     }
 
     fn is_visible(&self, path: &Path) -> bool {
-        !matches!(
-            self.profile.visibility(path),
-            Visibility::Hidden | Visibility::Action(RuleAction::Hide)
-        )
+        match self.profile.visibility(path) {
+            Visibility::Hidden | Visibility::Action(RuleAction::Hide) => false,
+            Visibility::ImplicitAncestor => self.path_is_directory(path),
+            Visibility::Action(_) => true,
+        }
     }
 
     fn access_errno(&self, path: &Path) -> Option<i32> {
@@ -127,7 +128,18 @@ impl CowFs {
         match self.profile.visibility(path) {
             Visibility::Hidden | Visibility::Action(RuleAction::Hide) => Some(ENOENT),
             Visibility::Action(RuleAction::Deny) => Some(EACCES),
+            Visibility::ImplicitAncestor if !self.path_is_directory(path) => Some(ENOENT),
             _ => None,
+        }
+    }
+
+    fn path_is_directory(&self, path: &Path) -> bool {
+        if let Some(node) = self.overlay.get(path) {
+            return matches!(node, OverlayNode::Dir);
+        }
+        match fs::symlink_metadata(path) {
+            Ok(meta) => meta.file_type().is_dir(),
+            Err(_) => false,
         }
     }
 
@@ -1800,6 +1812,22 @@ mod tests {
     fn hide_path_returns_enoent() {
         let (_dir, _record_path, fs) = test_fs("/tmp/hide-me hide");
         assert_eq!(fs.access_errno(Path::new("/tmp/hide-me")), Some(ENOENT));
+    }
+
+    #[test]
+    fn implicit_ancestor_allows_directory_but_not_file() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path();
+        let profile_src = format!("{}/*/leaf ro\n", base.display());
+        let (_holder, _record_path, fs) = test_fs(&profile_src);
+
+        let as_dir = base.join("as-dir");
+        let as_file = base.join("as-file");
+        fs::create_dir_all(&as_dir).expect("mkdir");
+        fs::write(&as_file, b"x").expect("write file");
+
+        assert_eq!(fs.access_errno(&as_dir), None);
+        assert_eq!(fs.access_errno(&as_file), Some(ENOENT));
     }
 
     #[test]
