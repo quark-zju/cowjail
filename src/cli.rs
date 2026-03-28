@@ -24,6 +24,7 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HelpTopic {
     Root,
+    Profile,
     Add,
     List,
     Rm,
@@ -123,6 +124,7 @@ where
     })?;
 
     let command = match subcmd.as_str() {
+        "help" => parse_help(args)?,
         "add" => parse_add(args)?,
         "list" => parse_list(args)?,
         "rm" => parse_rm(args)?,
@@ -136,6 +138,39 @@ where
     };
 
     Ok(command)
+}
+
+fn parse_help(args: Arguments) -> Result<Command> {
+    let extra = args.finish();
+    if extra.is_empty() {
+        return Ok(Command::Help {
+            topic: HelpTopic::Root,
+            verbose: false,
+        });
+    }
+    if extra.len() > 1 {
+        bail!("help got unexpected trailing arguments");
+    }
+    let topic = extra[0]
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("help topic must be valid UTF-8"))?;
+    let topic = match topic {
+        "profile" => HelpTopic::Profile,
+        "add" => HelpTopic::Add,
+        "list" => HelpTopic::List,
+        "rm" => HelpTopic::Rm,
+        "run" => HelpTopic::Run,
+        "flush" => HelpTopic::Flush,
+        "_mount" => HelpTopic::LowLevelMount,
+        "_flush" => HelpTopic::LowLevelFlush,
+        "_fuse" => HelpTopic::LowLevelFuse,
+        "_suid" => HelpTopic::LowLevelSuid,
+        other => bail!("unknown help topic: {other}"),
+    };
+    Ok(Command::Help {
+        topic,
+        verbose: false,
+    })
 }
 
 pub fn parse_env() -> Result<Command> {
@@ -410,6 +445,7 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "COMMON:\n",
             "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
             "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n",
+            "  cowjail help profile\n",
             "\n",
             "NAMED JAILS:\n",
             "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
@@ -430,13 +466,35 @@ pub fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  cowjail <subcommand> [options]\n\n",
             "COMMON:\n",
             "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
-            "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n\n",
+            "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n",
+            "  cowjail help profile\n\n",
             "NAMED JAILS:\n",
             "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
             "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n",
             "  cowjail list\n\n",
             "Run `cowjail --help -v` to list low-level debugging commands.\n",
             "Run `cowjail <subcommand> --help` for details.",
+        ),
+        HelpTopic::Profile => concat!(
+            "cowjail help profile\n\n",
+            "PROFILE SYNTAX:\n",
+            "  <pattern> <action>\n\n",
+            "ACTIONS:\n",
+            "  ro      Read-only visibility\n",
+            "  rw      Writable passthrough (applies to host immediately)\n",
+            "  cow     Writable copy-on-write (captured and applied by flush)\n",
+            "  deny    Hidden/inaccessible\n\n",
+            "NOTES:\n",
+            "  - Empty lines are ignored\n",
+            "  - Lines starting with # are comments\n",
+            "  - Rules are first-match wins\n",
+            "  - `.` expands to launch cwd\n\n",
+            "EXAMPLE:\n",
+            "  /bin ro\n",
+            "  /usr ro\n",
+            "  /tmp rw\n",
+            "  . cow\n",
+            "  /home/*/.ssh deny",
         ),
         HelpTopic::Add => concat!(
             "cowjail add\n\n",
@@ -588,6 +646,21 @@ mod tests {
                 verbose: false,
             }
         );
+    }
+
+    #[test]
+    fn parse_help_profile_topic() {
+        let cmd = parse_from(os(&["help", "profile"])).expect("help profile should parse");
+        assert_eq!(
+            cmd,
+            Command::Help {
+                topic: HelpTopic::Profile,
+                verbose: false,
+            }
+        );
+        let text = help_text(HelpTopic::Profile, false);
+        assert!(text.contains("ACTIONS:"));
+        assert!(text.contains("cow"));
     }
 
     #[test]
