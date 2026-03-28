@@ -16,7 +16,7 @@ pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
         || format!("prepare record parent dir {}", mount.record.display()),
     )?;
     let writer = run_with_log(
-        || record::Writer::open_append(&mount.record),
+        || record::Writer::open_append_with_max_size(&mount.record, loaded.record_max_size_bytes),
         || format!("open mount record writer {}", mount.record.display()),
     )?;
     run_with_log(

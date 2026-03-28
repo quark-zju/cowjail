@@ -34,7 +34,7 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
         || format!("prepare fuse record parent dir {}", cmd.record.display()),
     )?;
     let writer = run_with_log(
-        || record::Writer::open_append(&cmd.record),
+        || record::Writer::open_append_with_max_size(&cmd.record, loaded.record_max_size_bytes),
         || format!("open fuse record writer {}", cmd.record.display()),
     )?;
     run_with_log(

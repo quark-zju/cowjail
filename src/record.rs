@@ -35,6 +35,7 @@ pub struct Writer {
 struct WriterInner {
     buf: BufWriter<fs::File>,
     next_offset: u64,
+    max_size_bytes: Option<u64>,
     dirty: bool,
     last_write: Option<Instant>,
     background_error: Option<String>,
@@ -46,7 +47,12 @@ pub struct LockedRecord {
 }
 
 impl Writer {
+    #[cfg(test)]
     pub fn open_append(path: &Path) -> Result<Self> {
+        Self::open_append_with_max_size(path, None)
+    }
+
+    pub fn open_append_with_max_size(path: &Path, max_size_bytes: Option<u64>) -> Result<Self> {
         let file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -61,6 +67,7 @@ impl Writer {
         let inner = Arc::new(Mutex::new(WriterInner {
             buf: BufWriter::new(file),
             next_offset,
+            max_size_bytes,
             dirty: false,
             last_write: None,
             background_error: None,
@@ -92,6 +99,21 @@ impl Writer {
         }
 
         let len = payload.len() as u64;
+        let frame_len = HEADER_LEN as u64 + len;
+        if let Some(limit) = inner.max_size_bytes {
+            let next_end = inner
+                .next_offset
+                .checked_add(frame_len)
+                .ok_or_else(|| anyhow::anyhow!("record size overflow while appending frame"))?;
+            if next_end > limit {
+                bail!(
+                    "record size limit exceeded: current={} append={} limit={}",
+                    inner.next_offset,
+                    frame_len,
+                    limit
+                );
+            }
+        }
         let checksum = checksum64(payload);
         let mut header = [0u8; HEADER_LEN];
         header[0] = tag;
@@ -107,7 +129,7 @@ impl Writer {
             .buf
             .write_all(payload)
             .context("failed to write record payload")?;
-        inner.next_offset += HEADER_LEN as u64 + len;
+        inner.next_offset += frame_len;
         inner.dirty = true;
         inner.last_write = Some(Instant::now());
         self.flusher_thread.unpark();
@@ -464,5 +486,16 @@ mod tests {
         let frames = read_frames(&path).expect("read frames");
         assert_eq!(frames.len(), 1);
         assert!(frames[0].flushed);
+    }
+
+    #[test]
+    fn append_fails_when_record_limit_would_be_exceeded() {
+        let (_dir, path) = temp_record_path("size-limit");
+        let writer = Writer::open_append_with_max_size(&path, Some(HEADER_LEN as u64))
+            .expect("writer open");
+        let err = writer
+            .append_payload(TAG_WRITE_OP, b"x")
+            .expect_err("append should fail at limit");
+        assert!(err.to_string().contains("record size limit exceeded"));
     }
 }

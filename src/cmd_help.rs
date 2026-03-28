@@ -87,6 +87,7 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "NOTES:\n",
             "  - Empty lines are ignored\n",
             "  - Lines starting with # are comments\n",
+            "  - Side-effect comment: # set max_size = <size|none> (default: 2gb)\n",
             "  - Rules are first-match wins\n",
             "  - `.` expands to launch cwd\n\n",
             "EXAMPLE:\n",
