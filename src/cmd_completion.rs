@@ -66,10 +66,10 @@ const BASH_COMPLETION: &str = r#"_cowjail_complete() {
 
   if [[ "$cmd1" == "profile" ]]; then
     if [[ $COMP_CWORD -eq 2 ]]; then
-      COMPREPLY=( $(compgen -W "list show edit" -- "$cur") )
+      COMPREPLY=( $(compgen -W "list show edit rm" -- "$cur") )
       return
     fi
-    if [[ $COMP_CWORD -eq 3 && ( "$cmd2" == "show" || "$cmd2" == "edit" ) ]]; then
+    if [[ $COMP_CWORD -eq 3 && ( "$cmd2" == "show" || "$cmd2" == "edit" || "$cmd2" == "rm" ) ]]; then
       local profiles
       profiles="$(cowjail profile list 2>/dev/null)"
       COMPREPLY=( $(compgen -W "$profiles" -- "$cur") )
@@ -118,7 +118,7 @@ _cowjail() {
   local -a subcmds help_topics profile_subcmds shells
   subcmds=(completion profile help add list show rm run flush _mount _flush _fuse _suid)
   help_topics=(profile completion add list show rm run flush _mount _flush _fuse _suid)
-  profile_subcmds=(list show edit)
+  profile_subcmds=(list show edit rm)
   shells=(bash zsh fish)
 
   if (( CURRENT == 2 )); then
@@ -144,7 +144,7 @@ _cowjail() {
         _describe 'profile action' profile_subcmds
         return
       fi
-      if (( CURRENT == 4 )) && [[ "$words[3]" == "show" || "$words[3]" == "edit" ]]; then
+      if (( CURRENT == 4 )) && [[ "$words[3]" == "show" || "$words[3]" == "edit" || "$words[3]" == "rm" ]]; then
         local -a profiles
         profiles=(${(f)"$(cowjail profile list 2>/dev/null)"})
         _describe 'profile name' profiles
@@ -160,6 +160,6 @@ compdef _cowjail cowjail
 const FISH_COMPLETION: &str = r#"complete -c cowjail -f -n '__fish_use_subcommand' -a 'completion profile help add list show rm run flush _mount _flush _fuse _suid'
 complete -c cowjail -f -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish' -a 'bash zsh fish'
 complete -c cowjail -f -n '__fish_seen_subcommand_from help; and not __fish_seen_subcommand_from profile completion add list show rm run flush _mount _flush _fuse _suid' -a 'profile completion add list show rm run flush _mount _flush _fuse _suid'
-complete -c cowjail -f -n '__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from list show edit' -a 'list show edit'
-complete -c cowjail -f -n '__fish_seen_subcommand_from profile show profile edit' -a '(cowjail profile list 2>/dev/null)'
+complete -c cowjail -f -n '__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from list show edit rm' -a 'list show edit rm'
+complete -c cowjail -f -n '__fish_seen_subcommand_from profile show profile edit profile rm' -a '(cowjail profile list 2>/dev/null)'
 "#;

@@ -51,6 +51,7 @@ pub enum ProfileAction {
     List,
     Show { name: String },
     Edit { name: String },
+    Rm { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +209,7 @@ fn parse_profile(mut args: Arguments) -> Result<Command> {
     }
     let extra = args.finish();
     if extra.is_empty() {
-        bail!("profile requires subcommand: list, show or edit");
+        bail!("profile requires subcommand: list, show, edit or rm");
     }
     let subcmd = extra[0]
         .to_str()
@@ -252,6 +253,22 @@ fn parse_profile(mut args: Arguments) -> Result<Command> {
             };
             Ok(Command::Profile(ProfileCommand {
                 action: ProfileAction::Show { name },
+            }))
+        }
+        "rm" => {
+            if extra.len() > 2 {
+                bail!("profile rm got unexpected trailing arguments");
+            }
+            let name = if extra.len() == 2 {
+                extra[1]
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("profile NAME must be valid UTF-8"))?
+                    .to_string()
+            } else {
+                DEFAULT_PROFILE.to_string()
+            };
+            Ok(Command::Profile(ProfileCommand {
+                action: ProfileAction::Rm { name },
             }))
         }
         other => bail!("unknown profile subcommand: {other}"),
@@ -635,6 +652,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_profile_rm_subcommand() {
+        let cmd = parse_from(os(&["profile", "rm", "default"])).expect("profile rm should parse");
+        assert_eq!(
+            cmd,
+            Command::Profile(ProfileCommand {
+                action: ProfileAction::Rm {
+                    name: "default".to_string()
+                }
+            })
+        );
+    }
+
+    #[test]
     fn parse_profile_show_defaults_to_default_name() {
         let cmd = parse_from(os(&["profile", "show"])).expect("profile show should default name");
         assert_eq!(
@@ -654,6 +684,19 @@ mod tests {
             cmd,
             Command::Profile(ProfileCommand {
                 action: ProfileAction::Edit {
+                    name: DEFAULT_PROFILE.to_string()
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_profile_rm_defaults_to_default_name() {
+        let cmd = parse_from(os(&["profile", "rm"])).expect("profile rm should default name");
+        assert_eq!(
+            cmd,
+            Command::Profile(ProfileCommand {
+                action: ProfileAction::Rm {
                     name: DEFAULT_PROFILE.to_string()
                 }
             })

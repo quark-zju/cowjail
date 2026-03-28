@@ -11,6 +11,7 @@ pub(crate) fn profile_command(cmd: ProfileCommand) -> Result<()> {
         ProfileAction::List => list_profiles(),
         ProfileAction::Show { name } => show_profile(&name),
         ProfileAction::Edit { name } => edit_profile(&name),
+        ProfileAction::Rm { name } => rm_profile(&name),
     }
 }
 
@@ -77,6 +78,17 @@ fn show_profile(name: &str) -> Result<()> {
     if !text.ends_with('\n') {
         println!();
     }
+    Ok(())
+}
+
+fn rm_profile(name: &str) -> Result<()> {
+    jail::validate_explicit_name(name).context("invalid profile name")?;
+    let path = jail::profile_definition_path(name)?;
+    if !path.exists() {
+        bail!("profile does not exist: {name}");
+    }
+    fs::remove_file(&path)
+        .with_context(|| format!("failed to remove profile file {}", path.display()))?;
     Ok(())
 }
 

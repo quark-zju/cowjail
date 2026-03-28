@@ -11,6 +11,10 @@ This document is the single source of truth for profile syntax, size configurati
   - `name` is optional; default is `default`
   - short names (no `/`) are resolved under `~/.config/cowjail/profiles`
   - names follow the same validation rules as jail names
+- `cowjail profile rm [name]`: remove profile file
+  - `name` is optional; default is `default`
+  - short names (no `/`) are resolved under `~/.config/cowjail/profiles`
+  - names follow the same validation rules as jail names
 
 ## Syntax
 
