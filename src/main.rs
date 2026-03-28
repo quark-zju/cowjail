@@ -17,6 +17,7 @@ mod record;
 
 use anyhow::{Context, Result};
 use cli::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static VERBOSE_LOG: AtomicBool = AtomicBool::new(false);
@@ -100,16 +101,25 @@ where
     F: FnOnce() -> Result<T>,
     D: Fn() -> String,
 {
-    let label = desc();
-    vlog(false, format!("begin {label}"));
+    let verbose = VERBOSE_LOG.load(Ordering::Relaxed);
+    let label = OnceLock::<String>::new();
+    let get_label = || label.get_or_init(&desc).as_str();
+
+    if verbose {
+        eprintln!("begin {}", get_label());
+    }
     match func() {
         Ok(v) => {
-            vlog(false, format!("ok {label}"));
+            if verbose {
+                eprintln!("ok {}", get_label());
+            }
             Ok(v)
         }
         Err(err) => {
-            vlog(false, format!("err {label}: {err:#}"));
-            Err(err).with_context(|| label)
+            if verbose {
+                eprintln!("err {}: {err:#}", get_label());
+            }
+            Err(err).with_context(|| label.get_or_init(desc).clone())
         }
     }
 }
