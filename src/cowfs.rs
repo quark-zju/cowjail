@@ -12,7 +12,7 @@ use fuse::{
     self, FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use libc::{EACCES, EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ENOTEMPTY};
+use libc::{EACCES, EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, ENOTEMPTY, EOPNOTSUPP};
 
 use crate::op::{FileState, Operation};
 use crate::profile::{Profile, RuleAction, Visibility};
@@ -28,6 +28,7 @@ pub struct CowFs {
     ino_to_path: std::collections::HashMap<u64, PathBuf>,
     path_to_ino: std::collections::HashMap<PathBuf, u64>,
     overlay: std::collections::HashMap<PathBuf, OverlayNode>,
+    atime_overrides: std::collections::HashMap<PathBuf, SystemTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,6 +69,7 @@ impl CowFs {
             ino_to_path,
             path_to_ino,
             overlay: std::collections::HashMap::new(),
+            atime_overrides: std::collections::HashMap::new(),
         }
     }
 
@@ -142,7 +144,7 @@ impl CowFs {
         let mtime = system_time_from_unix(metadata.mtime(), metadata.mtime_nsec());
         let ctime = system_time_from_unix(metadata.ctime(), metadata.ctime_nsec());
 
-        FileAttr {
+        let mut attr = FileAttr {
             ino,
             size: metadata.len(),
             blocks: metadata.blocks(),
@@ -157,7 +159,9 @@ impl CowFs {
             gid: metadata.gid(),
             rdev: metadata.rdev() as u32,
             flags: 0,
-        }
+        };
+        self.apply_atime_override(path, &mut attr);
+        attr
     }
 
     fn attr_for_overlay(&mut self, path: &Path, node: &OverlayNode) -> FileAttr {
@@ -177,7 +181,7 @@ impl CowFs {
             }
         };
 
-        FileAttr {
+        let mut attr = FileAttr {
             ino,
             size,
             blocks: 1,
@@ -192,6 +196,14 @@ impl CowFs {
             gid,
             rdev: 0,
             flags: 0,
+        };
+        self.apply_atime_override(path, &mut attr);
+        attr
+    }
+
+    fn apply_atime_override(&self, path: &Path, attr: &mut FileAttr) {
+        if let Some(atime) = self.atime_overrides.get(path) {
+            attr.atime = *atime;
         }
     }
 
@@ -276,6 +288,18 @@ impl CowFs {
         self.overlay.insert(path, node);
     }
 
+    #[cfg(test)]
+    fn apply_cow_setattr_for_test(
+        &mut self,
+        path: &Path,
+        size: Option<u64>,
+        mode: Option<u32>,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+    ) -> Result<FileAttr, i32> {
+        self.apply_cow_setattr(path, size, mode, atime, mtime)
+    }
+
     fn append_record(&self, op: &Operation) -> Result<(), i32> {
         self.record
             .append_cbor(record::TAG_WRITE_OP, op)
@@ -314,7 +338,10 @@ impl CowFs {
         match op {
             Operation::WriteFile { path, state } => {
                 let node = match state {
-                    FileState::Deleted => OverlayNode::Deleted,
+                    FileState::Deleted => {
+                        self.atime_overrides.remove(path);
+                        OverlayNode::Deleted
+                    }
                     FileState::Regular(data) => OverlayNode::Regular {
                         data: data.clone(),
                         executable: false,
@@ -335,6 +362,7 @@ impl CowFs {
                 Ok(())
             }
             Operation::RemoveDir { path } => {
+                self.atime_overrides.remove(path);
                 self.overlay.insert(path.clone(), OverlayNode::Deleted);
                 Ok(())
             }
@@ -418,6 +446,91 @@ impl CowFs {
         self.record_write_file(path.to_path_buf(), regular_state(data, executable))
     }
 
+    fn apply_cow_setattr(
+        &mut self,
+        path: &Path,
+        size: Option<u64>,
+        mode: Option<u32>,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+    ) -> Result<FileAttr, i32> {
+        if size.is_none() && mode.is_none() && atime.is_none() && mtime.is_none() {
+            return Err(ENOSYS);
+        }
+
+        let mut maybe_node = self.snapshot_node(path)?;
+        let mut updated_regular = false;
+        let mut regular_data: Vec<u8> = Vec::new();
+        let mut regular_executable = false;
+
+        if size.is_some() || mode.is_some() {
+            let (mut data, mut executable) = match self.current_regular(path) {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(ENOENT),
+                Err(code) => {
+                    if mode.is_some() && size.is_none() {
+                        return Err(EOPNOTSUPP);
+                    }
+                    return Err(code);
+                }
+            };
+            if let Some(size) = size {
+                data.resize(size as usize, 0);
+                updated_regular = true;
+            }
+            if let Some(mode) = mode {
+                let next_executable = mode & 0o111 != 0;
+                if next_executable != executable {
+                    executable = next_executable;
+                    updated_regular = true;
+                }
+            }
+            regular_data = data;
+            regular_executable = executable;
+        }
+
+        if updated_regular {
+            self.set_overlay_regular_and_record(path, regular_data.clone(), regular_executable)?;
+            maybe_node = Some(OverlayNode::Regular {
+                data: regular_data,
+                executable: regular_executable,
+            });
+        } else if mode.is_some() {
+            // Non-regular files do not carry a mode delta in record format.
+            return Err(EOPNOTSUPP);
+        }
+
+        if let Some(ts) = atime.or(mtime) {
+            self.atime_overrides.insert(path.to_path_buf(), ts);
+        }
+
+        match maybe_node {
+            Some(OverlayNode::Deleted) | None => Err(ENOENT),
+            Some(node) => Ok(self.attr_for_overlay(path, &node)),
+        }
+    }
+
+    fn move_atime_overrides_subtree(&mut self, from: &Path, to: &Path) {
+        let keys: Vec<PathBuf> = self
+            .atime_overrides
+            .keys()
+            .filter(|k| **k == from || is_strict_descendant(from, k))
+            .cloned()
+            .collect();
+        for key in keys {
+            let Some(atime) = self.atime_overrides.remove(&key) else {
+                continue;
+            };
+            let suffix = key.strip_prefix(from).unwrap_or(Path::new(""));
+            let new_path = if suffix.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(suffix)
+            };
+            self.atime_overrides.insert(new_path, atime);
+        }
+    }
+
     fn apply_rename_paths(&mut self, from: &Path, to: &Path) -> Result<(), i32> {
         if from == to {
             return Ok(());
@@ -450,11 +563,16 @@ impl CowFs {
             if !moved {
                 self.overlay.insert(to.to_path_buf(), OverlayNode::Dir);
             }
+            self.move_atime_overrides_subtree(from, to);
         } else {
             self.overlay.insert(to.to_path_buf(), src_node);
+            if let Some(atime) = self.atime_overrides.remove(from) {
+                self.atime_overrides.insert(to.to_path_buf(), atime);
+            }
         }
         self.overlay
             .insert(from.to_path_buf(), OverlayNode::Deleted);
+        self.atime_overrides.remove(from);
         Ok(())
     }
 
@@ -467,6 +585,7 @@ impl CowFs {
             .collect();
         for key in keys {
             self.overlay.remove(&key);
+            self.atime_overrides.remove(&key);
         }
     }
 
@@ -931,6 +1050,7 @@ impl Filesystem for CowFs {
             }
             WriteMode::Cow => {
                 self.overlay.insert(path.clone(), OverlayNode::Deleted);
+                self.atime_overrides.remove(&path);
                 if self.record_write_file(path, FileState::Deleted).is_err() {
                     reply.error(EIO);
                     return;
@@ -1018,6 +1138,7 @@ impl Filesystem for CowFs {
             }
             WriteMode::Cow => {
                 self.overlay.insert(path.clone(), OverlayNode::Deleted);
+                self.atime_overrides.remove(&path);
                 if self.append_record(&Operation::RemoveDir { path }).is_err() {
                     reply.error(EIO);
                     return;
@@ -1146,12 +1267,12 @@ impl Filesystem for CowFs {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<SystemTime>,
-        _mtime: Option<SystemTime>,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
         _fh: Option<u64>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
@@ -1159,10 +1280,10 @@ impl Filesystem for CowFs {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        let Some(size) = size else {
-            reply.error(ENOSYS);
+        if uid.is_some() || gid.is_some() {
+            reply.error(EOPNOTSUPP);
             return;
-        };
+        }
         let Some(path) = self.path_for_ino(ino).map(ToOwned::to_owned) else {
             reply.error(ENOENT);
             return;
@@ -1175,34 +1296,19 @@ impl Filesystem for CowFs {
             WriteMode::Forbidden => {
                 reply.error(EACCES);
             }
-            WriteMode::Cow => {
-                let (mut data, executable) = match self.current_regular(&path) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => {
-                        reply.error(ENOENT);
-                        return;
-                    }
-                    Err(code) => {
-                        reply.error(code);
-                        return;
-                    }
-                };
-                data.resize(size as usize, 0);
-                let node = OverlayNode::Regular {
-                    data: data.clone(),
-                    executable,
-                };
-                if self
-                    .set_overlay_regular_and_record(&path, data, executable)
-                    .is_err()
-                {
-                    reply.error(EIO);
+            WriteMode::Cow => match self.apply_cow_setattr(&path, size, mode, atime, mtime) {
+                Ok(attr) => reply.attr(&TTL, &attr),
+                Err(code) => reply.error(code),
+            },
+            WriteMode::Passthrough => {
+                if atime.is_some() || mtime.is_some() || mode.is_some() {
+                    reply.error(EOPNOTSUPP);
                     return;
                 }
-                let attr = self.attr_for_overlay(&path, &node);
-                reply.attr(&TTL, &attr);
-            }
-            WriteMode::Passthrough => {
+                let Some(size) = size else {
+                    reply.error(ENOSYS);
+                    return;
+                };
                 let file = match fs::OpenOptions::new().write(true).open(&path) {
                     Ok(file) => file,
                     Err(err) => {
@@ -1604,6 +1710,63 @@ mod tests {
     fn hide_path_returns_enoent() {
         let (_dir, _record_path, fs) = test_fs("/tmp/hide-me hide");
         assert_eq!(fs.access_errno(Path::new("/tmp/hide-me")), Some(ENOENT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cow_setattr_mode_updates_executable_and_records_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, record_path, mut fs) = test_fs("/tmp/** cow");
+        let path = dir.path().join("mode-target");
+        fs::write(&path, b"abc").expect("seed file");
+        let mut perm = fs::metadata(&path).expect("metadata").permissions();
+        perm.set_mode(0o644);
+        fs::set_permissions(&path, perm).expect("set mode");
+
+        fs.apply_cow_setattr_for_test(&path, None, Some(0o755), None, None)
+            .expect("setattr mode");
+        drop(fs);
+
+        let frames = record::read_frames(&record_path).expect("read frames");
+        assert_eq!(frames.len(), 1);
+        let op: Operation = record::decode_cbor(&frames[0]).expect("decode op");
+        assert!(matches!(
+            op,
+            Operation::WriteFile {
+                path: p,
+                state: FileState::Executable(ref data)
+            } if p == path && data == b"abc"
+        ));
+    }
+
+    #[test]
+    fn cow_setattr_time_only_stays_in_memory_without_record_frame() {
+        let (dir, record_path, mut fs) = test_fs("/tmp/** cow");
+        let path = dir.path().join("time-target");
+        fs::write(&path, b"x").expect("seed file");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(12345);
+
+        let attr = fs
+            .apply_cow_setattr_for_test(&path, None, None, Some(now), None)
+            .expect("setattr atime");
+        assert_eq!(attr.atime, now);
+        drop(fs);
+
+        let frames = record::read_frames(&record_path).expect("read frames");
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn cow_setattr_mode_on_directory_is_not_supported() {
+        let (dir, _record_path, mut fs) = test_fs("/tmp/** cow");
+        let path = dir.path().join("d");
+        fs::create_dir_all(&path).expect("mkdir");
+
+        let err = fs
+            .apply_cow_setattr_for_test(&path, None, Some(0o755), None, None)
+            .expect_err("mode on directory should fail");
+        assert_eq!(err, EOPNOTSUPP);
     }
 
     #[test]

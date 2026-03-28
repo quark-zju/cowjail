@@ -46,8 +46,8 @@ Status values:
 - note: limitation and cost explicitly documented; compaction redesign deferred.
 
 3. setattrs beyond truncate not supported
-- status: planned
-- note: next phase item; see Setattr Plan below.
+- status: done
+- note: truncate plus regular-file executable-bit mode updates and in-memory atime updates are now supported; metadata persistence remains intentionally limited.
 
 4. Flush lock and flush semantics discussion
 - status: deferred
@@ -83,9 +83,9 @@ Goal: improve behavior for common tools without overhauling metadata model.
 
 ### Phase B (optional incremental support)
 
-- support mtime and atime in COW overlay metadata
+- support in-memory atime updates in COW overlay metadata
 - support mode changes in COW overlay for owner-only bits
-- persist these metadata deltas into record format
-- teach flush replay to apply metadata safely under ownership checks
+- keep atime and mtime out of record format
+- keep replay format unchanged for metadata-only time updates
 
-Phase B should be split into multiple atomic commits because it touches overlay state model, record schema, and replay semantics.
+Phase B should be split into multiple atomic commits because it touches overlay state model and setattr semantics.

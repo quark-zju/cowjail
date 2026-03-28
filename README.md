@@ -101,7 +101,7 @@ cowjail rm 'unnamed-*'                               # remove jails by name glob
 
 - hardlinks are not supported by the current FUSE layer
 - mmap-heavy workloads may degrade or fail
-- metadata behavior is partial (for example, only truncate is currently handled in `setattr`)
+- metadata behavior is partial (`setattr` supports truncate, executable-bit mode updates for regular files, and in-memory atime updates; uid/gid and full metadata persistence are not implemented)
 - regular-file COW writes currently snapshot full file contents, so large-file rewrite workloads may use high RAM and record space
 
 ## License
