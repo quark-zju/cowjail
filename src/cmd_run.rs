@@ -151,6 +151,15 @@ fn ensure_fuse_server(
         "run: starting fuse server for mount {}",
         runtime_paths.mount_dir.display()
     );
+    run_with_log(
+        || ns_runtime::cleanup_before_fuse_start(runtime_paths),
+        || {
+            format!(
+                "cleanup stale fuse runtime before start at {}",
+                runtime_paths.mount_dir.display()
+            )
+        },
+    )?;
     let exe = std::env::current_exe().context("failed to locate current executable")?;
     let mut cmd = ProcessCommand::new(exe);
     let fuse_log = std::fs::OpenOptions::new()

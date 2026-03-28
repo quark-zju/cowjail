@@ -209,6 +209,19 @@ pub(crate) fn ensure_runtime_for_exec(jail: &JailPaths) -> Result<ExecRuntime> {
     Ok(ExecRuntime { ensured })
 }
 
+pub(crate) fn cleanup_before_fuse_start(paths: &NsRuntimePaths) -> Result<()> {
+    terminate_recorded_fuse_server(paths)?;
+    unmount_runtime_mount_dir(paths)?;
+    remove_file_if_exists_with_owner_fix(&paths.runtime_dir, &paths.fuse_pid_path)?;
+    fs::create_dir_all(&paths.mount_dir).with_context(|| {
+        format!(
+            "failed to ensure runtime mount directory {}",
+            paths.mount_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
 pub(crate) fn remove_runtime(jail: &JailPaths) -> Result<()> {
     let paths = paths_for(jail);
     run_with_log(
