@@ -33,54 +33,9 @@ pub(crate) fn topic_names() -> &'static [(&'static str, HelpTopic)] {
     HELP_TOPIC_NAMES
 }
 
-pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
+pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
     match topic {
-        HelpTopic::Root if verbose => concat!(
-            "cowjail\n\n",
-            "USAGE:\n",
-            "  cowjail <subcommand> [options]\n\n",
-            "PROFILE:\n",
-            "  cowjail profile list\n",
-            "  cowjail profile edit <name>\n",
-            "\n",
-            "COMMON:\n",
-            "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
-            "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n",
-            "  cowjail help profile\n",
-            "\n",
-            "NAMED JAILS:\n",
-            "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
-            "  cowjail show <name>\n",
-            "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n",
-            "  cowjail list\n",
-            "\n",
-            "LOW-LEVEL (DEBUG):\n",
-            "  cowjail _mount --profile <profile> --record <record_path> [-v|--verbose] <path>\n",
-            "  cowjail _flush --record <record_path> [--profile <profile>] [--dry-run] [-v|--verbose]\n",
-            "  cowjail _suid [-v|--verbose]\n\n",
-            "  cowjail _fuse --profile <profile> --record <record_path> \\\n",
-            "       --mountpoint <path> --pid-path <path> [--uid <uid>] [--gid <gid>] [-v|--verbose]\n\n",
-            "Run `cowjail <subcommand> --help` for details.",
-        ),
-        HelpTopic::Root => concat!(
-            "cowjail\n\n",
-            "USAGE:\n",
-            "  cowjail <subcommand> [options]\n\n",
-            "PROFILE:\n",
-            "  cowjail profile list\n",
-            "  cowjail profile edit <name>\n\n",
-            "COMMON:\n",
-            "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
-            "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n",
-            "  cowjail help profile\n\n",
-            "NAMED JAILS:\n",
-            "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
-            "  cowjail show <name>\n",
-            "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n",
-            "  cowjail list\n\n",
-            "Run `cowjail --help -v` to list low-level debugging commands.\n",
-            "Run `cowjail <subcommand> --help` for details.",
-        ),
+        HelpTopic::Root => root_help_text(verbose),
         HelpTopic::Profile => concat!(
             "cowjail help profile\n\n",
             "PROFILE SYNTAX:\n",
@@ -103,7 +58,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  /tmp rw\n",
             "  . cow\n",
             "  /home/*/.ssh deny",
-        ),
+        )
+        .to_string(),
         HelpTopic::Add => concat!(
             "cowjail add\n\n",
             "USAGE:\n",
@@ -113,8 +69,9 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "OPTIONS:\n",
             "  --name <name>         Explicit jail name (same as positional NAME)\n",
             "  --profile <profile>   Profile path. Default: default",
-        ),
-        HelpTopic::List => concat!("cowjail list\n\n", "USAGE:\n", "  cowjail list"),
+        )
+        .to_string(),
+        HelpTopic::List => concat!("cowjail list\n\n", "USAGE:\n", "  cowjail list").to_string(),
         HelpTopic::Show => concat!(
             "cowjail show\n\n",
             "USAGE:\n",
@@ -123,7 +80,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  Print jail profile and pending unflushed write-op count.\n\n",
             "OPTIONS:\n",
             "  -v, --verbose         Also print pending write paths"
-        ),
+        )
+        .to_string(),
         HelpTopic::Rm => concat!(
             "cowjail rm\n\n",
             "USAGE:\n",
@@ -134,7 +92,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  --name <name>         Remove by jail name or glob (same as positional NAME)\n",
             "  --profile <profile>   Remove the jail selected by profile-derived identity\n",
             "  -v, --verbose         Print cleanup syscall progress",
-        ),
+        )
+        .to_string(),
         HelpTopic::Run => concat!(
             "cowjail run\n\n",
             "USAGE:\n",
@@ -145,7 +104,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  -v, --verbose         Print progress logs\n\n",
             "TROUBLESHOOTING:\n",
             "  Profile behavior and rule matching: cowjail help profile",
-        ),
+        )
+        .to_string(),
         HelpTopic::LowLevelMount => concat!(
             "cowjail _mount\n\n",
             "USAGE:\n",
@@ -154,7 +114,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  --profile <profile>   Profile path (required)\n",
             "  --record <record>     Record output path (required)\n",
             "  -v, --verbose         Print progress logs",
-        ),
+        )
+        .to_string(),
         HelpTopic::Flush => concat!(
             "cowjail flush\n\n",
             "USAGE:\n",
@@ -166,7 +127,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  --profile <profile>   Flush the jail selected by profile-derived identity\n",
             "  --dry-run             Preview without applying or marking flushed\n",
             "  -v, --verbose         Print progress logs",
-        ),
+        )
+        .to_string(),
         HelpTopic::LowLevelFlush => concat!(
             "cowjail _flush\n\n",
             "USAGE:\n",
@@ -176,7 +138,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  --profile <profile>   Replay policy profile override\n",
             "  --dry-run             Preview without applying or marking flushed\n",
             "  -v, --verbose         Print progress logs",
-        ),
+        )
+        .to_string(),
         HelpTopic::LowLevelFuse => concat!(
             "cowjail _fuse\n\n",
             "USAGE:\n",
@@ -188,7 +151,8 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  --mountpoint <path>   Mountpoint inside target mntns (required)\n",
             "  --pid-path <path>     PID file path (required)\n",
             "  -v, --verbose         Print progress logs",
-        ),
+        )
+        .to_string(),
         HelpTopic::LowLevelSuid => concat!(
             "cowjail _suid\n\n",
             "USAGE:\n",
@@ -198,8 +162,47 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> &'static str {
             "  If not running as root, this command reinvokes itself via sudo.\n\n",
             "OPTIONS:\n",
             "  -v, --verbose         Print progress logs",
-        ),
+        )
+        .to_string(),
     }
+}
+
+fn root_help_text(verbose: bool) -> String {
+    let mut out = String::from(concat!(
+        "cowjail\n\n",
+        "USAGE:\n",
+        "  cowjail <subcommand> [options]\n\n",
+        "PROFILE:\n",
+        "  cowjail profile list\n",
+        "  cowjail profile edit [name]\n\n",
+        "COMMON:\n",
+        "  cowjail run [--name <name> | --profile <profile>] [-v|--verbose] command ...\n",
+        "  cowjail flush [--name <name> | <name> | --profile <profile>] [--dry-run] [-v|--verbose]\n",
+        "  cowjail help profile\n\n",
+        "NAMED JAILS:\n",
+        "  cowjail add [<name> | --name <name>] [--profile <profile>]\n",
+        "  cowjail show <name>\n",
+        "  cowjail rm (<name> | --name <name> | --profile <profile>) [-v|--verbose]\n",
+        "  cowjail list\n",
+    ));
+    if verbose {
+        out.push_str(concat!(
+            "\n",
+            "LOW-LEVEL (DEBUG):\n",
+            "  cowjail _mount --profile <profile> --record <record_path> [-v|--verbose] <path>\n",
+            "  cowjail _flush --record <record_path> [--profile <profile>] [--dry-run] [-v|--verbose]\n",
+            "  cowjail _suid [-v|--verbose]\n\n",
+            "  cowjail _fuse --profile <profile> --record <record_path> \\\n",
+            "       --mountpoint <path> --pid-path <path> [-v|--verbose]\n",
+        ));
+    }
+    out.push('\n');
+    out.push_str(if verbose {
+        "Run `cowjail <subcommand> --help` for details."
+    } else {
+        "Run `cowjail --help -v` to list low-level debugging commands.\nRun `cowjail <subcommand> --help` for details."
+    });
+    out
 }
 
 fn profile_help_text() -> String {

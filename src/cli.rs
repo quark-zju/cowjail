@@ -195,13 +195,17 @@ fn parse_profile(mut args: Arguments) -> Result<Command> {
             }))
         }
         "edit" => {
-            if extra.len() != 2 {
-                bail!("profile edit requires NAME");
+            if extra.len() > 2 {
+                bail!("profile edit got unexpected trailing arguments");
             }
-            let name = extra[1]
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("profile NAME must be valid UTF-8"))?
-                .to_string();
+            let name = if extra.len() == 2 {
+                extra[1]
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("profile NAME must be valid UTF-8"))?
+                    .to_string()
+            } else {
+                DEFAULT_PROFILE.to_string()
+            };
             Ok(Command::Profile(ProfileCommand {
                 action: ProfileAction::Edit { name },
             }))
@@ -550,6 +554,19 @@ mod tests {
             Command::Profile(ProfileCommand {
                 action: ProfileAction::Edit {
                     name: "default".to_string()
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_profile_edit_defaults_to_default_name() {
+        let cmd = parse_from(os(&["profile", "edit"])).expect("profile edit should default name");
+        assert_eq!(
+            cmd,
+            Command::Profile(ProfileCommand {
+                action: ProfileAction::Edit {
+                    name: DEFAULT_PROFILE.to_string()
                 }
             })
         );
