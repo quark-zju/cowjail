@@ -44,6 +44,12 @@ Record is CBOR-framed append-only log with:
 Write operations are appended during FUSE activity and marked flushed when host replay succeeds.
 Reader uses best-effort behavior for incomplete/corrupt tail fragments.
 
+Current write model caveat:
+
+- COW regular-file writes snapshot whole-file content into in-memory overlay and into record frames.
+- This favors simple replay semantics over memory/disk efficiency.
+- Large-file or high-frequency rewrite workloads can consume substantial RAM and record space during a session.
+
 ## Replay Layers
 
 There are two replay paths:
