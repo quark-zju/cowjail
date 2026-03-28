@@ -1,6 +1,7 @@
 use std::ffi::{CString, OsStr};
 use std::fs::Metadata;
 use std::io::{Read, Seek, SeekFrom, Write};
+use fs_err::os::unix::fs::OpenOptionsExt as FsOpenOptionsExt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -44,8 +45,8 @@ pub struct ReplayStats {
 #[derive(Debug, Clone)]
 enum OverlayNode {
     Deleted,
-    Dir,
-    Regular { data: Vec<u8>, executable: bool },
+    Dir { mode: u16 },
+    Regular { data: Vec<u8>, mode: u16 },
     Symlink { target: PathBuf },
 }
 
@@ -142,7 +143,7 @@ impl CowFs {
 
     fn path_is_directory(&self, path: &Path) -> bool {
         if let Some(node) = self.overlay.get(path) {
-            return matches!(node, OverlayNode::Dir);
+            return matches!(node, OverlayNode::Dir { .. });
         }
         match fs::symlink_metadata(path) {
             Ok(meta) => meta.file_type().is_dir(),
@@ -193,11 +194,8 @@ impl CowFs {
         let gid = unsafe { libc::getegid() };
         let (kind, perm, size) = match node {
             OverlayNode::Deleted => (FileType::RegularFile, 0o000, 0),
-            OverlayNode::Dir => (FileType::Directory, 0o755, 0),
-            OverlayNode::Regular { data, executable } => {
-                let perm = if *executable { 0o755 } else { 0o644 };
-                (FileType::RegularFile, perm, data.len() as u64)
-            }
+            OverlayNode::Dir { mode } => (FileType::Directory, *mode, 0),
+            OverlayNode::Regular { data, mode } => (FileType::RegularFile, *mode, data.len() as u64),
             OverlayNode::Symlink { target } => {
                 (FileType::Symlink, 0o777, target.as_os_str().len() as u64)
             }
@@ -377,13 +375,9 @@ impl CowFs {
                         self.atime_overrides.remove(path);
                         OverlayNode::Deleted
                     }
-                    FileState::Regular(data) => OverlayNode::Regular {
+                    FileState::Regular { data, mode } => OverlayNode::Regular {
                         data: data.clone(),
-                        executable: false,
-                    },
-                    FileState::Executable(data) => OverlayNode::Regular {
-                        data: data.clone(),
-                        executable: true,
+                        mode: (*mode & 0o7777) as u16,
                     },
                     FileState::Symlink(target) => OverlayNode::Symlink {
                         target: target.clone(),
@@ -392,8 +386,13 @@ impl CowFs {
                 self.overlay.insert(path.clone(), node);
                 Ok(())
             }
-            Operation::CreateDir { path } => {
-                self.overlay.insert(path.clone(), OverlayNode::Dir);
+            Operation::CreateDir { path, mode } => {
+                self.overlay.insert(
+                    path.clone(),
+                    OverlayNode::Dir {
+                        mode: (*mode & 0o7777) as u16,
+                    },
+                );
                 Ok(())
             }
             Operation::RemoveDir { path } => {
@@ -403,11 +402,11 @@ impl CowFs {
             }
             Operation::Rename { from, to } => self.apply_rename_paths(from, to).map_err(|_| ()),
             Operation::Truncate { path, size } => {
-                let (mut data, executable) =
+                let (mut data, mode) =
                     self.current_regular(path).map_err(|_| ())?.ok_or(())?;
                 data.resize(*size as usize, 0);
                 self.overlay
-                    .insert(path.clone(), OverlayNode::Regular { data, executable });
+                    .insert(path.clone(), OverlayNode::Regular { data, mode });
                 Ok(())
             }
         }
@@ -426,7 +425,9 @@ impl CowFs {
             Err(_) => return Err(EIO),
         };
         if meta.file_type().is_dir() {
-            return Ok(Some(OverlayNode::Dir));
+            return Ok(Some(OverlayNode::Dir {
+                mode: (meta.permissions().mode() & 0o7777) as u16,
+            }));
         }
         if meta.file_type().is_symlink() {
             let target = fs::read_link(path).map_err(|_| EIO)?;
@@ -434,15 +435,15 @@ impl CowFs {
         }
         if meta.file_type().is_file() {
             let data = fs::read(path).map_err(|_| EIO)?;
-            let executable = meta.permissions().mode() & 0o111 != 0;
-            return Ok(Some(OverlayNode::Regular { data, executable }));
+            let mode = (meta.permissions().mode() & 0o7777) as u16;
+            return Ok(Some(OverlayNode::Regular { data, mode }));
         }
         Ok(None)
     }
 
-    fn current_regular(&self, path: &Path) -> Result<Option<(Vec<u8>, bool)>, i32> {
+    fn current_regular(&self, path: &Path) -> Result<Option<(Vec<u8>, u16)>, i32> {
         match self.snapshot_node(path)? {
-            Some(OverlayNode::Regular { data, executable }) => Ok(Some((data, executable))),
+            Some(OverlayNode::Regular { data, mode }) => Ok(Some((data, mode))),
             Some(OverlayNode::Deleted) | None => Ok(None),
             _ => Err(EIO),
         }
@@ -458,7 +459,7 @@ impl CowFs {
 
     fn ensure_dir_empty(&mut self, path: &Path) -> Result<(), i32> {
         match self.snapshot_node(path)? {
-            Some(OverlayNode::Dir) => {}
+            Some(OverlayNode::Dir { .. }) => {}
             Some(_) => return Err(ENOTDIR),
             None => return Err(ENOENT),
         }
@@ -482,16 +483,16 @@ impl CowFs {
         &mut self,
         path: &Path,
         data: Vec<u8>,
-        executable: bool,
+        mode: u16,
     ) -> Result<(), i32> {
         self.overlay.insert(
             path.to_path_buf(),
             OverlayNode::Regular {
                 data: data.clone(),
-                executable,
+                mode,
             },
         );
-        self.record_write_file(path.to_path_buf(), regular_state(data, executable))
+        self.record_write_file(path.to_path_buf(), regular_state(data, mode))
     }
 
     fn apply_cow_setattr(
@@ -509,10 +510,10 @@ impl CowFs {
         let mut maybe_node = self.snapshot_node(path)?;
         let mut updated_regular = false;
         let mut regular_data: Vec<u8> = Vec::new();
-        let mut regular_executable = false;
+        let mut regular_mode = 0u16;
 
         if size.is_some() || mode.is_some() {
-            let (mut data, mut executable) = match self.current_regular(path) {
+            let (mut data, mut current_mode) = match self.current_regular(path) {
                 Ok(Some(v)) => v,
                 Ok(None) => return Err(ENOENT),
                 Err(code) => {
@@ -527,21 +528,21 @@ impl CowFs {
                 updated_regular = true;
             }
             if let Some(mode) = mode {
-                let next_executable = mode & 0o111 != 0;
-                if next_executable != executable {
-                    executable = next_executable;
+                let next_mode = (mode & 0o7777) as u16;
+                if next_mode != current_mode {
+                    current_mode = next_mode;
                     updated_regular = true;
                 }
             }
             regular_data = data;
-            regular_executable = executable;
+            regular_mode = current_mode;
         }
 
         if updated_regular {
-            self.set_overlay_regular_and_record(path, regular_data.clone(), regular_executable)?;
+            self.set_overlay_regular_and_record(path, regular_data.clone(), regular_mode)?;
             maybe_node = Some(OverlayNode::Regular {
                 data: regular_data,
-                executable: regular_executable,
+                mode: regular_mode,
             });
         } else if mode.is_some() {
             // Non-regular files do not carry a mode delta in record format.
@@ -626,13 +627,13 @@ impl CowFs {
         let Some(src_node) = self.snapshot_node(from)? else {
             return Err(ENOENT);
         };
-        let src_is_dir = matches!(src_node, OverlayNode::Dir);
+        let src_is_dir = matches!(src_node, OverlayNode::Dir { .. });
         if src_is_dir && is_strict_descendant(from, to) {
             return Err(EINVAL);
         }
 
         if let Some(dst_node) = self.snapshot_node(to)? {
-            let dst_is_dir = matches!(dst_node, OverlayNode::Dir);
+            let dst_is_dir = matches!(dst_node, OverlayNode::Dir { .. });
             if src_is_dir && !dst_is_dir {
                 return Err(ENOTDIR);
             }
@@ -649,7 +650,8 @@ impl CowFs {
         if src_is_dir {
             let moved = self.move_overlay_subtree(from, to);
             if !moved {
-                self.overlay.insert(to.to_path_buf(), OverlayNode::Dir);
+                self.overlay
+                    .insert(to.to_path_buf(), OverlayNode::Dir { mode: 0o755 });
             }
             self.move_atime_overrides_subtree(from, to);
         } else {
@@ -807,7 +809,7 @@ impl Filesystem for CowFs {
                 }
             }
             Ok(Some(NodeRef::Overlay(node))) => {
-                if !matches!(node, OverlayNode::Dir) {
+                if !matches!(node, OverlayNode::Dir { .. }) {
                     reply.error(ENOENT);
                     return;
                 }
@@ -895,7 +897,7 @@ impl Filesystem for CowFs {
 
         if let Some(node) = self.overlay.get(&path) {
             match node {
-                OverlayNode::Deleted | OverlayNode::Dir => {
+                OverlayNode::Deleted | OverlayNode::Dir { .. } => {
                     reply.error(ENOENT);
                     return;
                 }
@@ -992,8 +994,8 @@ impl Filesystem for CowFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        mode: u32,
+        umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
@@ -1015,13 +1017,20 @@ impl Filesystem for CowFs {
                     reply.error(code);
                     return;
                 }
+                let mode = normalize_create_mode(mode, umask);
                 let node = OverlayNode::Regular {
                     data: Vec::new(),
-                    executable: false,
+                    mode,
                 };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
-                    .record_write_file(path.clone(), FileState::Regular(Vec::new()))
+                    .record_write_file(
+                        path.clone(),
+                        FileState::Regular {
+                            data: Vec::new(),
+                            mode: mode as u32,
+                        },
+                    )
                     .is_err()
                 {
                     reply.error(EIO);
@@ -1034,6 +1043,7 @@ impl Filesystem for CowFs {
                 match fs::OpenOptions::new()
                     .create_new(true)
                     .write(true)
+                    .mode((normalize_create_mode(mode, umask) as u32) & 0o7777)
                     .open(&path)
                 {
                     Ok(_) => {}
@@ -1079,7 +1089,7 @@ impl Filesystem for CowFs {
                     reply.error(EIO);
                     return;
                 }
-                let (mut content, executable) = match self.current_regular(&path) {
+                let (mut content, mode) = match self.current_regular(&path) {
                     Ok(Some(v)) => v,
                     Ok(None) => {
                         reply.error(ENOENT);
@@ -1100,7 +1110,7 @@ impl Filesystem for CowFs {
                 content[off..off + data.len()].copy_from_slice(data);
 
                 if self
-                    .set_overlay_regular_and_record(&path, content, executable)
+                    .set_overlay_regular_and_record(&path, content, mode)
                     .is_err()
                 {
                     reply.error(EIO);
@@ -1171,8 +1181,8 @@ impl Filesystem for CowFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
-        _umask: u32,
+        mode: u32,
+        umask: u32,
         reply: ReplyEntry,
     ) {
         let Some(parent_path) = self.path_for_ino(parent).map(ToOwned::to_owned) else {
@@ -1193,10 +1203,14 @@ impl Filesystem for CowFs {
                     reply.error(code);
                     return;
                 }
-                let node = OverlayNode::Dir;
+                let mode = normalize_create_mode(mode, umask);
+                let node = OverlayNode::Dir { mode };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
-                    .append_record(&Operation::CreateDir { path: path.clone() })
+                    .append_record(&Operation::CreateDir {
+                        path: path.clone(),
+                        mode: mode as u32,
+                    })
                     .is_err()
                 {
                     reply.error(EIO);
@@ -1206,7 +1220,7 @@ impl Filesystem for CowFs {
                 reply.entry(&TTL, &attr, 0);
             }
             WriteMode::Passthrough => {
-                if let Err(err) = fs::create_dir(&path) {
+                if let Err(err) = create_dir_with_mode(&path, normalize_create_mode(mode, umask)) {
                     reply.error(io_errno(&err));
                     return;
                 }
@@ -1525,7 +1539,7 @@ fn filetype_from_metadata(metadata: &Metadata) -> FileType {
 fn overlay_filetype(node: &OverlayNode) -> FileType {
     match node {
         OverlayNode::Deleted => FileType::RegularFile,
-        OverlayNode::Dir => FileType::Directory,
+        OverlayNode::Dir { .. } => FileType::Directory,
         OverlayNode::Regular { .. } => FileType::RegularFile,
         OverlayNode::Symlink { .. } => FileType::Symlink,
     }
@@ -1546,12 +1560,22 @@ fn io_errno(err: &std::io::Error) -> i32 {
     err.raw_os_error().unwrap_or(EIO)
 }
 
-fn regular_state(data: Vec<u8>, executable: bool) -> FileState {
-    if executable {
-        FileState::Executable(data)
-    } else {
-        FileState::Regular(data)
+fn normalize_create_mode(mode: u32, umask: u32) -> u16 {
+    (mode & !umask & 0o7777) as u16
+}
+
+fn regular_state(data: Vec<u8>, mode: u16) -> FileState {
+    FileState::Regular {
+        data,
+        mode: mode as u32,
     }
+}
+
+fn create_dir_with_mode(path: &Path, mode: u16) -> std::io::Result<()> {
+    fs::create_dir(path)?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(mode as u32);
+    fs::set_permissions(path, permissions)
 }
 
 fn append_readdir_entries<F>(
@@ -1609,7 +1633,7 @@ mod tests {
             path.clone(),
             OverlayNode::Regular {
                 data: b"overlay".to_vec(),
-                executable: false,
+                mode: 0o644,
             },
         );
         let got = fs.effective_node(&path).expect("effective node");
@@ -1634,10 +1658,10 @@ mod tests {
             new_file.clone(),
             OverlayNode::Regular {
                 data: b"x".to_vec(),
-                executable: false,
+                mode: 0o644,
             },
         );
-        fs.overlay_set(new_dir, OverlayNode::Dir);
+        fs.overlay_set(new_dir, OverlayNode::Dir { mode: 0o755 });
         fs.overlay_set(
             new_link,
             OverlayNode::Symlink {
@@ -1669,19 +1693,19 @@ mod tests {
         let from = PathBuf::from("/tmp/cowjail-rename-from");
         let to = PathBuf::from("/tmp/cowjail-rename-to");
         let child = from.join("child.txt");
-        fs.overlay_set(from.clone(), OverlayNode::Dir);
+        fs.overlay_set(from.clone(), OverlayNode::Dir { mode: 0o755 });
         fs.overlay_set(
             child.clone(),
             OverlayNode::Regular {
                 data: b"x".to_vec(),
-                executable: false,
+                mode: 0o644,
             },
         );
 
         fs.apply_rename_paths(&from, &to)
             .expect("rename should succeed");
         assert!(matches!(fs.overlay.get(&from), Some(OverlayNode::Deleted)));
-        assert!(matches!(fs.overlay.get(&to), Some(OverlayNode::Dir)));
+        assert!(matches!(fs.overlay.get(&to), Some(OverlayNode::Dir { mode: 0o755 })));
         assert!(matches!(
             fs.overlay.get(&to.join("child.txt")),
             Some(OverlayNode::Regular { .. })
@@ -1693,7 +1717,7 @@ mod tests {
         let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let from = PathBuf::from("/tmp/cowjail-self-rename");
         let to = from.join("sub");
-        fs.overlay_set(from.clone(), OverlayNode::Dir);
+        fs.overlay_set(from.clone(), OverlayNode::Dir { mode: 0o755 });
         let err = fs
             .apply_rename_paths(&from, &to)
             .expect_err("rename to own subpath should fail");
@@ -1725,7 +1749,7 @@ mod tests {
                 record::TAG_WRITE_OP,
                 &Operation::WriteFile {
                     path: PathBuf::from("/tmp/replay-a"),
-                    state: FileState::Regular(b"one".to_vec()),
+                    state: FileState::Regular { data: b"one".to_vec(), mode: 0o644 },
                 },
             )
             .expect("append write a");
@@ -1743,7 +1767,7 @@ mod tests {
                 record::TAG_WRITE_OP,
                 &Operation::WriteFile {
                     path: PathBuf::from("/tmp/replay-b"),
-                    state: FileState::Executable(b"two".to_vec()),
+                    state: FileState::Regular { data: b"two".to_vec(), mode: 0o755 },
                 },
             )
             .expect("append write b");
@@ -1762,7 +1786,7 @@ mod tests {
             fs.overlay.get(Path::new("/tmp/replay-b")),
             Some(OverlayNode::Regular {
                 data,
-                executable: true
+                mode: 0o755
             }) if data == b"two"
         ));
     }
@@ -1778,7 +1802,7 @@ mod tests {
                 record::TAG_WRITE_OP,
                 &Operation::WriteFile {
                     path: PathBuf::from("/tmp/replay-flushed"),
-                    state: FileState::Regular(b"old".to_vec()),
+                    state: FileState::Regular { data: b"old".to_vec(), mode: 0o644 },
                 },
             )
             .expect("append flushed op");
@@ -1787,7 +1811,7 @@ mod tests {
                 record::TAG_WRITE_OP,
                 &Operation::WriteFile {
                     path: PathBuf::from("/tmp/replay-flushed"),
-                    state: FileState::Regular(b"new".to_vec()),
+                    state: FileState::Regular { data: b"new".to_vec(), mode: 0o644 },
                 },
             )
             .expect("append pending op");
@@ -1804,7 +1828,7 @@ mod tests {
             fs.overlay.get(Path::new("/tmp/replay-flushed")),
             Some(OverlayNode::Regular {
                 data,
-                executable: false
+                mode: 0o644
             }) if data == b"new"
         ));
     }
@@ -1820,7 +1844,7 @@ mod tests {
                 record::TAG_WRITE_OP,
                 &Operation::WriteFile {
                     path: PathBuf::from("/tmp/reboot-visible-a"),
-                    state: FileState::Regular(b"first".to_vec()),
+                    state: FileState::Regular { data: b"first".to_vec(), mode: 0o644 },
                 },
             )
             .expect("append first write");
@@ -1857,7 +1881,7 @@ mod tests {
             mount1_fs.overlay.get(Path::new("/tmp/reboot-visible-b")),
             Some(OverlayNode::Regular {
                 data,
-                executable: false
+                mode: 0o644
             }) if data == b"fir"
         ));
         drop(mount1_fs);
@@ -1876,7 +1900,7 @@ mod tests {
             mount2_fs.overlay.get(Path::new("/tmp/reboot-visible-b")),
             Some(OverlayNode::Regular {
                 data,
-                executable: false
+                mode: 0o644
             }) if data == b"fir"
         ));
     }
@@ -1974,8 +1998,11 @@ mod tests {
             op,
             Operation::WriteFile {
                 path: p,
-                state: FileState::Executable(ref data)
-            } if p == path && data == b"abc"
+                state: FileState::Regular {
+                    data: ref contents,
+                    mode: 0o755
+                }
+            } if p == path && contents == b"abc"
         ));
     }
 

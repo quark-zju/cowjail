@@ -31,7 +31,7 @@ pub(crate) fn show_command(show: ShowCommand) -> Result<()> {
             };
             match op {
                 op::Operation::WriteFile { path, .. }
-                | op::Operation::CreateDir { path }
+                | op::Operation::CreateDir { path, .. }
                 | op::Operation::RemoveDir { path }
                 | op::Operation::Truncate { path, .. } => {
                     pending_paths.insert(path.display().to_string());

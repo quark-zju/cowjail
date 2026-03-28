@@ -221,7 +221,7 @@ fn op_allowed_by_profile(policy: Option<&profile::Profile>, op: &op::Operation) 
 fn op_paths(op: &op::Operation) -> Vec<&Path> {
     match op {
         op::Operation::WriteFile { path, .. }
-        | op::Operation::CreateDir { path }
+        | op::Operation::CreateDir { path, .. }
         | op::Operation::RemoveDir { path }
         | op::Operation::Truncate { path, .. } => vec![path.as_path()],
         op::Operation::Rename { from, to } => vec![from.as_path(), to.as_path()],
@@ -241,8 +241,7 @@ fn op_allowed_by_ownership(op: &op::Operation) -> Result<bool> {
                     parent_owns(path)
                 }
             }
-            op::FileState::Regular(_)
-            | op::FileState::Executable(_)
+            op::FileState::Regular { .. }
             | op::FileState::Symlink(_) => {
                 if path.exists() {
                     owns(path)
@@ -251,7 +250,7 @@ fn op_allowed_by_ownership(op: &op::Operation) -> Result<bool> {
                 }
             }
         },
-        op::Operation::CreateDir { path } => {
+        op::Operation::CreateDir { path, .. } => {
             if path.exists() {
                 owns(path)
             } else {
@@ -349,7 +348,7 @@ fn compact_segment_offsets(items: &[PendingOp]) -> HashSet<u64> {
 fn op_primary_path(op: &op::Operation) -> Option<&Path> {
     match op {
         op::Operation::WriteFile { path, .. }
-        | op::Operation::CreateDir { path }
+        | op::Operation::CreateDir { path, .. }
         | op::Operation::RemoveDir { path }
         | op::Operation::Truncate { path, .. } => Some(path.as_path()),
         op::Operation::Rename { .. } => None,
@@ -367,19 +366,12 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
                     Err(err) => Err(err)
                         .with_context(|| format!("failed to remove file: {}", path.display())),
                 },
-                op::FileState::Regular(data) => {
+                op::FileState::Regular { data, mode } => {
                     prepare_file_destination(path)?;
                     fs::write(path, data).with_context(|| {
                         format!("failed to write file from record: {}", path.display())
                     })?;
-                    set_executable_bit(path, false)
-                }
-                op::FileState::Executable(data) => {
-                    prepare_file_destination(path)?;
-                    fs::write(path, data).with_context(|| {
-                        format!("failed to write file from record: {}", path.display())
-                    })?;
-                    set_executable_bit(path, true)
+                    set_permissions_mode(path, *mode)
                 }
                 op::FileState::Symlink(target) => {
                     ensure_safe_parent_dirs(path, "symlink replay destination")?;
@@ -387,9 +379,9 @@ fn apply_operation(op: &op::Operation) -> Result<()> {
                 }
             }
         }
-        op::Operation::CreateDir { path } => {
+        op::Operation::CreateDir { path, mode } => {
             validate_abs(path)?;
-            fs::create_dir_all(path)
+            create_dir_all_with_mode(path, *mode)
                 .with_context(|| format!("failed to create directory: {}", path.display()))
         }
         op::Operation::RemoveDir { path } => {
@@ -502,19 +494,15 @@ fn ensure_safe_parent_dirs(path: &Path, context: &str) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn set_executable_bit(path: &Path, executable: bool) -> Result<()> {
+fn set_permissions_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perm = fs::metadata(path)
         .with_context(|| format!("failed to stat file after write: {}", path.display()))?
         .permissions();
-    let mode = perm.mode();
-    let next = if executable {
-        mode | 0o111
-    } else {
-        mode & !0o111
-    };
-    if next != mode {
-        perm.set_mode(next);
+    let current_mode = perm.mode();
+    let next_mode = mode & 0o7777;
+    if next_mode != current_mode {
+        perm.set_mode(next_mode);
         fs::set_permissions(path, perm)
             .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     }
@@ -522,7 +510,16 @@ fn set_executable_bit(path: &Path, executable: bool) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_executable_bit(_path: &Path, _executable: bool) -> Result<()> {
+fn set_permissions_mode(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
+}
+
+fn create_dir_all_with_mode(path: &Path, mode: u32) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        set_permissions_mode(path, mode)?;
+    }
     Ok(())
 }
 

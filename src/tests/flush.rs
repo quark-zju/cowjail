@@ -12,7 +12,7 @@ fn flush_dry_run_does_not_mark() {
     let writer = record::Writer::open_append(&path).expect("writer open");
     let op = op::Operation::WriteFile {
         path: target,
-        state: op::FileState::Regular(b"hello".to_vec()),
+        state: op::FileState::Regular { data: b"hello".to_vec(), mode: 0o644 },
     };
     writer
         .append_cbor(record::TAG_WRITE_OP, &op)
@@ -35,7 +35,7 @@ fn flush_marks_and_becomes_idempotent() {
     let writer = record::Writer::open_append(&path).expect("writer open");
     let op = op::Operation::WriteFile {
         path: out_path.clone(),
-        state: op::FileState::Regular(b"world".to_vec()),
+        state: op::FileState::Regular { data: b"world".to_vec(), mode: 0o644 },
     };
     writer
         .append_cbor(record::TAG_WRITE_OP, &op)
@@ -109,10 +109,10 @@ fn flush_applies_create_and_remove_ops() {
 
     let writer = record::Writer::open_append(&path).expect("writer open");
     let ops = [
-        op::Operation::CreateDir { path: dir.clone() },
+        op::Operation::CreateDir { path: dir.clone(), mode: 0o755 },
         op::Operation::WriteFile {
             path: file.clone(),
-            state: op::FileState::Regular(b"x".to_vec()),
+            state: op::FileState::Regular { data: b"x".to_vec(), mode: 0o644 },
         },
         op::Operation::WriteFile {
             path: file.clone(),
@@ -144,7 +144,7 @@ fn flush_applies_executable_bit() {
 
     let op = op::Operation::WriteFile {
         path: target.clone(),
-        state: op::FileState::Executable(b"#!/bin/sh\necho hi\n".to_vec()),
+        state: op::FileState::Regular { data: b"#!/bin/sh\necho hi\n".to_vec(), mode: 0o755 },
     };
     writer
         .append_cbor(record::TAG_WRITE_OP, &op)
@@ -159,6 +159,68 @@ fn flush_applies_executable_bit() {
         .permissions()
         .mode();
     assert_ne!(mode & 0o111, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_applies_exact_regular_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_path_root, path) = temp_record_path("file-mode-record");
+    let (_target_root, target) = temp_record_path("file-mode-target");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let op = op::Operation::WriteFile {
+        path: target.clone(),
+        state: op::FileState::Regular {
+            data: b"secret".to_vec(),
+            mode: 0o600,
+        },
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = cmd_flush::flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+
+    let mode = fs::metadata(&target)
+        .expect("target metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn flush_applies_directory_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_path_root, path) = temp_record_path("dir-mode-record");
+    let temp = tempdir().expect("tempdir");
+    let target = temp.path().join("mode-dir");
+    let writer = record::Writer::open_append(&path).expect("writer open");
+
+    let op = op::Operation::CreateDir {
+        path: target.clone(),
+        mode: 0o700,
+    };
+    writer
+        .append_cbor(record::TAG_WRITE_OP, &op)
+        .expect("append");
+    writer.sync().expect("sync");
+
+    let stats = cmd_flush::flush_record(&path, false, None).expect("flush");
+    assert_eq!(stats.marked, 1);
+
+    let mode = fs::metadata(&target)
+        .expect("target metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
 }
 
 #[cfg(unix)]
@@ -197,11 +259,11 @@ fn flush_compacts_multiple_writes_then_delete() {
     let ops = [
         op::Operation::WriteFile {
             path: target.clone(),
-            state: op::FileState::Regular(b"v1".to_vec()),
+            state: op::FileState::Regular { data: b"v1".to_vec(), mode: 0o644 },
         },
         op::Operation::WriteFile {
             path: target.clone(),
-            state: op::FileState::Regular(b"v2".to_vec()),
+            state: op::FileState::Regular { data: b"v2".to_vec(), mode: 0o644 },
         },
         op::Operation::WriteFile {
             path: target.clone(),
@@ -232,11 +294,11 @@ fn flush_compaction_respects_rename_boundaries() {
     let ops = [
         op::Operation::WriteFile {
             path: a.clone(),
-            state: op::FileState::Regular(b"v1".to_vec()),
+            state: op::FileState::Regular { data: b"v1".to_vec(), mode: 0o644 },
         },
         op::Operation::WriteFile {
             path: a.clone(),
-            state: op::FileState::Regular(b"v2".to_vec()),
+            state: op::FileState::Regular { data: b"v2".to_vec(), mode: 0o644 },
         },
         op::Operation::Rename {
             from: a.clone(),
@@ -244,7 +306,7 @@ fn flush_compaction_respects_rename_boundaries() {
         },
         op::Operation::WriteFile {
             path: a.clone(),
-            state: op::FileState::Regular(b"v3".to_vec()),
+            state: op::FileState::Regular { data: b"v3".to_vec(), mode: 0o644 },
         },
     ];
     for op in ops {
@@ -279,7 +341,7 @@ fn flush_blocks_when_profile_header_disallows_write() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: target.clone(),
-                state: op::FileState::Regular(b"blocked".to_vec()),
+                state: op::FileState::Regular { data: b"blocked".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
@@ -309,7 +371,7 @@ fn flush_profile_header_allows_cow_write_replay() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: target.clone(),
-                state: op::FileState::Regular(b"cow-ok".to_vec()),
+                state: op::FileState::Regular { data: b"cow-ok".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
@@ -339,7 +401,7 @@ fn flush_profile_header_blocks_rw_passthrough_replay() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: target.clone(),
-                state: op::FileState::Regular(b"rw-blocked".to_vec()),
+                state: op::FileState::Regular { data: b"rw-blocked".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
@@ -369,7 +431,7 @@ fn flush_profile_override_can_allow_previously_blocked_write() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: target.clone(),
-                state: op::FileState::Regular(b"allowed".to_vec()),
+                state: op::FileState::Regular { data: b"allowed".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
@@ -421,7 +483,7 @@ fn flush_regular_write_replaces_existing_symlink_instead_of_following_it() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: link_path.clone(),
-                state: op::FileState::Regular(b"replacement".to_vec()),
+                state: op::FileState::Regular { data: b"replacement".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
@@ -525,7 +587,7 @@ fn flush_regular_write_into_existing_directory_fails_without_marking() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: target_dir.clone(),
-                state: op::FileState::Regular(b"replacement".to_vec()),
+                state: op::FileState::Regular { data: b"replacement".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
@@ -679,6 +741,7 @@ fn flush_create_dir_on_existing_file_fails_without_marking() {
             record::TAG_WRITE_OP,
             &op::Operation::CreateDir {
                 path: target_file.clone(),
+                mode: 0o755,
             },
         )
         .expect("append mkdir");
@@ -879,7 +942,7 @@ fn flush_blocks_write_when_parent_not_owned_by_current_user() {
             record::TAG_WRITE_OP,
             &op::Operation::WriteFile {
                 path: blocked_target.to_path_buf(),
-                state: op::FileState::Regular(b"blocked".to_vec()),
+                state: op::FileState::Regular { data: b"blocked".to_vec(), mode: 0o644 },
             },
         )
         .expect("append write");
