@@ -104,7 +104,7 @@ fn run_child_in_chroot(
             if let Err(err) = make_mounts_private() {
                 return Err(std::io::Error::other(err.to_string()));
             }
-            if let Err(err) = apply_mount_plan_in_namespace(&mount_root, &mount_plan) {
+            if let Err(err) = apply_mount_plan_before_pidns(&mount_root, &mount_plan) {
                 return Err(std::io::Error::other(err.to_string()));
             }
             // FUSE mount access is keyed by fsuid/fsgid, not effective uid.
@@ -144,6 +144,9 @@ fn run_child_in_chroot(
             // CLONE_NEWPID takes effect for subsequent children only.
             // Fork after mount/chroot so both pidns PID 1 and worker share that setup.
             if let Err(err) = enter_pid_namespace_worker_or_exit_parent() {
+                return Err(std::io::Error::other(err.to_string()));
+            }
+            if let Err(err) = apply_proc_mounts_after_pidns(&mount_plan) {
                 return Err(std::io::Error::other(err.to_string()));
             }
             if let Err(err) = privileges::drop_to_real_user() {
@@ -314,12 +317,30 @@ fn ensure_fuse_server(
     Ok(())
 }
 
-fn apply_mount_plan_in_namespace(mount_root: &Path, mount_plan: &[MountPlanEntry]) -> Result<()> {
+fn apply_mount_plan_before_pidns(mount_root: &Path, mount_plan: &[MountPlanEntry]) -> Result<()> {
     if mount_plan.is_empty() {
         return Ok(());
     }
     for entry in mount_plan {
+        if matches!(entry, MountPlanEntry::Proc { .. }) {
+            continue;
+        }
         apply_one_mount_in_namespace(mount_root, entry)?;
+    }
+    Ok(())
+}
+
+fn apply_proc_mounts_after_pidns(mount_plan: &[MountPlanEntry]) -> Result<()> {
+    for entry in mount_plan {
+        let MountPlanEntry::Proc { path, read_only } = entry else {
+            continue;
+        };
+        let target = if path == Path::new("/proc") {
+            Path::new("/proc")
+        } else {
+            path.as_path()
+        };
+        mount_procfs(target, *read_only)?;
     }
     Ok(())
 }

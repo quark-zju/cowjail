@@ -95,7 +95,7 @@ These low-level commands are intentionally separate from normal workflow docs.
 
 - `run` does not persist a separate mount namespace handle for jail reuse.
 - `_fuse` mounts a per-jail FUSE view under the runtime directory (`.../mount`).
-- `run` creates fresh IPC/mount/PID namespaces (`unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID)`), applies mount plan and `chroot` first, then forks into a minimal PID-namespace init reaper (PID 1) plus worker branch; the worker drops privileges and executes the target command.
+- `run` creates fresh IPC/mount/PID namespaces (`unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID)`), applies non-`/proc` mounts and `chroot` first, then forks into a minimal PID-namespace init reaper (PID 1) plus worker branch; `/proc` is mounted in the worker after entering pidns (before privilege drop) so procfs view is scoped to that PID namespace.
 - `rm` unmounts runtime FUSE mountpoints and removes known runtime/state artifacts conservatively.
 
 ## Explicit Trade-Offs and Assumptions
