@@ -47,7 +47,7 @@ pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
         || record::read_frames_best_effort(&cmd.record),
         || format!("read record frames from {}", cmd.record.display()),
     )?;
-    let mut fs = cowfs::CowFs::new(loaded.profile, writer);
+    let mut fs = cowfs::CowFs::new(loaded.profile, writer).with_mount_root(cmd.mountpoint.clone());
     let replay = fs.replay_from_record_frames(&frames);
     crate::vlog!(
         "_fuse: replay record={} total_frames={} pending_ops={} applied_ops={} skipped_frames={} skipped_ops={}",

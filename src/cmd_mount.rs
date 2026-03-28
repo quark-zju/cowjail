@@ -29,7 +29,7 @@ pub(crate) fn mount_command(mount: MountCommand) -> Result<()> {
         },
     )?;
 
-    let fs = cowfs::CowFs::new(loaded.profile, writer);
+    let fs = cowfs::CowFs::new(loaded.profile, writer).with_mount_root(mount.path.clone());
     crate::vlog!(
         "mount: mounting fuse at {} with record {}",
         mount.path.display(),

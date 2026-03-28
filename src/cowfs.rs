@@ -3,7 +3,7 @@ use std::fs::Metadata;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -24,6 +24,7 @@ const ROOT_INO: u64 = 1;
 pub struct CowFs {
     profile: Profile,
     record: record::Writer,
+    mount_root: Option<PathBuf>,
     next_ino: u64,
     ino_to_path: std::collections::HashMap<u64, PathBuf>,
     path_to_ino: std::collections::HashMap<PathBuf, u64>,
@@ -65,12 +66,18 @@ impl CowFs {
         Self {
             profile,
             record,
+            mount_root: None,
             next_ino: ROOT_INO + 1,
             ino_to_path,
             path_to_ino,
             overlay: std::collections::HashMap::new(),
             atime_overrides: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn with_mount_root(mut self, mount_root: PathBuf) -> Self {
+        self.mount_root = Some(mount_root);
+        self
     }
 
     pub fn mount(self, mountpoint: &Path, allow_other: bool) -> Result<()> {
@@ -947,7 +954,12 @@ impl Filesystem for CowFs {
         if let Some(node) = self.overlay.get(&path) {
             match node {
                 OverlayNode::Symlink { target } => {
-                    reply.data(target.as_os_str().as_bytes());
+                    let rewritten = rewrite_proc_exe_readlink_target(
+                        &path,
+                        target,
+                        self.mount_root.as_deref(),
+                    );
+                    reply.data(rewritten.as_os_str().as_bytes());
                 }
                 OverlayNode::Deleted => reply.error(ENOENT),
                 _ => reply.error(EIO),
@@ -955,7 +967,11 @@ impl Filesystem for CowFs {
             return;
         }
         match fs::read_link(&path) {
-            Ok(target) => reply.data(target.as_os_str().as_bytes()),
+            Ok(target) => {
+                let rewritten =
+                    rewrite_proc_exe_readlink_target(&path, &target, self.mount_root.as_deref());
+                reply.data(rewritten.as_os_str().as_bytes());
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => reply.error(ENOENT),
             Err(_) => reply.error(EIO),
         }
@@ -1436,6 +1452,41 @@ fn rewrite_proc_self_readlink_target(path: &Path, requester_pid: u32) -> Option<
     None
 }
 
+fn rewrite_proc_exe_readlink_target(
+    path: &Path,
+    target: &Path,
+    mount_root: Option<&Path>,
+) -> PathBuf {
+    if !is_proc_exe_path(path) {
+        return target.to_path_buf();
+    }
+    let Some(root) = mount_root else {
+        return target.to_path_buf();
+    };
+    let Ok(suffix) = target.strip_prefix(root) else {
+        return target.to_path_buf();
+    };
+    if suffix.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        Path::new("/").join(suffix)
+    }
+}
+
+fn is_proc_exe_path(path: &Path) -> bool {
+    let Ok(without_proc) = path.strip_prefix("/proc") else {
+        return false;
+    };
+    let mut parts = without_proc.components();
+    let first = parts.next();
+    let second = parts.next();
+    matches!(
+        (first, second, parts.next()),
+        (Some(Component::Normal(_)), Some(Component::Normal(name)), None)
+            if name == OsStr::new("exe")
+    )
+}
+
 fn filetype_from_metadata(metadata: &Metadata) -> FileType {
     let ft = metadata.file_type();
     if ft.is_dir() {
@@ -1849,6 +1900,24 @@ mod tests {
             rewrite_proc_self_readlink_target(Path::new("/proc/1"), 4242),
             None
         );
+    }
+
+    #[test]
+    fn proc_exe_readlink_target_strips_mount_prefix() {
+        let rewritten = rewrite_proc_exe_readlink_target(
+            Path::new("/proc/self/exe"),
+            Path::new("/run/user/1000/cowjail/demo/mount/usr/bin/readlink"),
+            Some(Path::new("/run/user/1000/cowjail/demo/mount")),
+        );
+        assert_eq!(rewritten, Path::new("/usr/bin/readlink"));
+    }
+
+    #[test]
+    fn proc_exe_readlink_target_keeps_non_matching_target() {
+        let target = Path::new("/usr/bin/readlink");
+        let rewritten =
+            rewrite_proc_exe_readlink_target(Path::new("/proc/123/exe"), target, Some(Path::new("/run/user/1000/cowjail/demo/mount")));
+        assert_eq!(rewritten, target);
     }
 
     #[cfg(unix)]
