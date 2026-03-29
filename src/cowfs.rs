@@ -47,11 +47,22 @@ pub struct ReplayStats {
 }
 
 #[derive(Debug, Clone)]
+struct OverlayTimes {
+    atime: SystemTime,
+    mtime: SystemTime,
+    ctime: SystemTime,
+}
+
+#[derive(Debug, Clone)]
 enum OverlayNode {
     Deleted,
-    Dir { mode: u16 },
-    Regular { data: Vec<u8>, mode: u16 },
-    Symlink { target: PathBuf },
+    Dir { mode: u16, times: OverlayTimes },
+    Regular {
+        data: Vec<u8>,
+        mode: u16,
+        times: OverlayTimes,
+    },
+    Symlink { target: PathBuf, times: OverlayTimes },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +75,26 @@ enum WriteMode {
 enum OpenHandle {
     Passthrough { ino: u64, file: fs::File },
     Cow { ino: u64 },
+}
+
+impl OverlayNode {
+    fn times(&self) -> Option<&OverlayTimes> {
+        match self {
+            OverlayNode::Deleted => None,
+            OverlayNode::Dir { times, .. }
+            | OverlayNode::Regular { times, .. }
+            | OverlayNode::Symlink { times, .. } => Some(times),
+        }
+    }
+
+    fn times_mut(&mut self) -> Option<&mut OverlayTimes> {
+        match self {
+            OverlayNode::Deleted => None,
+            OverlayNode::Dir { times, .. }
+            | OverlayNode::Regular { times, .. }
+            | OverlayNode::Symlink { times, .. } => Some(times),
+        }
+    }
 }
 
 impl CowFs {
@@ -240,18 +271,17 @@ impl CowFs {
     }
 
     fn attr_for_overlay(&mut self, path: &Path, node: &OverlayNode) -> FileAttr {
-        let now = SystemTime::now();
         let ino = self.ensure_ino(path);
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
-        let (kind, perm, size) = match node {
-            OverlayNode::Deleted => (FileType::RegularFile, 0o000, 0),
-            OverlayNode::Dir { mode } => (FileType::Directory, *mode, 0),
-            OverlayNode::Regular { data, mode } => {
-                (FileType::RegularFile, *mode, data.len() as u64)
+        let (kind, perm, size, times) = match node {
+            OverlayNode::Deleted => unreachable!("deleted nodes do not have attrs"),
+            OverlayNode::Dir { mode, times } => (FileType::Directory, *mode, 0, times),
+            OverlayNode::Regular { data, mode, times } => {
+                (FileType::RegularFile, *mode, data.len() as u64, times)
             }
-            OverlayNode::Symlink { target } => {
-                (FileType::Symlink, 0o777, target.as_os_str().len() as u64)
+            OverlayNode::Symlink { target, times } => {
+                (FileType::Symlink, 0o777, target.as_os_str().len() as u64, times)
             }
         };
 
@@ -259,10 +289,10 @@ impl CowFs {
             ino,
             size,
             blocks: 1,
-            atime: now,
-            mtime: now,
-            ctime: now,
-            crtime: now,
+            atime: times.atime,
+            mtime: times.mtime,
+            ctime: times.ctime,
+            crtime: times.ctime,
             kind,
             perm,
             nlink: 1,
@@ -274,6 +304,23 @@ impl CowFs {
         };
         self.apply_atime_override(path, &mut attr);
         attr
+    }
+
+    fn overlay_times_from_metadata(metadata: &Metadata) -> OverlayTimes {
+        OverlayTimes {
+            atime: system_time_from_unix(metadata.atime(), metadata.atime_nsec()),
+            mtime: system_time_from_unix(metadata.mtime(), metadata.mtime_nsec()),
+            ctime: system_time_from_unix(metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+
+    fn overlay_times_now() -> OverlayTimes {
+        let now = SystemTime::now();
+        OverlayTimes {
+            atime: now,
+            mtime: now,
+            ctime: now,
+        }
     }
 
     fn apply_atime_override(&self, path: &Path, attr: &mut FileAttr) {
@@ -466,9 +513,11 @@ impl CowFs {
                     FileState::Regular { data, mode } => OverlayNode::Regular {
                         data: data.clone(),
                         mode: (*mode & 0o7777) as u16,
+                        times: Self::overlay_times_now(),
                     },
                     FileState::Symlink(target) => OverlayNode::Symlink {
                         target: target.clone(),
+                        times: Self::overlay_times_now(),
                     },
                 };
                 self.overlay.insert(path.clone(), node);
@@ -479,6 +528,7 @@ impl CowFs {
                     path.clone(),
                     OverlayNode::Dir {
                         mode: (*mode & 0o7777) as u16,
+                        times: Self::overlay_times_now(),
                     },
                 );
                 Ok(())
@@ -492,8 +542,15 @@ impl CowFs {
             Operation::Truncate { path, size } => {
                 let (mut data, mode) = self.current_regular(path).map_err(|_| ())?.ok_or(())?;
                 data.resize(*size as usize, 0);
-                self.overlay
-                    .insert(path.clone(), OverlayNode::Regular { data, mode });
+                let times = self
+                    .snapshot_node(path)
+                    .map_err(|_| ())?
+                    .and_then(|node| node.times().cloned())
+                    .unwrap_or_else(Self::overlay_times_now);
+                self.overlay.insert(
+                    path.clone(),
+                    OverlayNode::Regular { data, mode, times },
+                );
                 Ok(())
             }
         }
@@ -514,23 +571,31 @@ impl CowFs {
         if meta.file_type().is_dir() {
             return Ok(Some(OverlayNode::Dir {
                 mode: (meta.permissions().mode() & 0o7777) as u16,
+                times: Self::overlay_times_from_metadata(&meta),
             }));
         }
         if meta.file_type().is_symlink() {
             let target = fs::read_link(path).map_err(|_| EIO)?;
-            return Ok(Some(OverlayNode::Symlink { target }));
+            return Ok(Some(OverlayNode::Symlink {
+                target,
+                times: Self::overlay_times_from_metadata(&meta),
+            }));
         }
         if meta.file_type().is_file() {
             let data = fs::read(path).map_err(|_| EIO)?;
             let mode = (meta.permissions().mode() & 0o7777) as u16;
-            return Ok(Some(OverlayNode::Regular { data, mode }));
+            return Ok(Some(OverlayNode::Regular {
+                data,
+                mode,
+                times: Self::overlay_times_from_metadata(&meta),
+            }));
         }
         Ok(None)
     }
 
     fn current_regular(&self, path: &Path) -> Result<Option<(Vec<u8>, u16)>, i32> {
         match self.snapshot_node(path)? {
-            Some(OverlayNode::Regular { data, mode }) => Ok(Some((data, mode))),
+            Some(OverlayNode::Regular { data, mode, .. }) => Ok(Some((data, mode))),
             Some(OverlayNode::Deleted) | None => Ok(None),
             _ => Err(EIO),
         }
@@ -649,11 +714,19 @@ impl CowFs {
         data: Vec<u8>,
         mode: u16,
     ) -> Result<(), i32> {
+        let now = SystemTime::now();
+        let mut times = self
+            .snapshot_node(path)?
+            .and_then(|node| node.times().cloned())
+            .unwrap_or_else(Self::overlay_times_now);
+        times.mtime = now;
+        times.ctime = now;
         self.overlay.insert(
             path.to_path_buf(),
             OverlayNode::Regular {
                 data: data.clone(),
                 mode,
+                times,
             },
         );
         self.record_write_file(path.to_path_buf(), regular_state(data, mode))
@@ -672,9 +745,11 @@ impl CowFs {
         }
 
         let mut maybe_node = self.snapshot_node(path)?;
+        let now = SystemTime::now();
         let mut updated_regular = false;
         let mut regular_data: Vec<u8> = Vec::new();
         let mut regular_mode = 0u16;
+        let mut time_changed = false;
 
         if size.is_some() || mode.is_some() {
             let (mut data, mut current_mode) = match self.current_regular(path) {
@@ -690,12 +765,14 @@ impl CowFs {
             if let Some(size) = size {
                 data.resize(size as usize, 0);
                 updated_regular = true;
+                time_changed = true;
             }
             if let Some(mode) = mode {
                 let next_mode = (mode & 0o7777) as u16;
                 if next_mode != current_mode {
                     current_mode = next_mode;
                     updated_regular = true;
+                    time_changed = true;
                 }
             }
             regular_data = data;
@@ -707,13 +784,39 @@ impl CowFs {
             maybe_node = Some(OverlayNode::Regular {
                 data: regular_data,
                 mode: regular_mode,
+                times: self
+                    .snapshot_node(path)?
+                    .and_then(|node| node.times().cloned())
+                    .unwrap_or_else(Self::overlay_times_now),
             });
         } else if mode.is_some() {
             // Non-regular files do not carry a mode delta in record format.
             return Err(EOPNOTSUPP);
         }
 
-        if let Some(ts) = atime.or(mtime) {
+        if let Some(node) = maybe_node.as_mut() {
+            if let Some(times) = node.times_mut() {
+                if time_changed {
+                    times.ctime = now;
+                    if size.is_some() {
+                        times.mtime = now;
+                    }
+                }
+                if let Some(ts) = atime {
+                    times.atime = ts;
+                }
+                if let Some(ts) = mtime {
+                    times.mtime = ts;
+                    times.ctime = now;
+                }
+            }
+        }
+
+        if let Some(node) = maybe_node.as_ref() {
+            self.overlay.insert(path.to_path_buf(), node.clone());
+        }
+
+        if let Some(ts) = atime {
             self.atime_overrides.insert(path.to_path_buf(), ts);
         }
 
@@ -814,8 +917,13 @@ impl CowFs {
         if src_is_dir {
             let moved = self.move_overlay_subtree(from, to);
             if !moved {
-                self.overlay
-                    .insert(to.to_path_buf(), OverlayNode::Dir { mode: 0o755 });
+                self.overlay.insert(
+                    to.to_path_buf(),
+                    OverlayNode::Dir {
+                        mode: 0o755,
+                        times: Self::overlay_times_now(),
+                    },
+                );
             }
             self.move_atime_overrides_subtree(from, to);
         } else {
@@ -1196,7 +1304,7 @@ impl Filesystem for CowFs {
         }
         if let Some(node) = self.overlay.get(&path) {
             match node {
-                OverlayNode::Symlink { target } => {
+                OverlayNode::Symlink { target, .. } => {
                     let rewritten =
                         rewrite_proc_exe_readlink_target(&path, target, self.mount_root.as_deref());
                     reply.data(rewritten.as_os_str().as_bytes());
@@ -1249,6 +1357,7 @@ impl Filesystem for CowFs {
                 let node = OverlayNode::Regular {
                     data: Vec::new(),
                     mode,
+                    times: Self::overlay_times_now(),
                 };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
@@ -1465,7 +1574,10 @@ impl Filesystem for CowFs {
                     return;
                 }
                 let mode = normalize_create_mode(mode, umask);
-                let node = OverlayNode::Dir { mode };
+                let node = OverlayNode::Dir {
+                    mode,
+                    times: Self::overlay_times_now(),
+                };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
                     .append_record(&Operation::CreateDir {
@@ -1562,6 +1674,7 @@ impl Filesystem for CowFs {
                 }
                 let node = OverlayNode::Symlink {
                     target: link.to_path_buf(),
+                    times: Self::overlay_times_now(),
                 };
                 self.overlay.insert(path.clone(), node.clone());
                 if self
@@ -1876,6 +1989,36 @@ mod tests {
         )
     }
 
+    fn test_times() -> OverlayTimes {
+        OverlayTimes {
+            atime: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            ctime: SystemTime::UNIX_EPOCH + Duration::from_secs(3),
+        }
+    }
+
+    fn overlay_regular(data: &[u8], mode: u16) -> OverlayNode {
+        OverlayNode::Regular {
+            data: data.to_vec(),
+            mode,
+            times: test_times(),
+        }
+    }
+
+    fn overlay_dir(mode: u16) -> OverlayNode {
+        OverlayNode::Dir {
+            mode,
+            times: test_times(),
+        }
+    }
+
+    fn overlay_symlink(target: &str) -> OverlayNode {
+        OverlayNode::Symlink {
+            target: PathBuf::from(target),
+            times: test_times(),
+        }
+    }
+
     #[test]
     fn overlay_deleted_hides_host_file() {
         let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
@@ -1894,10 +2037,7 @@ mod tests {
         fs::write(&path, b"host").expect("seed host");
         fs.overlay_set(
             path.clone(),
-            OverlayNode::Regular {
-                data: b"overlay".to_vec(),
-                mode: 0o644,
-            },
+            overlay_regular(b"overlay", 0o644),
         );
         let got = fs.effective_node(&path).expect("effective node");
         match got {
@@ -1919,18 +2059,10 @@ mod tests {
         let new_link = dir.join("overlay-link");
         fs.overlay_set(
             new_file.clone(),
-            OverlayNode::Regular {
-                data: b"x".to_vec(),
-                mode: 0o644,
-            },
+            overlay_regular(b"x", 0o644),
         );
-        fs.overlay_set(new_dir, OverlayNode::Dir { mode: 0o755 });
-        fs.overlay_set(
-            new_link,
-            OverlayNode::Symlink {
-                target: PathBuf::from("/tmp/target"),
-            },
-        );
+        fs.overlay_set(new_dir, overlay_dir(0o755));
+        fs.overlay_set(new_link, overlay_symlink("/tmp/target"));
         let entries = fs.list_children(&dir).expect("list children");
         assert!(
             entries
@@ -1956,21 +2088,15 @@ mod tests {
         let from = PathBuf::from("/tmp/cowjail-rename-from");
         let to = PathBuf::from("/tmp/cowjail-rename-to");
         let child = from.join("child.txt");
-        fs.overlay_set(from.clone(), OverlayNode::Dir { mode: 0o755 });
-        fs.overlay_set(
-            child.clone(),
-            OverlayNode::Regular {
-                data: b"x".to_vec(),
-                mode: 0o644,
-            },
-        );
+        fs.overlay_set(from.clone(), overlay_dir(0o755));
+        fs.overlay_set(child.clone(), overlay_regular(b"x", 0o644));
 
         fs.apply_rename_paths(&from, &to)
             .expect("rename should succeed");
         assert!(matches!(fs.overlay.get(&from), Some(OverlayNode::Deleted)));
         assert!(matches!(
             fs.overlay.get(&to),
-            Some(OverlayNode::Dir { mode: 0o755 })
+            Some(OverlayNode::Dir { mode: 0o755, .. })
         ));
         assert!(matches!(
             fs.overlay.get(&to.join("child.txt")),
@@ -2102,13 +2228,7 @@ mod tests {
         let from = PathBuf::from("/tmp/cowjail-cow-handle-from");
         let to = PathBuf::from("/tmp/cowjail-cow-handle-to");
         let ino = fs.ensure_ino(&from);
-        fs.overlay_set(
-            from.clone(),
-            OverlayNode::Regular {
-                data: b"hello".to_vec(),
-                mode: 0o644,
-            },
-        );
+        fs.overlay_set(from.clone(), overlay_regular(b"hello", 0o644));
 
         let fh = fs.allocate_cow_handle(ino);
         fs.apply_rename_paths(&from, &to)
@@ -2137,13 +2257,7 @@ mod tests {
         let from = PathBuf::from("/tmp/cowjail-cow-rename-open-from");
         let to = PathBuf::from("/tmp/cowjail-cow-rename-open-to");
         let ino = fs.ensure_ino(&from);
-        fs.overlay_set(
-            from.clone(),
-            OverlayNode::Regular {
-                data: b"hello".to_vec(),
-                mode: 0o644,
-            },
-        );
+        fs.overlay_set(from.clone(), overlay_regular(b"hello", 0o644));
 
         fs.apply_rename_paths(&from, &to)
             .expect("rename overlay path");
@@ -2158,7 +2272,7 @@ mod tests {
         let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
         let from = PathBuf::from("/tmp/cowjail-self-rename");
         let to = from.join("sub");
-        fs.overlay_set(from.clone(), OverlayNode::Dir { mode: 0o755 });
+        fs.overlay_set(from.clone(), overlay_dir(0o755));
         let err = fs
             .apply_rename_paths(&from, &to)
             .expect_err("rename to own subpath should fail");
@@ -2233,7 +2347,8 @@ mod tests {
             fs.overlay.get(Path::new("/tmp/replay-b")),
             Some(OverlayNode::Regular {
                 data,
-                mode: 0o755
+                mode: 0o755,
+                ..
             }) if data == b"two"
         ));
     }
@@ -2281,7 +2396,8 @@ mod tests {
             fs.overlay.get(Path::new("/tmp/replay-flushed")),
             Some(OverlayNode::Regular {
                 data,
-                mode: 0o644
+                mode: 0o644,
+                ..
             }) if data == b"new"
         ));
     }
@@ -2337,7 +2453,8 @@ mod tests {
             mount1_fs.overlay.get(Path::new("/tmp/reboot-visible-b")),
             Some(OverlayNode::Regular {
                 data,
-                mode: 0o644
+                mode: 0o644,
+                ..
             }) if data == b"fir"
         ));
         drop(mount1_fs);
@@ -2356,7 +2473,8 @@ mod tests {
             mount2_fs.overlay.get(Path::new("/tmp/reboot-visible-b")),
             Some(OverlayNode::Regular {
                 data,
-                mode: 0o644
+                mode: 0o644,
+                ..
             }) if data == b"fir"
         ));
     }
@@ -2477,13 +2595,42 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(12345);
 
         let attr = fs
-            .apply_cow_setattr_for_test(&path, None, None, Some(now), None)
-            .expect("setattr atime");
+            .apply_cow_setattr_for_test(&path, None, None, Some(now), Some(now))
+            .expect("setattr times");
         assert_eq!(attr.atime, now);
+        assert_eq!(attr.mtime, now);
         drop(fs);
 
         let frames = record::read_frames(&record_path).expect("read frames");
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn overlay_mtime_remains_stable_across_attr_reads() {
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
+        let path = PathBuf::from("/tmp/cowjail-stable-mtime");
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(777);
+        fs.overlay_set(
+            path.clone(),
+            OverlayNode::Regular {
+                data: b"x".to_vec(),
+                mode: 0o644,
+                times: OverlayTimes {
+                    atime: ts,
+                    mtime: ts,
+                    ctime: ts,
+                },
+            },
+        );
+
+        let first_node = fs.overlay.get(&path).expect("overlay node").clone();
+        let first = fs.attr_for_overlay(&path, &first_node);
+        std::thread::sleep(Duration::from_millis(20));
+        let second_node = fs.overlay.get(&path).expect("overlay node").clone();
+        let second = fs.attr_for_overlay(&path, &second_node);
+
+        assert_eq!(first.mtime, ts);
+        assert_eq!(second.mtime, ts);
     }
 
     #[test]
