@@ -79,6 +79,7 @@ class LeashIntegrationTestCase(unittest.TestCase):
             raise unittest.SkipTest("system git not found in PATH")
 
     def setUp(self) -> None:
+        self.keep_temp = os.environ.get("LEASH_KEEP_TEMP") == "1"
         self._tmp = tempfile.TemporaryDirectory(
             prefix="leash-integration-", ignore_cleanup_errors=True
         )
@@ -163,7 +164,7 @@ class LeashIntegrationTestCase(unittest.TestCase):
 
         self.daemon_log = (self.tmpdir / "daemon.log").open("w", encoding="utf-8")
         self.daemon = subprocess.Popen(
-            [str(self.leash_bin), "_daemon"],
+            [str(self.leash_bin), "_daemon", "-v"],
             env=self.env,
             stdout=self.daemon_log,
             stderr=subprocess.STDOUT,
@@ -181,11 +182,15 @@ class LeashIntegrationTestCase(unittest.TestCase):
                 self.daemon.wait(timeout=5)
         if hasattr(self, "daemon_log"):
             self.daemon_log.close()
-        if hasattr(self, "_tmp"):
+        if hasattr(self, "_tmp") and not self.keep_temp:
             try:
                 self._tmp.cleanup()
             except PermissionError:
                 pass
+        elif hasattr(self, "tmpdir"):
+            if hasattr(self._tmp, "_finalizer"):
+                self._tmp._finalizer.detach()
+            print(f"kept integration tempdir: {self.tmpdir}")
 
     def _wait_for_daemon(self) -> None:
         deadline = time.time() + 5
@@ -203,8 +208,17 @@ class LeashIntegrationTestCase(unittest.TestCase):
         check: bool = True,
         capture_stdout: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        full_cmd = [
+            str(self.leash_bin),
+            "run",
+            "-v",
+            "--profile",
+            str(self.profile_path),
+            "--",
+            *cmd,
+        ]
         completed = run_cmd(
-            [str(self.leash_bin), "run", "--profile", str(self.profile_path), "--", *cmd],
+            full_cmd,
             env=self.env,
             check=False,
             capture_stdout=capture_stdout,
@@ -213,14 +227,43 @@ class LeashIntegrationTestCase(unittest.TestCase):
             completed.returncode != 0
             and "fanotify_mark(FAN_MARK_MNTNS)-failed" in completed.stderr
         ):
+            self._dump_debug_logs(completed, full_cmd, note="skipping because FAN_MARK_MNTNS failed")
             raise unittest.SkipTest("kernel or privileges do not support FAN_MARK_MNTNS here")
         if check and completed.returncode != 0:
+            self._dump_debug_logs(completed, full_cmd, note="command failed")
             raise AssertionError(
-                f"command failed: {shlex.join([str(self.leash_bin), 'run', '--profile', str(self.profile_path), '--', *cmd])}\n"
+                f"command failed: {shlex.join(full_cmd)}\n"
                 f"stdout:\n{completed.stdout}\n"
                 f"stderr:\n{completed.stderr}"
             )
         return completed
+
+    def _dump_debug_logs(
+        self,
+        completed: subprocess.CompletedProcess[str] | None = None,
+        cmd: list[str] | None = None,
+        *,
+        note: str,
+    ) -> None:
+        print(f"\n--- integration debug: {note} ---")
+        print(f"tempdir: {self.tmpdir}")
+        print(f"profile: {self.profile_path}")
+        print(f"daemon socket: {self.socket_path}")
+        if cmd is not None:
+            print(f"command: {shlex.join(cmd)}")
+        if completed is not None:
+            print(f"returncode: {completed.returncode}")
+            print("stdout:")
+            print(completed.stdout or "<empty>")
+            print("stderr:")
+            print(completed.stderr or "<empty>")
+        daemon_log_path = self.tmpdir / "daemon.log"
+        print("daemon.log:")
+        if daemon_log_path.exists():
+            print(daemon_log_path.read_text(encoding="utf-8", errors="replace") or "<empty>")
+        else:
+            print("<missing>")
+        print("--- end integration debug ---")
 
 
 class RuntimeSemanticsTests(LeashIntegrationTestCase):
