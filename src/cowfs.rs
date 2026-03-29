@@ -184,10 +184,16 @@ impl CowFs {
     }
 
     fn runtime_guard_root(&self) -> Option<&Path> {
-        self.mount_root
-            .as_deref()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
+        let mount_root = self.mount_root.as_deref()?;
+        if mount_root.file_name() != Some(std::ffi::OsStr::new(crate::ns_runtime::MOUNT_DIR_NAME)) {
+            return None;
+        }
+        let runtime_dir = mount_root.parent()?;
+        let runtime_root = runtime_dir.parent()?;
+        if runtime_root != crate::jail::runtime_root() {
+            return None;
+        }
+        Some(runtime_root)
     }
 
     fn is_hard_blocked_runtime_path(&self, path: &Path) -> bool {
@@ -2046,6 +2052,16 @@ mod tests {
         assert_eq!(guarded.access_errno(runtime_child), Some(EACCES));
         assert_eq!(guarded.mutation_errno(runtime_root), Some(EACCES));
         assert_eq!(guarded.mutation_errno(runtime_child), Some(EACCES));
+    }
+
+    #[test]
+    fn arbitrary_mount_root_does_not_hard_block_parent_tree() {
+        let (_dir, _record_path, fs) = test_fs("/var/tmp/** rw\n");
+        let guarded = fs.with_mount_root(PathBuf::from("/var/tmp/demo/mnt"));
+        let allowed = Path::new("/var/tmp/demo/file.txt");
+
+        assert_eq!(guarded.access_errno(allowed), None);
+        assert_eq!(guarded.mutation_errno(allowed), None);
     }
 
     #[test]
