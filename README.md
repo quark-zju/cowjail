@@ -56,6 +56,14 @@ source <(cowjail completion)
 Use `cowjail run` to run a command. It uses the built-in `default` profile.
 Profile syntax, actions, size config, and default profile source are documented in [`docs/profile.md`](docs/profile.md).
 
+The built-in `default` profile includes `%include default.local`, so the recommended way to add rules beyond the shipped defaults is:
+
+```bash
+cowjail profile edit default.local
+```
+
+This lets you extend the default policy without copying the whole `default` profile.
+
 ```bash
 cowjail run -- your-command arg1 arg2  # run inside jail
 ```

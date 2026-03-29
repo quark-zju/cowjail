@@ -17,6 +17,20 @@ This document is the single source of truth for profile syntax, size configurati
   - names follow the same validation rules as jail names
   - `cowjail profile rm default` removes the user override file and falls back to the built-in default profile
 
+The built-in `default` profile source includes:
+
+```text
+%include default.local
+```
+
+That means the normal way to extend the shipped default policy is to edit `default.local` instead of copying the whole `default` profile:
+
+```bash
+cowjail profile edit default.local
+```
+
+Missing includes are ignored, so `default.local` only takes effect once you create it.
+
 ## Syntax
 
 Profile is line-based and evaluated with first-match-wins.
@@ -98,6 +112,8 @@ When `--profile default` is used (or `run/add/flush` omit `--profile`), `cowjail
 
 1. `~/.config/cowjail/profiles/default` when the file exists
 2. built-in fallback source when the file is missing
+
+The built-in fallback source itself includes `%include default.local`, so a user-created `~/.config/cowjail/profiles/default.local` extends the default profile even when `~/.config/cowjail/profiles/default` does not exist.
 
 To inspect the currently effective on-disk default profile, use:
 
