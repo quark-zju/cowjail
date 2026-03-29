@@ -50,23 +50,23 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 
 # Coding agents
 ~/.agents rw
-~/.bun rw
-~/.cache rw
-~/.cargo rw
 ~/.claude rw
 ~/.codex rw
 ~/.copilot rw
-~/.dotnet rw
-~/.pyenv rw
-~/.rustup rw
 
 # User home (some used by coding agents too)
 ~/bin ro
+~/.bun rw
+~/.cache rw
+~/.cargo rw
 ~/.config rw
+~/.dotnet rw
 ~/.gitconfig* ro
 ~/.gitignore* ro
 ~/.local rw
 ~/.npm rw
+~/.pyenv rw
+~/.rustup rw
 
 # Current workspace
 . cow
