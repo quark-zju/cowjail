@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileTypeExt;
@@ -93,15 +94,15 @@ struct NamespaceKey {
     ino: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct RegisteredSession {
     key: NamespaceKey,
     owner_uid: libc::uid_t,
     owner_gid: libc::gid_t,
-    namespace_path: PathBuf,
+    source_pid: libc::pid_t,
+    namespace_file: File,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct DaemonState {
     sessions: HashMap<NamespaceKey, RegisteredSession>,
 }
@@ -188,32 +189,23 @@ fn handle_request_line(state: &mut DaemonState, request: &str, peer: PeerCredent
     match command {
         "ping" => "pong\n".to_string(),
         "register-session" => {
-            let Some(namespace_path) = parts.next() else {
-                return "error missing-namespace-path\n".to_string();
-            };
             if parts.next().is_some() {
                 return "error unexpected-arguments\n".to_string();
             }
-            match register_session(state, Path::new(namespace_path), &peer) {
+            match register_session(state, &peer) {
                 Ok(key) => format!("ok registered {}:{}\n", key.dev, key.ino),
                 Err(err) => format!("error {}\n", sanitize_error_text(&err.to_string())),
             }
         }
         "query-session" => {
-            let Some(namespace_path) = parts.next() else {
-                return "error missing-namespace-path\n".to_string();
-            };
             if parts.next().is_some() {
                 return "error unexpected-arguments\n".to_string();
             }
-            match namespace_key_for_path(Path::new(namespace_path)) {
-                Ok(key) => {
-                    if state.sessions.contains_key(&key) {
-                        format!("ok session {}:{}\n", key.dev, key.ino)
-                    } else {
-                        "ok missing\n".to_string()
-                    }
+            match namespace_key_for_pid(peer.pid) {
+                Ok(Some(key)) if state.sessions.contains_key(&key) => {
+                    format!("ok session {}:{}\n", key.dev, key.ino)
                 }
+                Ok(Some(_)) | Ok(None) => "ok missing\n".to_string(),
                 Err(err) => format!("error {}\n", sanitize_error_text(&err.to_string())),
             }
         }
@@ -221,31 +213,55 @@ fn handle_request_line(state: &mut DaemonState, request: &str, peer: PeerCredent
     }
 }
 
-fn register_session(
-    state: &mut DaemonState,
-    namespace_path: &Path,
-    peer: &PeerCredentials,
-) -> Result<NamespaceKey> {
-    let key = namespace_key_for_path(namespace_path)?;
+fn register_session(state: &mut DaemonState, peer: &PeerCredentials) -> Result<NamespaceKey> {
+    let (key, namespace_file) = open_mount_namespace_for_pid(peer.pid)?;
     state.sessions.insert(
         key,
         RegisteredSession {
             key,
             owner_uid: peer.uid,
             owner_gid: peer.gid,
-            namespace_path: namespace_path.to_path_buf(),
+            source_pid: peer.pid,
+            namespace_file,
         },
     );
     Ok(key)
 }
 
-fn namespace_key_for_path(path: &Path) -> Result<NamespaceKey> {
-    let meta = fs::metadata(path)
-        .with_context(|| format!("failed to stat namespace handle {}", path.display()))?;
-    Ok(NamespaceKey {
+fn namespace_key_for_pid(pid: libc::pid_t) -> Result<Option<NamespaceKey>> {
+    let path = mount_namespace_path_for_pid(pid);
+    let meta = match fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to stat namespace handle {}", path.display()));
+        }
+    };
+    Ok(Some(NamespaceKey {
         dev: meta.dev(),
         ino: meta.ino(),
-    })
+    }))
+}
+
+fn open_mount_namespace_for_pid(pid: libc::pid_t) -> Result<(NamespaceKey, File)> {
+    let path = mount_namespace_path_for_pid(pid);
+    let file = File::open(&path)
+        .with_context(|| format!("failed to open mount namespace handle {}", path.display()))?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("failed to stat mount namespace handle {}", path.display()))?;
+    Ok((
+        NamespaceKey {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        },
+        file,
+    ))
+}
+
+fn mount_namespace_path_for_pid(pid: libc::pid_t) -> PathBuf {
+    PathBuf::from(format!("/proc/{pid}/ns/mnt"))
 }
 
 fn sanitize_error_text(text: &str) -> String {
@@ -257,7 +273,6 @@ fn sanitize_error_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn default_socket_lives_under_runtime_root() {
@@ -278,35 +293,28 @@ mod tests {
     fn request_handler_registers_and_queries_session() {
         let mut state = DaemonState::default();
         let peer = PeerCredentials {
-            pid: 123,
+            pid: unsafe { libc::getpid() },
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        let namespace_path = unique_test_path();
-        fs::write(&namespace_path, b"placeholder").expect("write namespace placeholder");
-
-        let register = handle_request_line(
-            &mut state,
-            &format!("register-session {}", namespace_path.display()),
-            peer,
-        );
+        let register = handle_request_line(&mut state, "register-session", peer);
         assert!(register.starts_with("ok registered "));
 
-        let query = handle_request_line(
-            &mut state,
-            &format!("query-session {}", namespace_path.display()),
-            peer,
-        );
+        let query = handle_request_line(&mut state, "query-session", peer);
         assert!(query.starts_with("ok session "));
-
-        fs::remove_file(&namespace_path).expect("remove namespace placeholder");
     }
 
-    fn unique_test_path() -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should advance")
-            .as_nanos();
-        std::env::temp_dir().join(format!("leash-daemon-test-{stamp}"))
+    #[test]
+    fn query_session_reports_missing_for_unknown_pid_namespace() {
+        let mut state = DaemonState::default();
+        let peer = PeerCredentials {
+            pid: 999_999,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        assert_eq!(
+            handle_request_line(&mut state, "query-session", peer),
+            "ok missing\n"
+        );
     }
 }

@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::cli::RunCommand;
+use crate::daemon_client;
 use crate::jail;
 use crate::ns_runtime;
 use crate::privileges;
@@ -40,8 +41,16 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         cwd.display()
     );
 
+    run_with_log(
+        || daemon_client::ensure_daemon_running(run.verbose),
+        || "ensure daemon".to_string(),
+    )?;
+
     run_with_log(run_env::setup_run_namespaces, || {
         "unshare run namespaces".to_string()
+    })?;
+    run_with_log(daemon_client::register_session, || {
+        "register current mount namespace session".to_string()
     })?;
     let status = run_with_log(
         || run_env::run_child_in_jail(&run, &cwd),
