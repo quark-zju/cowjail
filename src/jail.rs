@@ -320,8 +320,8 @@ pub(crate) fn config_root_from_home(home: &Path) -> PathBuf {
     home.join(".config/cowjail")
 }
 
-pub(crate) fn state_root_from_home(home: &Path) -> PathBuf {
-    home.join(".local/state/cowjail")
+pub(crate) fn state_root_from_home(_home: &Path) -> PathBuf {
+    runtime_root().join("state")
 }
 
 pub(crate) fn profile_definition_path_in(layout: &JailLayout, name: &str) -> PathBuf {

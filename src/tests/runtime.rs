@@ -31,7 +31,7 @@ fn cowjail_path_helpers_are_testable_without_process_home() {
     );
     assert_eq!(
         jail::state_root_from_home(home),
-        home.join(".local/state/cowjail")
+        jail::runtime_root().join("state")
     );
     assert_eq!(
         profile_loader::default_record_dir_from_home(home),
@@ -43,7 +43,7 @@ fn cowjail_path_helpers_are_testable_without_process_home() {
     );
     assert_eq!(
         jail::jail_paths_in(&layout, "demo").record_path,
-        home.join(".local/state/cowjail/demo/record")
+        layout.state_root.join("demo/record")
     );
 }
 
@@ -52,6 +52,7 @@ fn resolve_in_can_materialize_generated_jail_without_global_home() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let profile_path = temp.path().join("test.profile");
     fs::write(&profile_path, ". rw\n/tmp ro\n").expect("write profile");
 
@@ -81,6 +82,7 @@ fn remove_jail_can_follow_profile_selected_generated_identity() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let profile_path = temp.path().join("test.profile");
     fs::write(&profile_path, ". rw\n/tmp ro\n").expect("write profile");
     let profile_arg = profile_path.to_str().expect("utf-8 path");
@@ -113,6 +115,7 @@ fn resolve_in_must_exist_does_not_create_generated_jail_for_profile_selector() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let profile_path = temp.path().join("test.profile");
     fs::write(&profile_path, ". rw\n/tmp ro\n").expect("write profile");
     let profile_arg = profile_path.to_str().expect("utf-8 path");
@@ -135,6 +138,7 @@ fn resolve_in_rejects_rebinding_existing_named_jail_to_different_profile() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let profile_a = temp.path().join("a.profile");
     let profile_b = temp.path().join("b.profile");
     fs::write(&profile_a, ". rw\n/tmp ro\n").expect("write profile a");
@@ -163,6 +167,7 @@ fn ns_runtime_paths_track_runtime_layout() {
     let home = Path::new("/tmp/cowjail-home");
     let mut layout = jail::layout_from_home(home);
     layout.runtime_root = Path::new("/run/cowjail-test").to_path_buf();
+    layout.state_root = layout.runtime_root.join("state");
 
     let jail_paths = jail::jail_paths_in(&layout, "demo");
     let runtime = ns_runtime::paths_for(&jail_paths);
@@ -193,6 +198,7 @@ fn ns_runtime_helpers_manage_temp_runtime_dir() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let before = ns_runtime::inspect(&jail_paths).expect("inspect before");
@@ -232,6 +238,7 @@ fn ns_runtime_lock_is_exclusive() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let first = ns_runtime::open_lock(&jail_paths).expect("first lock");
@@ -249,6 +256,7 @@ fn ns_runtime_ensure_skeleton_creates_runtime_dir_and_lock() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let status = ns_runtime::ensure_runtime_skeleton(&jail_paths).expect("ensure skeleton");
@@ -265,6 +273,7 @@ fn ns_runtime_classify_detects_partial_and_ready_handles() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let _lock = ns_runtime::open_lock(&jail_paths).expect("open lock");
@@ -281,6 +290,7 @@ fn ns_runtime_ensure_runtime_with_builds_missing_runtime() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let mut called = false;
@@ -302,6 +312,7 @@ fn ns_runtime_ensure_runtime_with_reuses_ready_runtime() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let first = ns_runtime::ensure_runtime_with(&jail_paths, |paths| {
@@ -329,6 +340,7 @@ fn ns_runtime_ensure_runtime_with_repairs_partial_runtime() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let _ = ns_runtime::ensure_runtime_skeleton(&jail_paths).expect("ensure skeleton");
@@ -351,6 +363,7 @@ fn ns_runtime_ensure_placeholders_sets_ready_state() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
 
     let ensured =
@@ -365,6 +378,7 @@ fn ns_runtime_ensure_runtime_for_exec_succeeds() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
     let runtime_paths = ns_runtime::ensure_runtime_dir(&jail_paths).expect("ensure runtime");
     let exec_runtime = ns_runtime::ensure_runtime_for_exec(&jail_paths).expect("ensure exec");
@@ -379,6 +393,7 @@ fn ns_runtime_reads_fuse_pid_file() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());
     layout.runtime_root = temp.path().join("run");
+    layout.state_root = layout.runtime_root.join("state");
     let jail_paths = jail::jail_paths_in(&layout, "demo");
     let runtime_paths = ns_runtime::ensure_runtime_dir(&jail_paths).expect("ensure runtime");
 
