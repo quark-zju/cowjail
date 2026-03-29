@@ -1,47 +1,35 @@
 # Runtime Layout
 
-This document explains where jail data lives and how runtime artifacts are created and removed.
+This document explains where jail data lives after the runtime-only simplification.
 
 ## Directory Roots
 
-Persistent roots:
+- Config root: `~/.config/cowjail`
+- Runtime root: `${XDG_RUNTIME_DIR}/cowjail`
+- Fallback runtime root: `/run/user/<uid>/cowjail`
 
-- config root: `~/.config/cowjail`
-- state root: `~/.local/state/cowjail`
+`cowjail` no longer keeps persistent jail state under `~/.local/state`. All per-jail state lives under the runtime root and is expected to disappear across reboot or runtime directory cleanup.
 
-Runtime root:
-
-- `${XDG_RUNTIME_DIR}/cowjail` when `XDG_RUNTIME_DIR` is set
-- fallback: `/run/user/<uid>/cowjail`
-
-Each jail uses one `<name>` directory under both state and runtime roots.
-
-## Per-Jail State Layout
-
-`~/.local/state/cowjail/<name>/`:
-
-- `profile`: normalized resolved profile source
-- `record`: append-only operation record (CBOR framed)
-
-Unknown files in state/runtime directories are treated conservatively during `rm` (cleanup refuses broad recursive delete).
-
-## Per-Jail Runtime Layout
+## Per-Jail Layout
 
 `.../cowjail/<name>/`:
 
+- `profile`: normalized resolved profile source
+- `profile.sources`: optional CBOR source map for `%include` expansion
 - `lock`: runtime lock file for synchronization
 - `mount/`: FUSE mountpoint
 - `fuse.pid`: PID of background `_fuse` server
 - `fuse.log`: background `_fuse` stdout/stderr log
-- `ipcns` / `mntns`: reserved runtime artifacts; not used for current `run` IPC flow
+- `ipcns` / `mntns`: reserved runtime artifacts; not used by the current `run` flow
+
+Unknown files in runtime directories are treated conservatively during `rm`.
 
 ## Lifecycle by Command
 
 `add`:
 
 - resolves jail identity
-- ensures state and runtime skeleton exists
-- writes normalized `profile` and initializes `record`
+- writes normalized `profile` and optional `profile.sources` under the runtime root
 
 `run`:
 
@@ -50,37 +38,22 @@ Unknown files in state/runtime directories are treated conservatively during `rm
 - reuses or starts `_fuse`
 - executes command inside jail mount
 
-`flush`:
-
-- reads `record`
-- applies pending operations based on replay policy
-- marks applied frames flushed
-
 `rm`:
 
 - unmounts runtime mountpoint (`umount2(MNT_DETACH)` path)
 - removes known runtime artifacts
 - removes runtime dir when clean
-- removes known state artifacts and state dir
 
 ## Runtime Reuse Rules
 
-`run` reuses existing `_fuse` server when:
+`run` reuses an existing `_fuse` server when:
 
 - `fuse.pid` exists
-- process is alive
-- process is still mounted on expected mountpoint
+- the process is alive
+- the process is still mounted on the expected mountpoint
 
 Otherwise, it starts a new `_fuse` server.
 
-## Common Failure Modes
-
-- `EBUSY` when removing `mount/`: lingering mount references or live FUSE process.
-- `ENOTCONN` on stale mountpoint traversal: disconnected FUSE endpoint.
-- `Permission denied` on cleanup: ownership drift after privileged operations.
-
-Use `cowjail rm -v <name>` for step-by-step cleanup logs.
-
 ## Why No Recursive Delete
 
-`rm` intentionally removes only recognized files/dirs. This reduces blast radius and avoids deleting unrelated files accidentally placed under jail directories.
+`rm` intentionally removes only recognized files and directories. This reduces blast radius and avoids deleting unrelated files accidentally placed under a jail runtime directory.

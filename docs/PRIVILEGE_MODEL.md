@@ -25,9 +25,7 @@ drop to the real user before doing any work:
 - `cowjail add`
 - `cowjail list`
 - `cowjail show`
-- `cowjail flush`
 - low-level `_mount`
-- low-level `_flush`
 
 This keeps read/metadata/update workflows from accidentally executing with root
 effective privileges.

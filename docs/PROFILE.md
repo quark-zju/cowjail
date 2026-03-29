@@ -1,6 +1,6 @@
 # Profile Guide
 
-This document is the single source of truth for profile syntax, size configuration, and default profile behavior used by `cowjail`.
+This document is the source of truth for profile syntax and default profile behavior used by `cowjail`.
 
 ## Managing Profiles
 
@@ -37,14 +37,13 @@ Profile is line-based and evaluated with first-match-wins.
 
 - Rule format: `pattern action`
 - Directive format: `%directive ...`
-- `%include <name>`: inline include another profile by short name (no `/`); missing file is ignored
-- `%set max_size = <size|none>`: set record max size override
+- `%include <name>`: inline another profile by short name (no `/`); missing file is ignored
 - Comment: lines starting with `#`
 - Glob pattern is supported in paths
   - `*` does not match `/`
   - for arbitrary depth (including 0 levels), use `**`
   - example: use `foo/**/.git` instead of `foo/*/.git`
-- Match order: top to bottom, first matched rule is used
+- Match order: top to bottom, first matched rule wins
 - Relative rules:
   - `.` resolves to the current working directory at profile load time
   - relative paths like `foo` and `./foo` resolve under the current working directory at profile load time
@@ -57,58 +56,41 @@ Example:
 /bin ro
 /usr ro
 /tmp rw
-/home/*/.ssh deny
-. cow
+. git-rw
 ```
 
 ## Actions
 
 - `ro`: read-only
-- `rw`: writable passthrough (writes apply to host immediately)
-- `cow`: writable copy-on-write (writes are captured first and applied by `flush`)
+- `rw`: writable passthrough; writes apply to the host immediately
+- `git-rw`: writable only inside detected git working trees; non-repo paths remain read-only
 - `deny`: path remains visible, access returns `EACCES`
 - `hide`: path behaves as non-existent (`ENOENT`)
 
+`git-rw` also applies special `.git` protection. Normal processes cannot access `.git` metadata. Access is only granted to trusted `git` commands recognized by the FUSE-side filter.
+
 ## Automatic Mount Handling
 
-`cowjail` keeps profile syntax simple (`ro/rw/cow/deny/hide`) and applies special mount behavior internally during `run`:
+`cowjail` keeps profile syntax simple and applies special mount behavior internally during `run`:
 
 - `/proc`:
-  - only exact `/proc` is supported (no glob, no subpaths)
+  - only exact `/proc` is supported
   - action must be `ro` or `rw`
   - implemented as `procfs` mount in the child mount namespace
 - `/sys`:
-  - only exact `/sys` is supported (no glob, no subpaths)
+  - only exact `/sys` is supported
   - action must be `ro` or `rw`
   - implemented as `sysfs` mount in the child mount namespace
 - `/dev`:
   - glob is not allowed; use explicit paths
-  - `cow` is not supported under `/dev`
-  - for `ro`/`rw` rules that point to a host character device or directory, `cowjail` automatically plans bind mounts in the child mount namespace
-  - once a path is auto-promoted to bind mount root (for example `/dev/pts`), descendant profile rules under that root are rejected as conflicts
+  - for `ro` or `rw` rules that point to a host character device or directory, `cowjail` automatically plans bind mounts in the child mount namespace
+  - once a path is auto-promoted to a bind mount root, descendant profile rules under that root are rejected as conflicts
 - `/tmp`:
-  - exact `/tmp ro` or `/tmp rw` is automatically planned as a bind mount in the child mount namespace only when no other rule mentions `/tmp` and no other glob rule matches `/tmp`
-  - `/tmp cow` stays on the normal FUSE path
-  - once `/tmp` is auto-promoted to a bind mount root, descendant profile rules under `/tmp` are rejected as conflicts
-
-## Record Size Configuration
-
-You can set record max size via a profile directive:
-
-```text
-%set max_size = 3gb
-```
-
-- Supported units: `b`, `kb`, `mb`, `gb` (case-insensitive)
-- Numeric separators: `_` are allowed in numbers (for example `2_048mb`)
-- Disable size limit: `none`, `off`, or `unlimited`
-- Last `%set max_size = ...` directive in the expanded profile takes effect
-
-Default record max size is `2gb` when no directive is provided.
+  - exact `/tmp ro` or `/tmp rw` may be planned as a bind mount in the child mount namespace when no other rule mentions `/tmp` and no other glob rule matches it
 
 ## Default Profile Resolution
 
-When `--profile default` is used (or `run/add/flush` omit `--profile`), `cowjail` resolves profile source in this order:
+When `--profile default` is used, or `run` and `add` omit `--profile`, `cowjail` resolves profile source in this order:
 
 1. `~/.config/cowjail/profiles/default` when the file exists
 2. built-in fallback source when the file is missing
