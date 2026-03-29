@@ -36,6 +36,7 @@ PROFILE_PATH = WORK_DIR / "profile"
 TARGET_PATH = WORK_DIR / "host.txt"
 TARGET_PATH_HIGH = WORK_DIR / "host-high.txt"
 TARGET_PATH_ATIME = WORK_DIR / "host-atime.txt"
+GIT_REPO_PATH = WORK_DIR / "git-repo"
 # Use a random per-run jail name to avoid cross-run/profile binding conflicts.
 HIGH_LEVEL_JAIL = f"e2e-high-level-{secrets.token_hex(6)}"
 HIGH_LEVEL_RECORD_FLUSH_WAIT_SECONDS = 3.0
@@ -119,6 +120,7 @@ def prepare_inputs() -> None:
     TARGET_PATH.write_text("before\n", encoding="utf-8")
     TARGET_PATH_HIGH.write_text("before-high\n", encoding="utf-8")
     TARGET_PATH_ATIME.write_text("before-atime\n", encoding="utf-8")
+    prepare_git_repo()
     # Keep the writable test area narrow, but expose basic system paths read-only
     # so high-level `run ... /bin/sh -lc ...` can resolve the shell and shared libs.
     PROFILE_PATH.write_text(
@@ -132,6 +134,78 @@ def prepare_inputs() -> None:
         ),
         encoding="utf-8",
     )
+
+
+def prepare_git_repo() -> None:
+    if shutil.which("git") is None:
+        return
+    run(["git", "init", str(GIT_REPO_PATH)], stdout=subprocess.DEVNULL)
+    run(
+        ["git", "-C", str(GIT_REPO_PATH), "config", "user.name", "cowjail e2e"],
+        stdout=subprocess.DEVNULL,
+    )
+    run(
+        ["git", "-C", str(GIT_REPO_PATH), "config", "user.email", "cowjail@example.invalid"],
+        stdout=subprocess.DEVNULL,
+    )
+    tracked = GIT_REPO_PATH / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    run(["git", "-C", str(GIT_REPO_PATH), "add", "tracked.txt"], stdout=subprocess.DEVNULL)
+    run(
+        ["git", "-C", str(GIT_REPO_PATH), "commit", "-m", "base"],
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def run_git_commit_smoke(suid_bin: Path) -> bool:
+    if shutil.which("git") is None:
+        print("[high git] SKIP: git not found")
+        return False
+
+    host_head_before = run(
+        ["git", "-C", str(GIT_REPO_PATH), "rev-parse", "HEAD"],
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+
+    run(
+        [
+            str(suid_bin),
+            "run",
+            "--name",
+            HIGH_LEVEL_JAIL,
+            "/bin/sh",
+            "-c",
+            (
+                f"cd '{GIT_REPO_PATH}'"
+                " && git commit --allow-empty -m jail-commit"
+                " >/dev/null"
+            ),
+        ]
+    )
+
+    jailed_head = run(
+        [
+            str(suid_bin),
+            "run",
+            "--name",
+            HIGH_LEVEL_JAIL,
+            "/bin/sh",
+            "-c",
+            f"cd '{GIT_REPO_PATH}' && git rev-parse HEAD",
+        ],
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+    if jailed_head == host_head_before:
+        fail("jailed git commit did not advance HEAD inside cow view")
+
+    host_head_after = run(
+        ["git", "-C", str(GIT_REPO_PATH), "rev-parse", "HEAD"],
+        stdout=subprocess.PIPE,
+    ).stdout.strip()
+    if host_head_after != host_head_before:
+        fail("host git HEAD changed before high-level flush (unexpected)")
+
+    return True
 
 
 def run_low_level_smoke(cowjail_bin: Path) -> None:
@@ -303,7 +377,12 @@ def run_high_level_smoke(
         if TARGET_PATH_HIGH.stat().st_mode & stat.S_IXUSR == 0:
             fail("host executable bit was not applied by high-level flush")
 
-        print("[high 8/8] high-level metadata checks passed")
+        print("[high 8/8] running git commit smoke")
+        git_ran = run_git_commit_smoke(suid_bin)
+        if git_ran:
+            print("[high git] commit succeeded inside cow view")
+
+        print("[high] high-level metadata checks passed")
         return True
     finally:
         subprocess.run(
