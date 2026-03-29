@@ -56,17 +56,20 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 
 # User home (some used by coding agents too)
 ~/bin ro
-~/.bun cow
+~/.bun rw
+~/.cache/opencode rw
 ~/.cache cow
 ~/.cargo cow
 ~/.config cow
 ~/.dotnet cow
 ~/.gitconfig* ro
 ~/.gitignore* ro
+~/.local/state/opencode rw
+~/.local/share/opencode rw
 ~/.local cow
-~/.npm cow
-~/.pyenv cow
-~/.rustup cow
+~/.npm rw
+~/.pyenv rw
+~/.rustup rw
 
 # Current workspace
 . cow
