@@ -176,6 +176,13 @@ impl CowFs {
         }
     }
 
+    fn create_errno_for_pid(&self, path: &Path, requester_pid: Option<u32>) -> Option<i32> {
+        if self.is_visible(path) && fs::symlink_metadata(path).is_ok() {
+            return Some(libc::EEXIST);
+        }
+        self.mutation_errno_for_pid(path, requester_pid)
+    }
+
     fn runtime_guard_root(&self) -> Option<&Path> {
         let mount_root = self.mount_root.as_deref()?;
         if mount_root.file_name() != Some(OsStr::new(crate::ns_runtime::MOUNT_DIR_NAME)) {
@@ -728,7 +735,7 @@ impl Filesystem for CowFs {
             return;
         };
         let path = parent_path.join(name);
-        if let Some(errno) = self.mutation_errno_for_pid(&path, Some(req.pid())) {
+        if let Some(errno) = self.create_errno_for_pid(&path, Some(req.pid())) {
             reply.error(errno);
             return;
         }
@@ -1175,6 +1182,19 @@ mod tests {
 
     fn test_fs(profile_src: &str) -> CowFs {
         CowFs::new(parse_profile(profile_src))
+    }
+
+    #[test]
+    fn mkdir_prefers_eexist_for_visible_existing_directory() {
+        let dir = tempdir().expect("tempdir");
+        let existing = dir.path().join(".local");
+        fs::create_dir(&existing).expect("create existing dir");
+
+        let profile_src = format!("{} ro\n", dir.path().display());
+        let fs = test_fs(&profile_src);
+
+        assert_eq!(fs.create_errno_for_pid(&existing, None), Some(libc::EEXIST));
+        assert_eq!(fs.write_mode(&existing), WriteMode::Forbidden);
     }
 
     #[test]
