@@ -23,7 +23,8 @@ Main components:
 
 - `run`: resolve or select jail, ensure per-jail runtime plus FUSE server, create a fresh IPC namespace for the jailed child, execute command in jail
 - `_fuse`: internal long-lived FUSE server entrypoint for a jail runtime
-- `add` / `rm` / `list` / `show`: named jail lifecycle and inspection
+- `profile ...`: edit and inspect reusable profile sources
+- `_rm` / `_list` / `_show`: low-level runtime inspection and cleanup
 - `_suid`: ensure current binary is setuid-root
 
 Runtime state:
@@ -59,7 +60,7 @@ Trusted `git` checks currently inspect `/proc/<pid>/exe` and `/proc/<pid>/cmdlin
 - `run` does not persist a separate mount namespace handle for jail reuse
 - `_fuse` mounts a per-jail FUSE view under the runtime directory
 - `run` unshares IPC, mount, and PID namespaces before spawn, then child `pre_exec` applies mount plan plus `pivot_root(".", ".")` into the jail mount
-- `rm` unmounts runtime FUSE mountpoints and removes known runtime artifacts conservatively
+- `_rm` unmounts runtime FUSE mountpoints and removes known runtime artifacts conservatively
 
 ## Explicit Trade-Offs and Assumptions
 

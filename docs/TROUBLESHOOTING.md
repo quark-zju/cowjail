@@ -22,18 +22,19 @@ This is often a follow-on symptom when mount/root-switch access failed earlier.
 Run with verbose logging to inspect the step that failed:
 
 ```bash
-cowjail run -v --name <name> -- <command>
+cowjail run -v --profile <profile> -- <command>
 ```
 
 If `_fuse` starts but fails later, inspect the runtime log:
 
-- `${XDG_RUNTIME_DIR}/cowjail/<name>/fuse.log`
-- fallback: `/run/user/<uid>/cowjail/<name>/fuse.log`
+- `${XDG_RUNTIME_DIR}/cowjail/<derived-name>/fuse.log`
+- fallback: `/run/user/<uid>/cowjail/<derived-name>/fuse.log`
+- use `cowjail _list` to inspect active runtime names when needed
 
 You can also enable vendored `fuse` crate logs for `_fuse` using:
 
 ```bash
-COWJAIL_FUSE_LOG=debug cowjail run -v --name <name> -- <command>
+COWJAIL_FUSE_LOG=debug cowjail run -v --profile <profile> -- <command>
 ```
 
 Accepted levels follow `env_logger` filter syntax (for example: `error`, `warn`, `info`, `debug`, `trace`).
@@ -101,16 +102,16 @@ By default the script:
 
 Use `--bin <path>` to point at another binary, `--no-build` to skip the rebuild, or `--no-bootstrap-suid` if you want to manage `_suid` manually.
 
-## `rm` fails with mount-related errors
+## `_rm` fails with mount-related errors
 
 ### `Device or resource busy (os error 16)`
 
 A FUSE mount may still be active. Retry with verbose logs to see unmount/cleanup steps:
 
 ```bash
-cowjail rm -v <name>
+cowjail _rm -v --profile <profile>
 ```
 
 ### `Transport endpoint is not connected (os error 107)`
 
-This indicates a stale/disconnected FUSE mountpoint. `cowjail rm` includes recovery logic; rerun with `-v` for details.
+This indicates a stale/disconnected FUSE mountpoint. `cowjail _rm` includes recovery logic; rerun with `-v` for details.

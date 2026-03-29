@@ -11,7 +11,7 @@ This document describes how `cowjail` handles privilege transitions and why.
 ## Entry Points Requiring Root EUID
 
 - `cowjail run`
-- `cowjail rm`
+- `cowjail _rm`
 - low-level `_fuse`
 
 These commands fail fast when `euid != 0`.
@@ -22,9 +22,9 @@ When running as a setuid-root binary (`ruid != 0`, `euid == 0`), these commands
 drop to the real user before doing any work:
 
 - `cowjail help`
-- `cowjail add`
-- `cowjail list`
-- `cowjail show`
+- `cowjail profile ...`
+- `cowjail _list`
+- `cowjail _show`
 - low-level `_mount`
 
 This keeps read/metadata/update workflows from accidentally executing with root

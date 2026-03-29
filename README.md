@@ -82,18 +82,14 @@ The shipped builtin fragments are also inspectable through `cowjail profile show
 
 See [`docs/PROFILE.md`](docs/PROFILE.md) for profile syntax and more examples.
 
-### Named jails
+### Low-level debug commands
 
-Similar to `ip netns`, `cowjail` supports naming the jails:
+Most workflows should only need `run` plus `profile` editing. For debugging or cleanup, hidden low-level commands remain available:
 
 ```bash
-cowjail add --name agent --profile default           # assign a name to a jail
-cowjail run --name agent -- your-command arg1 arg2   # run in the jail
-cowjail run --name agent -- another-command args     # run in the same jail
-cowjail show agent                                   # show profile
-cowjail list                                         # list known jails
-cowjail rm --name agent                              # remove jail
-cowjail rm 'unnamed-*'                               # remove jails by name glob
+cowjail _show --profile default
+cowjail _list
+cowjail _rm --profile default
 ```
 
 ## More Docs
