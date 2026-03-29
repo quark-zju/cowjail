@@ -64,7 +64,7 @@ impl Profile {
         for line in &parsed {
             let action = line.action;
             let pattern = line.pattern.clone();
-            if action != RuleAction::Deny {
+            if action_requires_visible_ancestors(action) {
                 gather_implicit_ancestors(&pattern, &mut implicit_visible_ancestors);
                 for ancestor_glob in implicit_ancestor_globs_for_rule(&pattern) {
                     implicit_ancestor_globs.insert(ancestor_glob);
@@ -130,17 +130,22 @@ impl Profile {
         };
 
         if let Some(action) = self.first_match_action(&normalized) {
+            if action == RuleAction::Hide && self.is_implicit_visible_ancestor(&normalized) {
+                return Visibility::ImplicitAncestor;
+            }
             return Visibility::Action(action);
         }
 
-        if self.implicit_visible_ancestors.contains(&normalized) {
-            return Visibility::ImplicitAncestor;
-        }
-        if self.implicit_ancestor_globset.is_match(&normalized) {
+        if self.is_implicit_visible_ancestor(&normalized) {
             return Visibility::ImplicitAncestor;
         }
 
         Visibility::Hidden
+    }
+
+    fn is_implicit_visible_ancestor(&self, normalized: &Path) -> bool {
+        self.implicit_visible_ancestors.contains(normalized)
+            || self.implicit_ancestor_globset.is_match(normalized)
     }
 }
 
@@ -216,6 +221,13 @@ fn action_to_str(action: RuleAction) -> &'static str {
         RuleAction::Deny => "deny",
         RuleAction::Hide => "hide",
     }
+}
+
+fn action_requires_visible_ancestors(action: RuleAction) -> bool {
+    matches!(
+        action,
+        RuleAction::ReadOnly | RuleAction::Passthrough | RuleAction::GitRw
+    )
 }
 
 fn parse_lines(profile_src: &str, cwd: &Path, home: &Path) -> Result<Vec<ParsedRuleLine>> {
@@ -487,6 +499,34 @@ mod tests {
             profile.visibility(Path::new("/foo")),
             Visibility::Action(RuleAction::Deny)
         );
+    }
+
+    #[test]
+    fn hide_is_overridden_for_visible_ancestor_of_explicit_child_rule() {
+        let profile = parse(
+            r#"
+            ~/.config/opencode rw
+            ~/.config hide
+            "#,
+        );
+        assert_eq!(
+            profile.visibility(Path::new("/home/tester/.config")),
+            Visibility::ImplicitAncestor
+        );
+        assert_eq!(
+            profile.first_match_action(Path::new("/home/tester/.config/opencode/state.json")),
+            Some(RuleAction::Passthrough)
+        );
+    }
+
+    #[test]
+    fn hide_rule_does_not_make_its_ancestors_implicitly_visible() {
+        let profile = parse(
+            r#"
+            /foo/bar hide
+            "#,
+        );
+        assert_eq!(profile.visibility(Path::new("/foo")), Visibility::Hidden);
     }
 
     #[test]
