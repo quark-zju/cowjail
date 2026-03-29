@@ -180,6 +180,7 @@ def prepare_inputs() -> None:
             f"{WORK_DIR} cow\n"
             "/tmp ro\n"
             "/bin ro\n"
+            "/dev/null rw\n"
             "/usr ro\n"
             "/lib ro\n"
             "/lib64 ro\n"
