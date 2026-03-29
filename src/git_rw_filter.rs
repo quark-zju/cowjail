@@ -15,7 +15,7 @@ pub(crate) struct GitRwFilter {
 
 impl GitRwFilter {
     pub(crate) fn new() -> Self {
-        let system_git = resolve_system_git();
+        let system_git = resolve_system_git_path();
         Self::with_system_git(system_git)
     }
 
@@ -181,7 +181,7 @@ impl GitRwFilter {
     }
 }
 
-fn resolve_system_git() -> Option<PathBuf> {
+pub(crate) fn resolve_system_git_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("git");

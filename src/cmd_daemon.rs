@@ -14,6 +14,7 @@ use std::thread;
 
 use crate::access_policy::{AccessPolicy, Permission, RequestedAccess};
 use crate::cli::LowLevelDaemonCommand;
+use crate::git_rw_filter;
 use crate::jail;
 use crate::privileges;
 use crate::run_env;
@@ -300,7 +301,7 @@ fn register_session(
         dev: meta.dev(),
         ino: meta.ino(),
     };
-    let policy = AccessPolicy::from_normalized_profile_path(&profile_path, None)?;
+    let policy = build_session_policy(&profile_path, git_rw_filter::resolve_system_git_path())?;
     let observer = SessionObserver::new(&namespace_file, policy)?;
     state.sessions.insert(
         key,
@@ -315,6 +316,10 @@ fn register_session(
         },
     );
     Ok(key)
+}
+
+fn build_session_policy(profile_path: &Path, system_git: Option<PathBuf>) -> Result<AccessPolicy> {
+    AccessPolicy::from_normalized_profile_path(profile_path, system_git)
 }
 
 fn recv_request(stream: &UnixStream) -> Result<ReceivedRequest> {
@@ -632,5 +637,21 @@ mod tests {
             ),
             "error missing-mntns-fd\n"
         );
+    }
+
+    #[test]
+    fn session_policy_uses_trusted_git_for_metadata_writes() {
+        let temp = tempdir().expect("tempdir");
+        let profile_path = temp.path().join("profile");
+        fs::write(&profile_path, "/repo git-rw\n").expect("write profile");
+
+        let policy = build_session_policy(&profile_path, Some(PathBuf::from("/usr/bin/git")))
+            .expect("build session policy");
+        let permission = policy.check_permission(
+            Path::new("/repo/.git/config"),
+            Some(Path::new("/usr/bin/git")),
+            RequestedAccess::Write,
+        );
+        assert_eq!(permission, Permission::ReadWrite);
     }
 }
