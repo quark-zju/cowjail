@@ -126,6 +126,7 @@ def prepare_inputs() -> None:
     PROFILE_PATH.write_text(
         (
             f"{WORK_DIR} cow\n"
+            f"{WORK_DIR}/** cow\n"
             "/tmp ro\n"
             "/bin ro\n"
             "/usr ro\n"
@@ -139,7 +140,10 @@ def prepare_inputs() -> None:
 def prepare_git_repo() -> None:
     if shutil.which("git") is None:
         return
-    run(["git", "init", str(GIT_REPO_PATH)], stdout=subprocess.DEVNULL)
+    run(
+        ["git", "-c", "init.defaultBranch=main", "init", str(GIT_REPO_PATH)],
+        stdout=subprocess.DEVNULL,
+    )
     run(
         ["git", "-C", str(GIT_REPO_PATH), "config", "user.name", "cowjail e2e"],
         stdout=subprocess.DEVNULL,
