@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="do not run cargo run -- _suid automatically when the binary is not yet usable",
     )
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="do not run cargo build automatically before resolving the default binary",
+    )
     return parser.parse_args()
 
 
@@ -151,6 +156,8 @@ def jail_run(
 
 def main() -> None:
     args = parse_args()
+    if args.bin is None and not args.no_build:
+        run(["cargo", "build"], env=os.environ.copy())
     cowjail_bin = (
         args.bin.resolve() if args.bin is not None else resolve_default_binary()
     )

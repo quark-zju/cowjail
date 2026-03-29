@@ -95,10 +95,11 @@ python3 docs/e2e_semantics.py
 
 By default the script:
 
-1. uses `cargo metadata` to locate `target/debug/cowjail`
-2. runs `cargo run -- _suid` automatically when the binary is not yet usable for `run`
+1. runs `cargo build`
+2. uses `cargo metadata` to locate `target/debug/cowjail`
+3. runs `cargo run -- _suid` automatically when the binary is not yet usable for `run`
 
-Use `--bin <path>` to point at another binary, or `--no-bootstrap-suid` if you want to manage `_suid` manually.
+Use `--bin <path>` to point at another binary, `--no-build` to skip the rebuild, or `--no-bootstrap-suid` if you want to manage `_suid` manually.
 
 ## `rm` fails with mount-related errors
 
