@@ -67,9 +67,11 @@ Actual syscall sequence:
 1. `setgroups([])`
 2. `setresgid(gid, gid, gid)`
 3. `setresuid(uid, uid, uid)`
-4. `prctl(PR_SET_NO_NEW_PRIVS, 1)`
+4. `prctl(PR_SET_NO_NEW_PRIVS, 1)` for the default drop path
 
 This sets real/effective/saved IDs explicitly and closes obvious privilege-regain paths.
+
+`run` is the current exception: its outer waiter process, pidns reaper, and final worker drop to the real user without setting `PR_SET_NO_NEW_PRIVS`, so nested sandbox tools that expect to create their own execution environment are not blocked by that flag.
 
 ## Temporary Real-Root Escalation
 
