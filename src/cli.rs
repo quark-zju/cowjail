@@ -131,10 +131,11 @@ where
     Ok(command)
 }
 
-fn parse_help(args: Arguments) -> Result<Command> {
+fn parse_help(mut args: Arguments) -> Result<Command> {
+    let verbose = args.contains(["-v", "--verbose"]);
     let extra = args.finish();
     if extra.is_empty() {
-        return Ok(help_command(HelpTopic::Root, false));
+        return Ok(help_command(HelpTopic::Root, verbose));
     }
     if extra.len() > 1 {
         bail!("help got unexpected trailing arguments");
@@ -144,7 +145,7 @@ fn parse_help(args: Arguments) -> Result<Command> {
         .ok_or_else(|| anyhow::anyhow!("help topic must be valid UTF-8"))?;
     let topic = crate::cmd_help::topic_from_name(topic)
         .ok_or_else(|| anyhow::anyhow!("unknown help topic: {topic}"))?;
-    Ok(help_command(topic, false))
+    Ok(help_command(topic, verbose))
 }
 
 fn parse_completion(mut args: Arguments) -> Result<Command> {
@@ -603,6 +604,27 @@ mod tests {
             let text = crate::cmd_help::help_text(topic.clone(), false);
             assert!(!text.is_empty());
         }
+    }
+
+    #[test]
+    fn parse_help_accepts_verbose_flag() {
+        let cmd = parse_from(os(&["help", "-v"])).expect("help -v should parse");
+        assert_eq!(
+            cmd,
+            Command::Help {
+                topic: HelpTopic::Root,
+                verbose: true,
+            }
+        );
+
+        let cmd = parse_from(os(&["help", "run", "-v"])).expect("help run -v should parse");
+        assert_eq!(
+            cmd,
+            Command::Help {
+                topic: HelpTopic::Run,
+                verbose: true,
+            }
+        );
     }
 
     #[test]
