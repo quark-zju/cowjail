@@ -1,3 +1,4 @@
+mod access_policy;
 mod cli;
 mod cmd_completion;
 mod cmd_daemon;

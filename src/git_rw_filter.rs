@@ -16,6 +16,10 @@ pub(crate) struct GitRwFilter {
 impl GitRwFilter {
     pub(crate) fn new() -> Self {
         let system_git = resolve_system_git();
+        Self::with_system_git(system_git)
+    }
+
+    pub(crate) fn with_system_git(system_git: Option<PathBuf>) -> Self {
         debug!("git-rw: resolved system git path to {:?}", system_git);
         Self {
             system_git,
@@ -41,8 +45,7 @@ impl GitRwFilter {
         let mut components = path.components().peekable();
         while let Some(component) = components.next() {
             if component == Component::Normal(OsStr::new(".git")) {
-                if components.next()
-                    == Some(Component::Normal(OsStr::new("COMMIT_EDITMSG")))
+                if components.next() == Some(Component::Normal(OsStr::new("COMMIT_EDITMSG")))
                     && components.next().is_none()
                 {
                     return true;
@@ -116,6 +119,16 @@ impl GitRwFilter {
         let allowed = self.inspect_process(pid, mount_root);
         debug!("git-rw: evaluated pid={} allowed={}", pid, allowed);
         allowed
+    }
+
+    pub(crate) fn allow_git_metadata_for_exe(&self, exe_path: Option<&Path>) -> bool {
+        let Some(system_git) = self.system_git.as_ref() else {
+            return false;
+        };
+        let Some(exe_path) = exe_path else {
+            return false;
+        };
+        normalize_git_exe_path(exe_path).as_ref() == Some(system_git)
     }
 
     fn inspect_process(&self, pid: u32, mount_root: Option<&Path>) -> bool {
@@ -262,9 +275,7 @@ mod tests {
         let filter = GitRwFilter::new();
         assert!(filter.is_commit_editmsg_path(Path::new("/tmp/repo/.git/COMMIT_EDITMSG")));
         // Must be a direct child of .git, not nested further
-        assert!(!filter.is_commit_editmsg_path(Path::new(
-            "/tmp/repo/.git/sub/COMMIT_EDITMSG"
-        )));
+        assert!(!filter.is_commit_editmsg_path(Path::new("/tmp/repo/.git/sub/COMMIT_EDITMSG")));
         // Other .git files are not COMMIT_EDITMSG
         assert!(!filter.is_commit_editmsg_path(Path::new("/tmp/repo/.git/config")));
         // The .git dir itself is not COMMIT_EDITMSG
