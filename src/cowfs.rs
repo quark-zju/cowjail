@@ -736,10 +736,22 @@ impl Filesystem for CowFs {
         };
         let path = parent_path.join(name);
         if let Some(errno) = self.create_errno_for_pid(&path, Some(req.pid())) {
+            debug!(
+                "create: pid={} path={} -> errno {} (policy)",
+                req.pid(),
+                path.display(),
+                errno
+            );
             reply.error(errno);
             return;
         }
         if self.write_mode_for_pid(&path, Some(req.pid())) == WriteMode::Forbidden {
+            debug!(
+                "create: pid={} path={} -> errno {} (write mode forbidden)",
+                req.pid(),
+                path.display(),
+                EACCES
+            );
             reply.error(EACCES);
             return;
         }
@@ -843,7 +855,7 @@ impl Filesystem for CowFs {
             return;
         };
         let path = parent_path.join(name);
-        if let Some(errno) = self.create_errno_for_pid(&path, Some(req.pid())) {
+        if let Some(errno) = self.mutation_errno_for_pid(&path, Some(req.pid())) {
             reply.error(errno);
             return;
         }
@@ -872,16 +884,35 @@ impl Filesystem for CowFs {
             return;
         };
         let path = parent_path.join(name);
-        if let Some(errno) = self.mutation_errno_for_pid(&path, Some(req.pid())) {
+        if let Some(errno) = self.create_errno_for_pid(&path, Some(req.pid())) {
+            debug!(
+                "mkdir: pid={} path={} -> errno {} (policy)",
+                req.pid(),
+                path.display(),
+                errno
+            );
             reply.error(errno);
             return;
         }
         if self.write_mode_for_pid(&path, Some(req.pid())) == WriteMode::Forbidden {
+            debug!(
+                "mkdir: pid={} path={} -> errno {} (write mode forbidden)",
+                req.pid(),
+                path.display(),
+                EACCES
+            );
             reply.error(EACCES);
             return;
         }
         if let Err(err) = create_dir_with_mode(&path, normalize_create_mode(mode, umask)) {
-            reply.error(io_errno(&err));
+            let errno = io_errno(&err);
+            debug!(
+                "mkdir: pid={} path={} -> errno {} ({err})",
+                req.pid(),
+                path.display(),
+                errno
+            );
+            reply.error(errno);
             return;
         }
         let attr = match self.host_attr(&path) {
