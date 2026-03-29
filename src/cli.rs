@@ -276,6 +276,12 @@ fn parse_run(mut args: Arguments) -> Result<Command> {
     if trailing.is_empty() {
         bail!("run requires a command to execute");
     }
+    if trailing.first().is_some_and(|arg| arg == "--") {
+        trailing.remove(0);
+    }
+    if trailing.is_empty() {
+        bail!("run requires a command to execute");
+    }
 
     let program = trailing.remove(0);
     Ok(Command::Run(RunCommand {
@@ -470,6 +476,21 @@ mod tests {
         };
         assert!(run.name.is_none());
         assert!(run.profile.is_none());
+        assert!(!run.verbose);
+        assert_eq!(run.program, OsString::from("echo"));
+        assert_eq!(run.args, vec![OsString::from("hi")]);
+    }
+
+    #[test]
+    fn parse_run_accepts_double_dash_before_command() {
+        let cmd = parse_from(os(&["run", "--profile", "dev", "--", "echo", "hi"]))
+            .expect("run command should parse with leading --");
+        let run = match cmd {
+            Command::Run(run) => run,
+            other => panic!("expected run, got {other:?}"),
+        };
+        assert!(run.name.is_none());
+        assert_eq!(run.profile.as_deref(), Some("dev"));
         assert!(!run.verbose);
         assert_eq!(run.program, OsString::from("echo"));
         assert_eq!(run.args, vec![OsString::from("hi")]);
