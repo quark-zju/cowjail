@@ -1,5 +1,4 @@
 use crate::profile::{self, RuleAction};
-use crate::profile_loader::RuleSource;
 use anyhow::{Context, Result, bail};
 use globset::GlobBuilder;
 use std::os::unix::fs::FileTypeExt;
@@ -19,9 +18,8 @@ struct RuleLine {
     line_no: usize,
 }
 
-pub(crate) fn build_mount_plan_with_sources(
+pub(crate) fn build_mount_plan(
     normalized_profile: &str,
-    sources: Option<&[RuleSource]>,
 ) -> Result<Vec<MountPlanEntry>> {
     let parsed = profile::parse_normalized_rule_lines(normalized_profile)?;
     let rules: Vec<RuleLine> = parsed
@@ -43,7 +41,7 @@ pub(crate) fn build_mount_plan_with_sources(
         let under_proc = rule.path.starts_with("/proc");
         let under_sys = rule.path.starts_with("/sys");
         let exact_tmp = rule.path == Path::new("/tmp");
-        let loc = rule_loc(rule.line_no, sources);
+        let loc = rule_loc(rule.line_no);
 
         if under_dev && has_glob {
             bail!("{loc}: /dev rules do not allow glob patterns");
@@ -101,7 +99,7 @@ pub(crate) fn build_mount_plan_with_sources(
         }
 
         if exact_tmp && matches!(rule.action, RuleAction::ReadOnly | RuleAction::Passthrough) {
-            validate_exact_tmp_bind_rule(rule, &rules, sources)?;
+            validate_exact_tmp_bind_rule(rule, &rules)?;
             let read_only = rule.action == RuleAction::ReadOnly;
             plan.push(MountPlanEntry::Bind {
                 path: rule.path.clone(),
@@ -110,14 +108,13 @@ pub(crate) fn build_mount_plan_with_sources(
         }
     }
 
-    validate_bind_conflicts(&rules, &plan, sources)?;
+    validate_bind_conflicts(&rules, &plan)?;
     Ok(plan)
 }
 
 fn validate_bind_conflicts(
     rules: &[RuleLine],
     plan: &[MountPlanEntry],
-    sources: Option<&[RuleSource]>,
 ) -> Result<()> {
     for entry in plan {
         let bind_root = match entry {
@@ -130,7 +127,7 @@ fn validate_bind_conflicts(
                 continue;
             }
             if rule.path.starts_with(bind_root) {
-                let loc = rule_loc(rule.line_no, sources);
+                let loc = rule_loc(rule.line_no);
                 bail!(
                     "{}: rule {} conflicts with mounted root {}",
                     loc,
@@ -146,15 +143,14 @@ fn validate_bind_conflicts(
 fn validate_exact_tmp_bind_rule(
     current: &RuleLine,
     rules: &[RuleLine],
-    sources: Option<&[RuleSource]>,
 ) -> Result<()> {
     for rule in rules {
         if std::ptr::eq(rule, current) {
             continue;
         }
         if rule_mentions_or_matches_tmp(rule)? {
-            let current_loc = rule_loc(current.line_no, sources);
-            let other_loc = rule_loc(rule.line_no, sources);
+            let current_loc = rule_loc(current.line_no);
+            let other_loc = rule_loc(rule.line_no);
             bail!(
                 "{current_loc}: exact /tmp ro/rw bind mount requires /tmp to be mentioned only once; conflicting rule at {other_loc}: {}",
                 rule.path.display()
@@ -186,12 +182,7 @@ fn has_glob_syntax(value: &str) -> bool {
     value.contains('*') || value.contains('?') || value.contains('[')
 }
 
-fn rule_loc(line_no: usize, sources: Option<&[RuleSource]>) -> String {
-    if let Some(sources) = sources
-        && let Some(src) = sources.get(line_no.saturating_sub(1))
-    {
-        return format!("{}:{} (expanded line {})", src.source, src.line, line_no);
-    }
+fn rule_loc(line_no: usize) -> String {
     format!("line {line_no}")
 }
 
@@ -201,30 +192,30 @@ mod tests {
 
     #[test]
     fn proc_rule_must_be_exact_and_ro_or_rw() {
-        let err = build_mount_plan_with_sources("/proc/self ro\n", None).expect_err("must fail");
+        let err = build_mount_plan("/proc/self ro\n").expect_err("must fail");
         assert!(err.to_string().contains("exact path /proc"));
-        let err = build_mount_plan_with_sources("/proc deny\n", None).expect_err("must fail");
+        let err = build_mount_plan("/proc deny\n").expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
     }
 
     #[test]
     fn proc_subrule_conflicts_with_proc_mount_root() {
         let err =
-            build_mount_plan_with_sources("/proc ro\n/proc/sys ro\n", None).expect_err("must fail");
+            build_mount_plan("/proc ro\n/proc/sys ro\n").expect_err("must fail");
         assert!(err.to_string().contains("exact path /proc"));
     }
 
     #[test]
     fn sys_rule_must_be_exact_and_ro_or_rw() {
-        let err = build_mount_plan_with_sources("/sys/kernel ro\n", None).expect_err("must fail");
+        let err = build_mount_plan("/sys/kernel ro\n").expect_err("must fail");
         assert!(err.to_string().contains("exact path /sys"));
-        let err = build_mount_plan_with_sources("/sys deny\n", None).expect_err("must fail");
+        let err = build_mount_plan("/sys deny\n").expect_err("must fail");
         assert!(err.to_string().contains("only supports ro or rw"));
     }
 
     #[test]
     fn dev_char_or_dir_rule_becomes_bind_mount() {
-        let plan = build_mount_plan_with_sources("/dev/pts rw\n", None).expect("plan");
+        let plan = build_mount_plan("/dev/pts rw\n").expect("plan");
         assert_eq!(
             plan,
             vec![MountPlanEntry::Bind {
@@ -236,7 +227,7 @@ mod tests {
 
     #[test]
     fn dev_bind_root_rejects_descendant_rules() {
-        let err = build_mount_plan_with_sources("/dev/pts rw\n/dev/pts/0 ro\n", None)
+        let err = build_mount_plan("/dev/pts rw\n/dev/pts/0 ro\n")
             .expect_err("must fail");
         assert!(
             err.to_string()
@@ -246,7 +237,7 @@ mod tests {
 
     #[test]
     fn tmp_ro_rule_becomes_bind_mount() {
-        let plan = build_mount_plan_with_sources("/tmp ro\n", None).expect("plan");
+        let plan = build_mount_plan("/tmp ro\n").expect("plan");
         assert_eq!(
             plan,
             vec![MountPlanEntry::Bind {
@@ -258,7 +249,7 @@ mod tests {
 
     #[test]
     fn tmp_rw_rule_becomes_bind_mount() {
-        let plan = build_mount_plan_with_sources("/tmp rw\n", None).expect("plan");
+        let plan = build_mount_plan("/tmp rw\n").expect("plan");
         assert_eq!(
             plan,
             vec![MountPlanEntry::Bind {
@@ -271,37 +262,26 @@ mod tests {
     #[test]
     fn tmp_bind_root_rejects_descendant_rules() {
         let err =
-            build_mount_plan_with_sources("/tmp rw\n/tmp/cache ro\n", None).expect_err("must fail");
+            build_mount_plan("/tmp rw\n/tmp/cache ro\n").expect_err("must fail");
         assert!(err.to_string().contains("mentioned only once"));
     }
 
     #[test]
     fn tmp_bind_rejects_duplicate_exact_tmp_rules() {
-        let err = build_mount_plan_with_sources("/tmp rw\n/tmp ro\n", None).expect_err("must fail");
+        let err = build_mount_plan("/tmp rw\n/tmp ro\n").expect_err("must fail");
         assert!(err.to_string().contains("mentioned only once"));
     }
 
     #[test]
     fn tmp_bind_rejects_other_rule_that_matches_tmp() {
-        let err = build_mount_plan_with_sources("/** ro\n/tmp rw\n", None).expect_err("must fail");
+        let err = build_mount_plan("/** ro\n/tmp rw\n").expect_err("must fail");
         assert!(err.to_string().contains("mentioned only once"));
     }
 
     #[test]
     fn sys_root_rejects_descendant_rules() {
         let err =
-            build_mount_plan_with_sources("/sys ro\n/sys/fs ro\n", None).expect_err("must fail");
+            build_mount_plan("/sys ro\n/sys/fs ro\n").expect_err("must fail");
         assert!(err.to_string().contains("exact path /sys"));
-    }
-
-    #[test]
-    fn source_locations_are_used_when_available() {
-        let sources = vec![RuleSource {
-            source: "profiles/base".to_string(),
-            line: 42,
-        }];
-        let err = build_mount_plan_with_sources("/proc/self ro\n", Some(&sources))
-            .expect_err("must fail");
-        assert!(err.to_string().contains("profiles/base:42"));
     }
 }

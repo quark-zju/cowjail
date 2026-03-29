@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use fs_err as fs;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::{cli, jail, profile};
@@ -29,20 +28,11 @@ pub(crate) fn render_profile_source_for_show(profile_path: &Path, home: &Path) -
 pub(crate) struct LoadedProfile {
     pub(crate) profile: profile::Profile,
     pub(crate) normalized_source: String,
-    pub(crate) normalized_rule_sources: Vec<RuleSource>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct RuleSource {
-    pub(crate) source: String,
-    pub(crate) line: usize,
 }
 
 #[derive(Debug, Clone)]
 struct ExpandedLine {
     text: String,
-    source: String,
-    line_no: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +56,6 @@ pub(crate) fn load_profile_with_context(
     let expanded = expand_includes(&source, &source_name, home)?;
     let expanded_source = expanded_to_string(&expanded);
     let parse_source = strip_directive_lines(&expanded_source);
-    let normalized_rule_sources = effective_rule_sources(&expanded);
 
     let parse_label = format!("profile source: {source_name}");
     let profile = profile::Profile::parse_with_home(&parse_source, cwd, home)
@@ -76,7 +65,6 @@ pub(crate) fn load_profile_with_context(
     Ok(LoadedProfile {
         profile,
         normalized_source,
-        normalized_rule_sources,
     })
 }
 
@@ -220,7 +208,7 @@ fn render_profile_source_for_show_with(
 
 fn expand_includes_with<F>(
     source: &str,
-    source_name: &str,
+    _source_name: &str,
     stack: &mut Vec<String>,
     resolver: &mut F,
 ) -> Result<Vec<ExpandedLine>>
@@ -233,8 +221,6 @@ where
             None => {
                 out.push(ExpandedLine {
                     text: line.to_string(),
-                    source: source_name.to_string(),
-                    line_no: idx + 1,
                 });
                 continue;
             }
@@ -285,21 +271,6 @@ fn expanded_to_string(lines: &[ExpandedLine]) -> String {
     for line in lines {
         out.push_str(&line.text);
         out.push('\n');
-    }
-    out
-}
-
-fn effective_rule_sources(lines: &[ExpandedLine]) -> Vec<RuleSource> {
-    let mut out = Vec::new();
-    for line in lines {
-        let trimmed = line.text.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('%') {
-            continue;
-        }
-        out.push(RuleSource {
-            source: line.source.clone(),
-            line: line.line_no,
-        });
     }
     out
 }
@@ -389,32 +360,6 @@ mod tests {
         .expect("builtin include should expand");
         let joined = super::expanded_to_string(&expanded);
         assert_eq!(joined, "/bin ro\n/tmp rw\n");
-    }
-
-    #[test]
-    fn effective_rule_sources_track_include_origin() {
-        let mut includes = BTreeMap::new();
-        includes.insert("base".to_string(), "/etc ro\n".to_string());
-        let mut resolver = |name: &str| {
-            Ok(includes.get(name).cloned().map(|content| IncludedSource {
-                source_name: "base.profile".to_string(),
-                content,
-            }))
-        };
-        let mut stack = Vec::new();
-        let expanded = expand_includes_with(
-            "%include base\n/tmp rw\n",
-            "root.profile",
-            &mut stack,
-            &mut resolver,
-        )
-        .expect("expand");
-        let sources = super::effective_rule_sources(&expanded);
-        assert_eq!(sources.len(), 2);
-        assert_eq!(sources[0].source, "base.profile");
-        assert_eq!(sources[0].line, 1);
-        assert_eq!(sources[1].source, "root.profile");
-        assert_eq!(sources[1].line, 2);
     }
 
     #[test]

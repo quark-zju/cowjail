@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use twox_hash::XxHash64;
 
 use crate::cli;
-use crate::profile_loader::{self, RuleSource};
+use crate::profile_loader;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JailLayout {
@@ -21,7 +21,6 @@ pub(crate) struct JailPaths {
     pub(crate) state_dir: PathBuf,
     pub(crate) runtime_dir: PathBuf,
     pub(crate) profile_path: PathBuf,
-    pub(crate) profile_sources_path: PathBuf,
     pub(crate) ipcns_path: PathBuf,
     pub(crate) mntns_path: PathBuf,
 }
@@ -38,7 +37,6 @@ pub(crate) struct ResolvedJail {
     pub(crate) generated: bool,
     pub(crate) paths: JailPaths,
     pub(crate) normalized_profile: String,
-    pub(crate) normalized_rule_sources: Option<Vec<RuleSource>>,
 }
 
 pub(crate) fn current_pwd() -> Result<PathBuf> {
@@ -106,7 +104,6 @@ pub(crate) fn jail_paths_in(layout: &JailLayout, name: &str) -> JailPaths {
     JailPaths {
         name: name.to_string(),
         profile_path: state_dir.join("profile"),
-        profile_sources_path: state_dir.join("profile.sources"),
         ipcns_path: runtime_dir.join("ipcns"),
         mntns_path: runtime_dir.join("mntns"),
         state_dir,
@@ -186,13 +183,11 @@ fn resolve_named(
                 bail!("existing jail '{name}' is bound to a different profile");
             }
         }
-        let normalized_rule_sources = read_rule_sources(&paths.profile_sources_path)?;
         return Ok(ResolvedJail {
             name: name.to_string(),
             generated: false,
             paths,
             normalized_profile,
-            normalized_rule_sources,
         });
     }
 
@@ -206,14 +201,12 @@ fn resolve_named(
     materialize_jail(
         &paths,
         &loaded.normalized_source,
-        Some(&loaded.normalized_rule_sources),
     )?;
     Ok(ResolvedJail {
         name: name.to_string(),
         generated: false,
         paths,
         normalized_profile: loaded.normalized_source,
-        normalized_rule_sources: Some(loaded.normalized_rule_sources),
     })
 }
 
@@ -233,7 +226,6 @@ fn resolve_generated(
         materialize_jail(
             &paths,
             &loaded.normalized_source,
-            Some(&loaded.normalized_rule_sources),
         )?;
     }
     Ok(ResolvedJail {
@@ -241,14 +233,12 @@ fn resolve_generated(
         generated: true,
         paths,
         normalized_profile: loaded.normalized_source,
-        normalized_rule_sources: Some(loaded.normalized_rule_sources),
     })
 }
 
 pub(crate) fn materialize_jail(
     paths: &JailPaths,
     normalized_profile: &str,
-    normalized_rule_sources: Option<&[RuleSource]>,
 ) -> Result<()> {
     fs::create_dir_all(&paths.state_dir).map_err(|err| {
         anyhow::anyhow!(
@@ -264,17 +254,6 @@ pub(crate) fn materialize_jail(
         )
     })?;
     crate::privileges::ensure_owned_by_real_user(&paths.profile_path)?;
-    if let Some(rule_sources) = normalized_rule_sources {
-        let cbor = serde_cbor::to_vec(&rule_sources.to_vec())
-            .map_err(|err| anyhow::anyhow!("failed to encode profile sources CBOR: {err}"))?;
-        fs::write(&paths.profile_sources_path, cbor).map_err(|err| {
-            anyhow::anyhow!(
-                "failed to write jail profile sources file {}: {err}",
-                paths.profile_sources_path.display()
-            )
-        })?;
-        crate::privileges::ensure_owned_by_real_user(&paths.profile_sources_path)?;
-    }
     Ok(())
 }
 
@@ -327,7 +306,6 @@ fn remove_known_state_artifacts(paths: &JailPaths) -> Result<()> {
     }
 
     crate::privileges::remove_file_if_exists_with_owner_fix(&paths.state_dir, &paths.profile_path)?;
-    crate::privileges::remove_file_if_exists_with_owner_fix(&paths.state_dir, &paths.profile_sources_path)?;
     match fs::remove_dir(&paths.state_dir) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -357,32 +335,12 @@ fn list_unknown_state_entries(paths: &JailPaths) -> Result<Vec<String>> {
             unknown.push(format!("{:?}", name));
             continue;
         };
-        if !matches!(name, "profile" | "profile.sources") {
+        if !matches!(name, "profile") {
             unknown.push(name.to_string());
         }
     }
     unknown.sort();
     Ok(unknown)
-}
-
-fn read_rule_sources(path: &Path) -> Result<Option<Vec<RuleSource>>> {
-    let data = match fs::read(path) {
-        Ok(data) => data,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(anyhow::anyhow!(
-                "failed to read jail profile sources file {}: {err}",
-                path.display()
-            ));
-        }
-    };
-    let parsed = serde_cbor::from_slice::<Vec<RuleSource>>(&data).map_err(|err| {
-        anyhow::anyhow!(
-            "failed to parse jail profile sources file {}: {err}",
-            path.display()
-        )
-    })?;
-    Ok(Some(parsed))
 }
 
 
