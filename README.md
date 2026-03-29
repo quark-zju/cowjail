@@ -72,12 +72,12 @@ Changes are designed to survive reboots. But it's still recommended to flush ear
 
 The built-in `default` profile is tuned for coding-agent workflows:
 
-- current workspace (`.`): `cow`
-- broad user state trees like `~/.config`, `~/.cache`, `~/.local`: `cow`
-- agent-specific directories like `~/.codex`, `~/.claude`, `~/.agents`: `rw`
-- `/tmp`: `rw`
+- writes in the current workspace are isolated first and only reach the host when you `flush`
+- writes under broad user state trees like `~/.config`, `~/.cache`, `~/.local` are also isolated first
+- writes under agent-specific directories like `~/.codex`, `~/.claude`, `~/.agents` go directly to the host
+- writes under `/tmp` go directly to the host
 
-So the default behavior is: keep normal project edits and broad home-directory writes isolated first, but still allow direct writes for common agent state and temp-file workflows.
+So the default behavior is: keep project edits and most home-directory state changes reviewable first, while still allowing direct writes for common agent state and temp-file workflows.
 
 ### Custom profile
 
