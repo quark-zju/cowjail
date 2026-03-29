@@ -155,6 +155,9 @@ impl CowFs {
         if self.is_hard_blocked_runtime_path(path) {
             return Some(EACCES);
         }
+        if self.git_rw_filter.is_exact_git_dir_path(path) {
+            return Some(EACCES);
+        }
         if self.git_rw_filter.is_git_metadata_path(path)
             && !requester_pid.is_some_and(|pid| {
                 self.git_rw_filter
@@ -217,6 +220,9 @@ impl CowFs {
     }
 
     fn write_mode_for_pid(&self, path: &Path, requester_pid: Option<u32>) -> WriteMode {
+        if self.git_rw_filter.is_exact_git_dir_path(path) {
+            return WriteMode::Forbidden;
+        }
         if self.git_rw_filter.is_git_metadata_path(path) {
             return if requester_pid.is_some_and(|pid| {
                 self.git_rw_filter
@@ -1273,6 +1279,19 @@ mod tests {
         let fs = test_fs(&profile_src);
         assert_eq!(fs.access_errno(&repo.join(".git/config")), Some(EACCES));
         assert_eq!(fs.mutation_errno(&repo.join(".git/config")), Some(EACCES));
+    }
+
+    #[test]
+    fn exact_git_dir_path_is_not_mutable() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+        fs::write(repo.join(".git/config"), b"[core]\n").expect("write config");
+
+        let profile_src = format!("{} git-rw\n", dir.path().display());
+        let fs = test_fs(&profile_src);
+        assert_eq!(fs.mutation_errno(&repo.join(".git")), Some(EACCES));
+        assert_eq!(fs.write_mode(&repo.join(".git")), WriteMode::Forbidden);
     }
 
     #[test]

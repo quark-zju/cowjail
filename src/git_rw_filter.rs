@@ -45,6 +45,10 @@ impl GitRwFilter {
         })
     }
 
+    pub(crate) fn is_exact_git_dir_path(&self, path: &Path) -> bool {
+        path.file_name() == Some(OsStr::new(".git"))
+    }
+
     pub(crate) fn repo_root_for(&self, path: &Path) -> Option<PathBuf> {
         let mut current = if path.is_dir() {
             path.to_path_buf()
@@ -158,28 +162,8 @@ impl GitRwFilter {
             return false;
         }
 
-        let cmdline = match fs::read(format!("/proc/{pid}/cmdline")) {
-            Ok(data) => data,
-            Err(err) => {
-                debug!("git-rw: deny pid={pid}: read /proc/{pid}/cmdline failed: {err}");
-                return false;
-            }
-        };
-        let Some(subcommand) = first_git_subcommand(&cmdline) else {
-            debug!("git-rw: deny pid={pid}: no git subcommand found");
-            return false;
-        };
-        let allowed = matches!(
-            subcommand,
-            "commit" | "status" | "add" | "rm" | "revert" | "log"
-        );
-        debug!(
-            "git-rw: pid={} subcommand={} allowed={}",
-            pid,
-            subcommand,
-            allowed
-        );
-        allowed
+        debug!("git-rw: allow pid={pid}: exe path matches trusted git");
+        true
     }
 
     fn fill_repo_root_cache(&self, visited: &[PathBuf], repo_root: Option<PathBuf>) {
@@ -245,58 +229,10 @@ fn strip_mount_root_prefix(path: PathBuf, mount_root: Option<&Path>) -> PathBuf 
     }
 }
 
-fn first_git_subcommand(cmdline: &[u8]) -> Option<&str> {
-    let argv: Vec<&[u8]> = cmdline.split(|b| *b == 0).filter(|part| !part.is_empty()).collect();
-    if argv.is_empty() {
-        return None;
-    }
-
-    let mut idx = 1usize;
-    while idx < argv.len() {
-        let arg = std::str::from_utf8(argv[idx]).ok()?;
-        if arg == "--" {
-            return None;
-        }
-        if takes_value(arg) {
-            idx += 2;
-            continue;
-        }
-        if is_option_with_inline_value(arg) || arg.starts_with('-') {
-            idx += 1;
-            continue;
-        }
-        return Some(arg);
-    }
-    None
-}
-
-fn takes_value(arg: &str) -> bool {
-    matches!(arg, "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env")
-}
-
-fn is_option_with_inline_value(arg: &str) -> bool {
-    arg.starts_with("--git-dir=")
-        || arg.starts_with("--work-tree=")
-        || arg.starts_with("--namespace=")
-        || arg.starts_with("--config-env=")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn first_git_subcommand_skips_common_global_options() {
-        let cmdline = b"git\0-C\0/tmp/repo\0-c\0a=b\0status\0";
-        assert_eq!(first_git_subcommand(cmdline), Some("status"));
-    }
-
-    #[test]
-    fn first_git_subcommand_handles_inline_options() {
-        let cmdline = b"git\0--git-dir=/tmp/repo/.git\0log\0";
-        assert_eq!(first_git_subcommand(cmdline), Some("log"));
-    }
 
     #[test]
     fn detects_plain_git_dir_repo_layout() {
@@ -335,6 +271,8 @@ mod tests {
     #[test]
     fn marks_dot_git_paths_as_metadata() {
         let filter = GitRwFilter::new();
+        assert!(filter.is_exact_git_dir_path(Path::new("/tmp/repo/.git")));
+        assert!(!filter.is_exact_git_dir_path(Path::new("/tmp/repo/.git/config")));
         assert!(filter.is_git_metadata_path(Path::new("/tmp/repo/.git")));
         assert!(filter.is_git_metadata_path(Path::new("/tmp/repo/.git/config")));
         assert!(!filter.is_git_metadata_path(Path::new("/tmp/repo/src/main.rs")));
