@@ -15,6 +15,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 /lib ro
 /lib64 ro
 /etc ro
+/dev/full rw
 /dev/null rw
 /dev/ptmx rw
 /dev/pts rw
@@ -24,6 +25,7 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 /dev/stdout rw
 /dev/tty rw
 /dev/urandom ro
+/dev/zero rw
 ~/.config/cowjail deny
 ~/.local/state/cowjail deny
 ~/bin ro
