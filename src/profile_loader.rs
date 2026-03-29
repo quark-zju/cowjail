@@ -136,6 +136,41 @@ fn expand_includes(source: &str, source_name: &str, home: &Path) -> Result<Vec<E
     expand_includes_with(source, source_name, &mut stack, &mut resolver)
 }
 
+/// Parse a `%include <name>` directive from a profile line.
+///
+/// Returns:
+/// - `Ok(None)` – the line is not a `%` directive at all, or it is a `%set` directive
+/// - `Ok(Some(name))` – the line is a well-formed `%include name`
+/// - `Err(...)` – the line is a malformed or unknown `%` directive
+fn parse_include_directive(line: &str, line_no: usize) -> Result<Option<&str>> {
+    let trimmed = line.trim();
+    let Some(body) = trimmed.strip_prefix('%') else {
+        return Ok(None);
+    };
+    let directive = body.trim();
+    // %set directives are not include directives
+    if directive.starts_with("set ") {
+        return Ok(None);
+    }
+    let mut parts = directive.split_whitespace();
+    let keyword = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("line {line_no} has empty profile directive"))?;
+    if keyword != "include" {
+        anyhow::bail!("line {line_no} has unknown profile directive");
+    }
+    let name = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("line {line_no} has invalid include directive"))?;
+    if parts.next().is_some() {
+        anyhow::bail!("line {line_no} has invalid include directive");
+    }
+    if !crate::profile_builtin::is_builtin_name(name) {
+        jail::validate_explicit_name(name).context("invalid include profile name")?;
+    }
+    Ok(Some(name))
+}
+
 fn render_profile_source_for_show_with(
     source: &str,
     source_name: &str,
@@ -149,30 +184,10 @@ fn render_profile_source_for_show_with(
         out.push_str(line);
         out.push('\n');
 
-        let trimmed = line.trim();
-        let Some(body) = trimmed.strip_prefix('%') else {
-            continue;
+        let name = match parse_include_directive(line, idx + 1)? {
+            Some(name) => name,
+            None => continue,
         };
-        let directive = body.trim();
-        if !directive.starts_with("include") {
-            continue;
-        }
-        let mut parts = directive.split_whitespace();
-        let Some(keyword) = parts.next() else {
-            anyhow::bail!("line {} has empty profile directive", idx + 1);
-        };
-        if keyword != "include" {
-            anyhow::bail!("line {} has unknown profile directive", idx + 1);
-        }
-        let Some(name) = parts.next() else {
-            anyhow::bail!("line {} has invalid include directive", idx + 1);
-        };
-        if parts.next().is_some() {
-            anyhow::bail!("line {} has invalid include directive", idx + 1);
-        }
-        if !crate::profile_builtin::is_builtin_name(name) {
-            jail::validate_explicit_name(name).context("invalid include profile name")?;
-        }
         if stack.iter().any(|in_stack| in_stack == name) {
             out.push_str(&indent);
             out.push_str("# skipped cyclic include ");
@@ -214,43 +229,17 @@ where
 {
     let mut out = Vec::new();
     for (idx, line) in source.lines().enumerate() {
-        let trimmed = line.trim();
-        let Some(body) = trimmed.strip_prefix('%') else {
-            out.push(ExpandedLine {
-                text: line.to_string(),
-                source: source_name.to_string(),
-                line_no: idx + 1,
-            });
-            continue;
+        let name = match parse_include_directive(line, idx + 1)? {
+            None => {
+                out.push(ExpandedLine {
+                    text: line.to_string(),
+                    source: source_name.to_string(),
+                    line_no: idx + 1,
+                });
+                continue;
+            }
+            Some(name) => name,
         };
-        let directive = body.trim();
-        if directive.starts_with("set ") {
-            out.push(ExpandedLine {
-                text: line.to_string(),
-                source: source_name.to_string(),
-                line_no: idx + 1,
-            });
-            continue;
-        }
-        if !directive.starts_with("include") {
-            anyhow::bail!("line {} has unknown profile directive", idx + 1);
-        }
-        let mut parts = directive.split_whitespace();
-        let Some(keyword) = parts.next() else {
-            anyhow::bail!("line {} has empty profile directive", idx + 1);
-        };
-        if keyword != "include" {
-            anyhow::bail!("line {} has unknown profile directive", idx + 1);
-        }
-        let Some(name) = parts.next() else {
-            anyhow::bail!("line {} has invalid include directive", idx + 1);
-        };
-        if parts.next().is_some() {
-            anyhow::bail!("line {} has invalid include directive", idx + 1);
-        }
-        if !crate::profile_builtin::is_builtin_name(name) {
-            jail::validate_explicit_name(name).context("invalid include profile name")?;
-        }
         if stack.iter().any(|in_stack| in_stack == name) {
             continue;
         }
