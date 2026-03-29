@@ -160,7 +160,10 @@ fn enter_pid_namespace_worker_or_reap() -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("fork for pidns worker failed");
     }
     if worker_pid > 0 {
-        close_fds_best_effort_from(0);
+        // Keep stdio open in the pidns reaper. Closing fd 0/1/2 here makes any
+        // later Rust diagnostic path abort immediately if it tries to write to
+        // stderr, which obscures the real failure signal during `run`.
+        close_fds_best_effort_from(3);
         if let Err(_err) = privileges::drop_to_real_user() {
             unsafe { libc::_exit(1) };
         }

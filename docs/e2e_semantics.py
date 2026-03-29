@@ -95,8 +95,10 @@ def run(
         stderr=subprocess.PIPE,
     )
     if check and completed.returncode != 0:
-        print(completed.stdout, end="")
-        print(completed.stderr, end="", file=sys.stderr)
+        if completed.stdout:
+            print(completed.stdout, end="")
+        if completed.stderr:
+            print(completed.stderr, end="", file=sys.stderr)
         fail(f"command failed with exit code {completed.returncode}: {shlex.join(cmd)}")
     return completed
 
