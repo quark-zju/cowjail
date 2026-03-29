@@ -539,7 +539,12 @@ pub(crate) fn process_has_mount(pid: u32, mountpoint: &Path) -> Result<bool> {
     let path = PathBuf::from(format!("/proc/{pid}/mountinfo"));
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                || err.kind() == std::io::ErrorKind::InvalidInput =>
+        {
+            return Ok(false);
+        }
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("failed to read mountinfo from {}", path.display()));
