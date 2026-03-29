@@ -41,6 +41,7 @@ pub(crate) fn build_mount_plan_with_sources(
         let under_dev = rule.path.starts_with("/dev");
         let under_proc = rule.path.starts_with("/proc");
         let under_sys = rule.path.starts_with("/sys");
+        let exact_tmp = rule.path == Path::new("/tmp");
         let loc = rule_loc(rule.line_no, sources);
 
         if under_dev && has_glob {
@@ -100,6 +101,14 @@ pub(crate) fn build_mount_plan_with_sources(
                     read_only,
                 });
             }
+        }
+
+        if exact_tmp && matches!(rule.action, RuleAction::ReadOnly | RuleAction::Passthrough) {
+            let read_only = rule.action == RuleAction::ReadOnly;
+            plan.push(MountPlanEntry::Bind {
+                path: rule.path.clone(),
+                read_only,
+            });
         }
     }
 
@@ -204,6 +213,40 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("conflicts with mounted root /dev/pts")
+        );
+    }
+
+    #[test]
+    fn tmp_ro_rule_becomes_bind_mount() {
+        let plan = build_mount_plan_with_sources("/tmp ro\n", None).expect("plan");
+        assert_eq!(
+            plan,
+            vec![MountPlanEntry::Bind {
+                path: PathBuf::from("/tmp"),
+                read_only: true
+            }]
+        );
+    }
+
+    #[test]
+    fn tmp_rw_rule_becomes_bind_mount() {
+        let plan = build_mount_plan_with_sources("/tmp rw\n", None).expect("plan");
+        assert_eq!(
+            plan,
+            vec![MountPlanEntry::Bind {
+                path: PathBuf::from("/tmp"),
+                read_only: false
+            }]
+        );
+    }
+
+    #[test]
+    fn tmp_bind_root_rejects_descendant_rules() {
+        let err = build_mount_plan_with_sources("/tmp rw\n/tmp/cache ro\n", None)
+            .expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains("conflicts with mounted root /tmp")
         );
     }
 
