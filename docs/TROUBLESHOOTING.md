@@ -38,6 +38,37 @@ COWJAIL_FUSE_LOG=debug cowjail run -v --name <name> -- <command>
 
 Accepted levels follow `env_logger` filter syntax (for example: `error`, `warn`, `info`, `debug`, `trace`).
 
+## `strace` debugging
+
+When debugging a jailed command with `strace`, place `strace` after `cowjail run --`.
+
+Correct:
+
+```bash
+cowjail run -- strace -ff -s 256 -yy -o /tmp/cowjail.strace <command>
+```
+
+Avoid this form:
+
+```bash
+strace cowjail run -- <command>
+```
+
+Why:
+
+- `cowjail run` relies on the binary's setuid-root behavior for mount/chroot setup.
+- Tracing the `cowjail` binary itself changes exec/setuid behavior, so you are no longer observing the normal privileged path.
+- In practice this can make failures look unrelated to the real problem because the jail setup is no longer running under the same privilege model.
+
+For runtime crashes involving native modules or `mmap`-heavy tools, useful syscall filters include:
+
+```bash
+cowjail run -- strace -ff -s 256 -yy \
+  -e trace=openat,statx,readlink,mmap,mprotect,munmap,close \
+  -o /tmp/cowjail.strace \
+  <command>
+```
+
 ## `_suid` and setuid behavior
 
 ### `_suid` appears successful but privileged operations still fail
