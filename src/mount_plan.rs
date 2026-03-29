@@ -1,6 +1,7 @@
 use crate::profile::{self, RuleAction};
 use crate::profile_loader::RuleSource;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use globset::GlobBuilder;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
@@ -104,6 +105,7 @@ pub(crate) fn build_mount_plan_with_sources(
         }
 
         if exact_tmp && matches!(rule.action, RuleAction::ReadOnly | RuleAction::Passthrough) {
+            validate_exact_tmp_bind_rule(rule, &rules, sources)?;
             let read_only = rule.action == RuleAction::ReadOnly;
             plan.push(MountPlanEntry::Bind {
                 path: rule.path.clone(),
@@ -143,6 +145,45 @@ fn validate_bind_conflicts(
         }
     }
     Ok(())
+}
+
+fn validate_exact_tmp_bind_rule(
+    current: &RuleLine,
+    rules: &[RuleLine],
+    sources: Option<&[RuleSource]>,
+) -> Result<()> {
+    for rule in rules {
+        if std::ptr::eq(rule, current) {
+            continue;
+        }
+        if rule_mentions_or_matches_tmp(rule)? {
+            let current_loc = rule_loc(current.line_no, sources);
+            let other_loc = rule_loc(rule.line_no, sources);
+            bail!(
+                "{current_loc}: exact /tmp ro/rw bind mount requires /tmp to be mentioned only once; conflicting rule at {other_loc}: {}",
+                rule.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn rule_mentions_or_matches_tmp(rule: &RuleLine) -> Result<bool> {
+    if rule.path == Path::new("/tmp") || rule.path.starts_with("/tmp/") {
+        return Ok(true);
+    }
+    let pattern = rule
+        .path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("profile path is not valid UTF-8"))?;
+    if !has_glob_syntax(pattern) {
+        return Ok(false);
+    }
+    let glob = GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .with_context(|| format!("invalid glob pattern in mount plan: {pattern}"))?;
+    Ok(glob.compile_matcher().is_match("/tmp"))
 }
 
 fn has_glob_syntax(value: &str) -> bool {
@@ -244,10 +285,19 @@ mod tests {
     fn tmp_bind_root_rejects_descendant_rules() {
         let err = build_mount_plan_with_sources("/tmp rw\n/tmp/cache ro\n", None)
             .expect_err("must fail");
-        assert!(
-            err.to_string()
-                .contains("conflicts with mounted root /tmp")
-        );
+        assert!(err.to_string().contains("mentioned only once"));
+    }
+
+    #[test]
+    fn tmp_bind_rejects_duplicate_exact_tmp_rules() {
+        let err = build_mount_plan_with_sources("/tmp rw\n/tmp ro\n", None).expect_err("must fail");
+        assert!(err.to_string().contains("mentioned only once"));
+    }
+
+    #[test]
+    fn tmp_bind_rejects_other_rule_that_matches_tmp() {
+        let err = build_mount_plan_with_sources("/** ro\n/tmp rw\n", None).expect_err("must fail");
+        assert!(err.to_string().contains("mentioned only once"));
     }
 
     #[test]
