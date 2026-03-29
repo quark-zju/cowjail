@@ -95,7 +95,7 @@ These low-level commands are intentionally separate from normal workflow docs.
 
 - `run` does not persist a separate mount namespace handle for jail reuse.
 - `_fuse` mounts a per-jail FUSE view under the runtime directory (`.../mount`).
-- `run` unshares IPC/mount/PID namespaces in the run process before spawn (`unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID)`), then child `pre_exec` applies mount plan + `chroot`; inside pidns, PID 1 forks a worker and stays as a minimal reaper while the worker drops privileges and executes the target command.
+- `run` unshares IPC/mount/PID namespaces in the run process before spawn (`unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID)`), then child `pre_exec` applies mount plan + `pivot_root(".", ".")` into the jail mount; inside pidns, PID 1 forks a worker and stays as a minimal reaper while the worker drops privileges and executes the target command.
 - `rm` unmounts runtime FUSE mountpoints and removes known runtime/state artifacts conservatively.
 
 ## Explicit Trade-Offs and Assumptions
@@ -106,10 +106,10 @@ These are intentional design choices, not accidental omissions.
   - `_fuse` mounts, starts background request handling, then drops to real user.
   - On Linux NPTL, credential changes apply process-wide, so worker threads also lose root credentials after the drop.
   - This ordering is accepted, but relies on current Linux threading credential semantics.
-- `chroot` instead of `pivot_root`:
-  - `run` uses `chroot` for simpler setup and compatibility with current flow.
-  - `cowjail` treats this as risk reduction, not a full container boundary.
-  - Privilege drop plus `PR_SET_NO_NEW_PRIVS` are the main post-setup containment controls.
+- `pivot_root` root switch without a separate container runtime:
+  - `run` uses `pivot_root(".", ".")` followed by `umount2(".", MNT_DETACH)` to make the jail mount the real mount-namespace root.
+  - This avoids the kernel's "process is in a chroot" restriction on later user-namespace creation by tools such as `bwrap`.
+  - `cowjail` still treats this as risk reduction, not a full container boundary; privilege drop remains the main post-setup containment control.
 - Userspace COW + record log instead of kernel overlayfs:
   - Primary goal is replayability and auditability of per-operation changes.
   - Profile actions (`deny` and `hide`, in addition to `ro`/`rw`/`cow`) are enforced in one userspace path.

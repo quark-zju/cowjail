@@ -133,7 +133,7 @@ fn command_verbose(cmd: &Command) -> bool {
 
 fn require_priviledge_reason(cmd: &Command) -> Option<&'static str> {
     match cmd {
-        Command::Run(_) => Some("run requires root for chroot and runtime setup"),
+        Command::Run(_) => Some("run requires root for pivot_root and runtime setup"),
         Command::Rm(_) => Some("rm may need root to clean state/runtime artifacts"),
         Command::LowLevelFuse(_) => Some("_fuse requires root euid to mount FUSE daemon"),
         Command::LowLevelSuid(_) => Some("_suid updates binary ownership/mode"),

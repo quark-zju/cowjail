@@ -17,7 +17,7 @@ user_allow_other
 
 ### `failed to spawn child command in jail: Invalid argument (os error 22)`
 
-This is often a follow-on symptom when mount/chroot access failed earlier.
+This is often a follow-on symptom when mount/root-switch access failed earlier.
 
 Run with verbose logging to inspect the step that failed:
 
@@ -56,7 +56,7 @@ strace cowjail run -- <command>
 
 Why:
 
-- `cowjail run` relies on the binary's setuid-root behavior for mount/chroot setup.
+- `cowjail run` relies on the binary's setuid-root behavior for mount and root-switch setup.
 - Tracing the `cowjail` binary itself changes exec/setuid behavior, so you are no longer observing the normal privileged path.
 - In practice this can make failures look unrelated to the real problem because the jail setup is no longer running under the same privilege model.
 

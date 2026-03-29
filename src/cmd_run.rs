@@ -59,7 +59,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     )?;
 
     crate::vlog!(
-        "run: preparing child chroot to {} then chdir to {}",
+        "run: preparing child pivot_root into {} then chdir to {}",
         runtime.ensured.paths.mount_dir.display(),
         cwd.display()
     );
@@ -69,7 +69,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     )?;
     let status = run_with_log(
         || {
-            run_child_in_chroot(
+            run_child_in_jail(
                 &run,
                 &runtime.ensured.paths.mount_dir,
                 &cwd,
@@ -83,15 +83,13 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
     Ok(exit_code_from_status(status))
 }
 
-fn run_child_in_chroot(
+fn run_child_in_jail(
     run: &RunCommand,
     mountpoint: &Path,
     old_cwd: &Path,
     mount_plan: Vec<MountPlanEntry>,
 ) -> Result<std::process::ExitStatus> {
     let mount_root = mountpoint.to_path_buf();
-    let mount_c = CString::new(mountpoint.as_os_str().as_encoded_bytes())
-        .context("mount path contains interior NUL byte")?;
     let cwd_c = CString::new(old_cwd.as_os_str().as_encoded_bytes())
         .context("cwd contains interior NUL byte")?;
 
@@ -106,16 +104,12 @@ fn run_child_in_chroot(
                 return Err(std::io::Error::other(err.to_string()));
             }
             // FUSE mount access is keyed by fsuid/fsgid, not effective uid.
-            // Align fs creds with the real user before chroot/chdir so kernel-side
+            // Align fs creds with the real user before pivot_root/chdir so kernel-side
             // FUSE permission checks do not reject the mount root with EACCES.
             libc::setfsgid(libc::getgid());
             libc::setfsuid(libc::getuid());
-            if libc::chroot(mount_c.as_ptr()) != 0 {
-                let err = std::io::Error::last_os_error();
-                return Err(std::io::Error::new(
-                    err.kind(),
-                    format!("chroot failed: {err}"),
-                ));
+            if let Err(err) = pivot_into_mount_root(&mount_root) {
+                return Err(std::io::Error::other(err.to_string()));
             }
             if libc::chdir(cwd_c.as_ptr()) != 0 {
                 let err = std::io::Error::last_os_error();
@@ -238,6 +232,30 @@ fn set_process_name(name: &CStr) -> Result<()> {
     let rc = unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NAME) failed");
+    }
+    Ok(())
+}
+
+fn pivot_into_mount_root(mount_root: &Path) -> Result<()> {
+    let mount_c = CString::new(mount_root.as_os_str().as_encoded_bytes())
+        .context("mount path contains interior NUL byte")?;
+    let dot = CString::new(".").expect("literal '.' cannot contain NUL");
+    let root = CString::new("/").expect("literal '/' cannot contain NUL");
+
+    if unsafe { libc::chdir(mount_c.as_ptr()) } != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(err).context("chdir into mount root failed before pivot_root");
+    }
+    let rc = unsafe { libc::syscall(libc::SYS_pivot_root, dot.as_ptr(), dot.as_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("pivot_root('.', '.') failed");
+    }
+    if unsafe { libc::umount2(dot.as_ptr(), libc::MNT_DETACH) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("umount2('.', MNT_DETACH) failed after pivot_root");
+    }
+    if unsafe { libc::chdir(root.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("chdir('/') failed after pivot_root");
     }
     Ok(())
 }

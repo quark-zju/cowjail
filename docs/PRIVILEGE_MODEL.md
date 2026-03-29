@@ -49,7 +49,7 @@ For `cowjail run`, the child setup path is:
 
 1. unshare IPC namespace (`unshare(CLONE_NEWIPC)`)
 2. adjust fs credentials (`setfsuid/setfsgid`) for FUSE access checks
-3. `chroot` into jail mount and `chdir`
+3. `pivot_root(".", ".")` into jail mount, detach old root, and `chdir`
 4. drop to real user via `privileges::drop_to_real_user()`
 
 After step 4, the command executes as the invoking real user.
@@ -75,7 +75,7 @@ This sets real/effective/saved IDs explicitly and closes obvious privilege-regai
 
 `privileges::with_temporary_real_root` exists for narrow internal cases (currently `_fuse` mount path with `allow_other` handling).
 
-`allow_other` is primarily a `chroot` compatibility requirement: `chroot` is performed while still root, and without `allow_other` a FUSE mount is generally only accessible to the mounting user, which can block root-side `chroot`/path traversal in the `run` setup flow.
+`allow_other` is primarily a root-switch compatibility requirement: the jail root transition is performed while still root, and without `allow_other` a FUSE mount is generally only accessible to the mounting user, which can block root-side path traversal into the jail mount during `run` setup.
 
 Exposure is constrained by runtime path placement and ownership checks: mounts live under `${XDG_RUNTIME_DIR}/cowjail` (or `/run/user/<uid>/cowjail` fallback), so other users are blocked by the per-user runtime directory boundary rather than by omitting `allow_other`.
 
