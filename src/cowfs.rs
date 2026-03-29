@@ -290,6 +290,23 @@ impl CowFs {
         }
     }
 
+    fn ensure_openable_node(&self, path: &Path) -> Result<(), i32> {
+        match self.effective_node(path)? {
+            None => Err(ENOENT),
+            Some(NodeRef::Host(metadata)) => {
+                if metadata.file_type().is_dir() {
+                    Err(EISDIR)
+                } else {
+                    Ok(())
+                }
+            }
+            Some(NodeRef::Overlay(OverlayNode::Deleted)) => Err(ENOENT),
+            Some(NodeRef::Overlay(OverlayNode::Dir { .. })) => Err(EISDIR),
+            Some(NodeRef::Overlay(OverlayNode::Regular { .. }))
+            | Some(NodeRef::Overlay(OverlayNode::Symlink { .. })) => Ok(()),
+        }
+    }
+
     fn list_children(
         &mut self,
         parent: &Path,
@@ -391,6 +408,11 @@ impl CowFs {
     #[cfg(test)]
     fn host_attr_for_handle_for_test(&mut self, path: &Path, fh: u64) -> Result<FileAttr, i32> {
         self.host_attr_for_handle(path, fh)
+    }
+
+    #[cfg(test)]
+    fn ensure_openable_node_for_test(&self, path: &Path) -> Result<(), i32> {
+        self.ensure_openable_node(path)
     }
 
     fn append_record(&self, op: &Operation) -> Result<(), i32> {
@@ -1039,6 +1061,10 @@ impl Filesystem for CowFs {
             }
         } else if let Some(errno) = self.access_errno(&path) {
             reply.error(errno);
+            return;
+        }
+        if let Err(code) = self.ensure_openable_node(&path) {
+            reply.error(code);
             return;
         }
         if self.write_mode(&path) == WriteMode::Passthrough {
@@ -2019,6 +2045,38 @@ mod tests {
         assert_eq!(guarded.access_errno(runtime_child), Some(EACCES));
         assert_eq!(guarded.mutation_errno(runtime_root), Some(EACCES));
         assert_eq!(guarded.mutation_errno(runtime_child), Some(EACCES));
+    }
+
+    #[test]
+    fn cow_open_requires_existing_node() {
+        let (_dir, _record_path, fs) = test_fs("/tmp/** cow");
+        let missing = Path::new("/tmp/cowjail-open-missing");
+        assert_eq!(fs.ensure_openable_node_for_test(missing), Err(ENOENT));
+    }
+
+    #[test]
+    fn cow_handle_remains_valid_after_overlay_write() {
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
+        let path = PathBuf::from("/tmp/cowjail-cow-handle-write");
+        fs::write(&path, b"host").expect("seed host file");
+
+        let ino = fs.ensure_ino(&path);
+        let fh = fs.allocate_cow_handle(ino);
+        fs.set_overlay_regular_and_record(&path, b"overlay".to_vec(), 0o644)
+            .expect("replace with overlay");
+
+        assert_eq!(fs.handle_ino(fh), Some(ino));
+        let current = fs.path_for_ino(ino).expect("path for ino");
+        match fs.effective_node(current) {
+            Ok(Some(NodeRef::Overlay(OverlayNode::Regular { data, .. }))) => {
+                assert_eq!(data, b"overlay")
+            }
+            Ok(_) => panic!("expected overlay regular after write"),
+            Err(code) => panic!("effective node failed: {code}"),
+        }
+
+        fs.remove_handle(fh);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
