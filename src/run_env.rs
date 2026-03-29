@@ -1,0 +1,369 @@
+use anyhow::{Context, Result, bail};
+use std::ffi::{CStr, CString};
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::Command as ProcessCommand;
+
+use crate::cli::RunCommand;
+use crate::mount_plan::MountPlanEntry;
+use crate::privileges;
+
+pub(crate) fn set_process_name(name: &CStr) -> Result<()> {
+    let rc = unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NAME) failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn run_child_in_jail(
+    run: &RunCommand,
+    mountpoint: &Path,
+    old_cwd: &Path,
+    mount_plan: Vec<MountPlanEntry>,
+) -> Result<std::process::ExitStatus> {
+    let mount_root = mountpoint.to_path_buf();
+    let cwd_c = CString::new(old_cwd.as_os_str().as_encoded_bytes())
+        .context("cwd contains interior NUL byte")?;
+
+    let mut cmd = ProcessCommand::new(&run.program);
+    cmd.args(&run.args);
+    unsafe {
+        cmd.pre_exec(move || {
+            if let Err(err) = make_mounts_private() {
+                return Err(std::io::Error::other(err.to_string()));
+            }
+            if let Err(err) = apply_mount_plan_in_namespace(&mount_root, &mount_plan) {
+                return Err(std::io::Error::other(err.to_string()));
+            }
+            // FUSE mount access is keyed by fsuid/fsgid, not effective uid.
+            // Align fs creds with the real user before pivot_root/chdir so kernel-side
+            // FUSE permission checks do not reject the mount root with EACCES.
+            libc::setfsgid(libc::getgid());
+            libc::setfsuid(libc::getuid());
+            if let Err(err) = pivot_into_mount_root(&mount_root) {
+                return Err(std::io::Error::other(err.to_string()));
+            }
+            if libc::chdir(cwd_c.as_ptr()) != 0 {
+                let err = std::io::Error::last_os_error();
+                let not_found =
+                    matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR | libc::EACCES));
+                if not_found {
+                    let root = CString::new("/").expect("literal '/' cannot contain NUL");
+                    if libc::chdir(root.as_ptr()) != 0 {
+                        let fallback_err = std::io::Error::last_os_error();
+                        return Err(std::io::Error::new(
+                            fallback_err.kind(),
+                            format!(
+                                "chdir to cwd failed ({err}); fallback chdir('/') also failed: {fallback_err}"
+                            ),
+                        ));
+                    }
+                } else {
+                    return Err(std::io::Error::new(
+                        err.kind(),
+                        format!("chdir failed: {err}"),
+                    ));
+                }
+            }
+            // Child is already PID 1 in the new pid namespace; fork a worker so
+            // PID 1 can remain as a minimal child reaper.
+            if let Err(err) = enter_pid_namespace_worker_or_reap() {
+                return Err(std::io::Error::other(err.to_string()));
+            }
+            if let Err(err) = privileges::drop_to_real_user() {
+                return Err(std::io::Error::other(err.to_string()));
+            }
+            // Do not close inherited high-numbered fds here. std::process keeps
+            // an internal error-report pipe open across pre_exec so the child
+            // can report execve failures back to the parent. Closing it here
+            // turns normal exec errors into an abort inside the Rust stdlib.
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .context("failed to spawn child command in jail")?;
+    crate::run_with_log(privileges::drop_root_euid_if_needed, || {
+        "drop outer run euid after child spawn".to_string()
+    })?;
+    child.wait().context("failed waiting for child command")
+}
+
+pub(crate) fn setup_run_namespaces() -> Result<()> {
+    let flags = libc::CLONE_NEWIPC | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+    let rc = unsafe { libc::unshare(flags) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("unshare(CLONE_NEWIPC|CLONE_NEWNS|CLONE_NEWPID) failed");
+    }
+    Ok(())
+}
+
+fn enter_pid_namespace_worker_or_reap() -> Result<()> {
+    // We are PID 1 in the new namespace. Keep this process as a minimal init
+    // that reaps all children and exits with the worker's status.
+    let worker_pid = unsafe { libc::fork() };
+    if worker_pid < 0 {
+        return Err(std::io::Error::last_os_error()).context("fork for pidns worker failed");
+    }
+    if worker_pid > 0 {
+        // Keep stdio open in the pidns reaper. Closing fd 0/1/2 here makes any
+        // later Rust diagnostic path abort immediately if it tries to write to
+        // stderr, which obscures the real failure signal during `run`.
+        if let Err(_err) = privileges::drop_to_real_user() {
+            unsafe { libc::_exit(1) };
+        }
+        let _ = set_process_name(c"leash-init");
+        run_pidns_init_reaper(worker_pid);
+    }
+    Ok(())
+}
+
+fn run_pidns_init_reaper(worker_pid: libc::pid_t) -> ! {
+    let mut worker_status: Option<libc::c_int> = None;
+    loop {
+        let mut status: libc::c_int = 0;
+        let rc = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => break,
+                _ => unsafe { libc::_exit(1) },
+            }
+        }
+        if rc == worker_pid {
+            worker_status = Some(status);
+        }
+    }
+    if let Some(status) = worker_status {
+        exit_from_wait_status(status);
+    }
+    unsafe { libc::_exit(1) }
+}
+
+fn exit_from_wait_status(status: libc::c_int) -> ! {
+    if libc::WIFEXITED(status) {
+        unsafe { libc::_exit(libc::WEXITSTATUS(status)) };
+    }
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        unsafe { libc::_exit(128 + sig) };
+    }
+    unsafe { libc::_exit(1) }
+}
+
+fn apply_mount_plan_in_namespace(mount_root: &Path, mount_plan: &[MountPlanEntry]) -> Result<()> {
+    if mount_plan.is_empty() {
+        return Ok(());
+    }
+    for entry in mount_plan {
+        apply_one_mount_in_namespace(mount_root, entry)?;
+    }
+    Ok(())
+}
+
+fn apply_one_mount_in_namespace(mount_root: &Path, entry: &MountPlanEntry) -> Result<()> {
+    let (path, read_only, procfs, sysfs) = match entry {
+        MountPlanEntry::Bind { path, read_only } => (path, *read_only, false, false),
+        MountPlanEntry::Proc { path, read_only } => (path, *read_only, true, false),
+        MountPlanEntry::Sys { path, read_only } => (path, *read_only, false, true),
+    };
+    let rel = path
+        .strip_prefix("/")
+        .with_context(|| format!("mount path must be absolute: {}", path.display()))?;
+    let target = if rel.as_os_str().is_empty() {
+        mount_root.to_path_buf()
+    } else {
+        mount_root.join(rel)
+    };
+    if procfs {
+        mount_procfs(&target, read_only)?;
+        return Ok(());
+    }
+    if sysfs {
+        mount_sysfs(&target, read_only)?;
+        return Ok(());
+    }
+
+    let src_meta = std::fs::metadata(path).with_context(|| {
+        format!(
+            "bind source does not exist or is inaccessible: {}",
+            path.display()
+        )
+    })?;
+    let dst_meta = std::fs::metadata(&target).with_context(|| {
+        format!(
+            "bind target path does not exist in jail view: {}",
+            target.display()
+        )
+    })?;
+
+    if src_meta.is_dir() != dst_meta.is_dir() {
+        bail!(
+            "bind source/target type mismatch: source={} target={}",
+            path.display(),
+            target.display()
+        );
+    }
+
+    bind_mount(path, &target)?;
+    if read_only {
+        remount_bind_read_only(&target)?;
+    }
+    Ok(())
+}
+
+fn make_mounts_private() -> Result<()> {
+    let root = CString::new("/").expect("literal '/' cannot contain NUL");
+    let rc = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("mount(MS_PRIVATE) failed");
+    }
+    Ok(())
+}
+
+fn bind_mount(source: &Path, target: &Path) -> Result<()> {
+    let src_c = CString::new(source.as_os_str().as_encoded_bytes())
+        .context("bind source path contains interior NUL byte")?;
+    let dst_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("bind target path contains interior NUL byte")?;
+    let rc = unsafe {
+        libc::mount(
+            src_c.as_ptr(),
+            dst_c.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "bind mount failed: {} -> {}",
+                source.display(),
+                target.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+fn remount_bind_read_only(target: &Path) -> Result<()> {
+    let dst_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("bind target path contains interior NUL byte")?;
+    let rc = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            dst_c.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("bind remount read-only failed: {}", target.display()));
+    }
+    Ok(())
+}
+
+fn remount_read_only(target: &Path) -> Result<()> {
+    let dst_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("remount target path contains interior NUL byte")?;
+    let rc = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            dst_c.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REMOUNT | libc::MS_RDONLY) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("remount read-only failed: {}", target.display()));
+    }
+    Ok(())
+}
+
+fn mount_procfs(target: &Path, read_only: bool) -> Result<()> {
+    let target_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("procfs target path contains interior NUL byte")?;
+    let fstype = CString::new("proc").expect("literal has no NUL");
+    let source = CString::new("proc").expect("literal has no NUL");
+    let rc = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target_c.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("mount procfs failed at {}", target.display()));
+    }
+    if read_only {
+        remount_read_only(target)?;
+    }
+    Ok(())
+}
+
+fn mount_sysfs(target: &Path, read_only: bool) -> Result<()> {
+    let target_c = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("sysfs target path contains interior NUL byte")?;
+    let fstype = CString::new("sysfs").expect("literal has no NUL");
+    let source = CString::new("sysfs").expect("literal has no NUL");
+    let rc = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target_c.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("mount sysfs failed at {}", target.display()));
+    }
+    if read_only {
+        remount_read_only(target)?;
+    }
+    Ok(())
+}
+
+fn pivot_into_mount_root(mount_root: &Path) -> Result<()> {
+    let mount_c = CString::new(mount_root.as_os_str().as_encoded_bytes())
+        .context("mount path contains interior NUL byte")?;
+    let dot = CString::new(".").expect("literal '.' cannot contain NUL");
+    let root = CString::new("/").expect("literal '/' cannot contain NUL");
+
+    if unsafe { libc::chdir(mount_c.as_ptr()) } != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(err).context("chdir into mount root failed before pivot_root");
+    }
+    let rc = unsafe { libc::syscall(libc::SYS_pivot_root, dot.as_ptr(), dot.as_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("pivot_root('.', '.') failed");
+    }
+    if unsafe { libc::umount2(dot.as_ptr(), libc::MNT_DETACH) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("umount2('.', MNT_DETACH) failed after pivot_root");
+    }
+    if unsafe { libc::chdir(root.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("chdir('/') failed after pivot_root");
+    }
+    Ok(())
+}

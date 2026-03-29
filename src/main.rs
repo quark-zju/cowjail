@@ -8,15 +8,16 @@ mod cmd_profile;
 mod cmd_run;
 mod cmd_show;
 mod cmd_suid;
-mod leashfs;
 mod git_rw_filter;
 mod jail;
+mod leashfs;
 mod mount_plan;
 mod ns_runtime;
 mod privileges;
 mod profile;
 mod profile_builtin;
 mod profile_loader;
+mod run_env;
 
 use anyhow::{Context, Result};
 use cli::Command;
