@@ -71,12 +71,14 @@ So the default behavior is: keep most of the home directory read-only, allow dir
 
 ### Custom profile
 
-If a tool needs access to another path, edit `default.local` and add a rule there. For example, to allow writes under `~/Downloads`:
+If a tool needs access to another path, edit your `default` profile override directly. For example, to allow writes under `~/Downloads`:
 
 ```bash
-cowjail profile edit default.local
+cowjail profile edit default
 ~/Downloads rw
 ```
+
+The shipped builtin fragments are also inspectable through `cowjail profile show builtin:deny-sensitive`, `builtin:basic`, and `builtin:agents`, but they are read-only.
 
 See [`docs/PROFILE.md`](docs/PROFILE.md) for profile syntax and more examples.
 

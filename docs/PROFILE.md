@@ -7,29 +7,35 @@ This document is the source of truth for profile syntax and default profile beha
 - `cowjail profile list`: list profile files under `~/.config/cowjail/profiles`
 - `cowjail profile show [name]`: print profile source
   - `name` is optional; default is `default`
+  - `name` may also be a readonly builtin such as `builtin:basic`
 - `cowjail profile edit [name]`: open profile in `$EDITOR`
   - `name` is optional; default is `default`
   - short names (no `/`) are resolved under `~/.config/cowjail/profiles`
   - names follow the same validation rules as jail names
+  - builtin profiles are readonly and cannot be edited
 - `cowjail profile rm [name]`: remove profile file
   - `name` is optional; default is `default`
   - short names (no `/`) are resolved under `~/.config/cowjail/profiles`
   - names follow the same validation rules as jail names
+  - builtin profiles are readonly and cannot be removed
   - `cowjail profile rm default` removes the user override file and falls back to the built-in default profile
 
 The built-in `default` profile source includes:
 
 ```text
-%include default.local
+%include builtin:deny-sensitive
+%include builtin:basic
+%include builtin:agents
+~ git-rw
 ```
 
-That means the normal way to extend the shipped default policy is to edit `default.local` instead of copying the whole `default` profile:
+That means the normal way to extend the shipped default policy is to edit `default` itself when you want a user override:
 
 ```bash
-cowjail profile edit default.local
+cowjail profile edit default
 ```
 
-Missing includes are ignored, so `default.local` only takes effect once you create it.
+You can inspect the shipped fragments with `cowjail profile show builtin:deny-sensitive`, `builtin:basic`, and `builtin:agents`.
 
 ## Syntax
 
@@ -37,7 +43,7 @@ Profile is line-based and evaluated with first-match-wins.
 
 - Rule format: `pattern action`
 - Directive format: `%directive ...`
-- `%include <name>`: inline another profile by short name (no `/`); missing file is ignored
+- `%include <name>`: inline another profile by short name or `builtin:name`; missing file is ignored
 - Comment: lines starting with `#`
 - Glob pattern is supported in paths
   - `*` does not match `/`
@@ -95,7 +101,8 @@ When `--profile default` is used, or `run` and `add` omit `--profile`, `cowjail`
 1. `~/.config/cowjail/profiles/default` when the file exists
 2. built-in fallback source when the file is missing
 
-The built-in fallback source itself includes `%include default.local`, so a user-created `~/.config/cowjail/profiles/default.local` extends the default profile even when `~/.config/cowjail/profiles/default` does not exist.
+The built-in fallback source is assembled from readonly builtin fragments and ends with `~ git-rw`.
+If you want a user override, create or edit `~/.config/cowjail/profiles/default`.
 
 To inspect the currently effective on-disk default profile, use:
 
