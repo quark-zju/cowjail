@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ use crate::profile_loader::{
 use crate::record;
 use crate::run_with_log;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct FlushStats {
     pub(crate) total: usize,
     pub(crate) pending: usize,
@@ -22,12 +22,20 @@ pub(crate) struct FlushStats {
     pub(crate) optimized: usize,
     pub(crate) blocked: usize,
     pub(crate) marked: usize,
+    pub(crate) modified_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct PendingOp {
     offset: u64,
     op: op::Operation,
+}
+
+#[derive(Debug, Clone)]
+struct FlushPlan {
+    apply_offsets: HashSet<u64>,
+    blocked_offsets: HashSet<u64>,
+    modified_paths: Vec<String>,
 }
 
 pub(crate) fn flush_command(flush: FlushCommand) -> Result<()> {
@@ -73,6 +81,9 @@ pub(crate) fn flush_command(flush: FlushCommand) -> Result<()> {
         stats.marked,
         flush.dry_run
     );
+    if flush.dry_run {
+        print_modified_paths(&stats.modified_paths);
+    }
     Ok(())
 }
 
@@ -103,6 +114,9 @@ pub(crate) fn low_level_flush_command(flush: LowLevelFlushCommand) -> Result<()>
         stats.marked,
         flush.dry_run
     );
+    if flush.dry_run {
+        print_modified_paths(&stats.modified_paths);
+    }
     Ok(())
 }
 
@@ -166,11 +180,17 @@ pub(crate) fn flush_record_with_policy(
     }
 
     stats.pending = pending.len();
-    let apply_offsets = plan_apply_offsets(&pending);
-    stats.optimized = pending.len().saturating_sub(apply_offsets.len());
+    let plan = build_flush_plan(&pending, replay_profile.as_ref())?;
+    stats.optimized = pending.len().saturating_sub(plan.apply_offsets.len());
+    stats.modified_paths = plan.modified_paths.clone();
+
+    if dry_run {
+        stats.blocked = plan.blocked_offsets.len();
+        return Ok(stats);
+    }
 
     for item in pending {
-        if !dry_run && apply_offsets.contains(&item.offset) {
+        if plan.apply_offsets.contains(&item.offset) {
             if !op_allowed_by_profile(replay_profile.as_ref(), &item.op) {
                 stats.blocked += 1;
                 continue;
@@ -181,7 +201,7 @@ pub(crate) fn flush_record_with_policy(
             }
             apply_operation(&item.op)?;
         }
-        if !dry_run && record_lock.mark_flushed(item.offset)? {
+        if record_lock.mark_flushed(item.offset)? {
             stats.marked += 1;
         }
     }
@@ -328,6 +348,45 @@ fn plan_apply_offsets(items: &[PendingOp]) -> HashSet<u64> {
     }
     keep.extend(compact_segment_offsets(&items[segment_start..]));
     keep
+}
+
+fn build_flush_plan(
+    pending: &[PendingOp],
+    replay_profile: Option<&profile::Profile>,
+) -> Result<FlushPlan> {
+    let apply_offsets = plan_apply_offsets(pending);
+    let mut blocked_offsets = HashSet::new();
+    let mut modified_paths = BTreeSet::new();
+
+    for item in pending {
+        if !apply_offsets.contains(&item.offset) {
+            continue;
+        }
+        if !op_allowed_by_profile(replay_profile, &item.op) || !op_allowed_by_ownership(&item.op)? {
+            blocked_offsets.insert(item.offset);
+            continue;
+        }
+        for path in op_paths(&item.op) {
+            modified_paths.insert(path.display().to_string());
+        }
+    }
+
+    Ok(FlushPlan {
+        apply_offsets,
+        blocked_offsets,
+        modified_paths: modified_paths.into_iter().collect(),
+    })
+}
+
+fn print_modified_paths(paths: &[String]) {
+    println!("modified_paths:");
+    if paths.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for path in paths {
+        println!("  {path}");
+    }
 }
 
 fn compact_segment_offsets(items: &[PendingOp]) -> HashSet<u64> {
