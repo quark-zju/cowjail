@@ -16,9 +16,9 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 %include default.local
 
 # Deny access to browser states
-~/.cache/mozilla deny
-~/.config/google-chrome* deny
-~/.config/chromium* deny
+~/.cache/mozilla hide
+~/.config/google-chrome* hide
+~/.config/chromium* hide
 
 # Deny access to ssh configs
 ~/.ssh deny
@@ -53,26 +53,25 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 ~/.claude rw
 ~/.codex rw
 ~/.copilot rw
+# opencode
+~/.cache/opencode rw
+~/.config/opencode rw
+~/.local/share/opencode rw
+~/.local/state/opencode rw
 
 # User home (some used by coding agents too)
 ~/bin ro
 ~/.bun rw
-~/.cache/opencode rw
-~/.cache cow
-~/.cargo cow
-~/.config cow
-~/.dotnet cow
+~/.cargo ro
 ~/.gitconfig* ro
 ~/.gitignore* ro
-~/.local/state/opencode rw
-~/.local/share/opencode rw
-~/.local cow
-~/.npm rw
-~/.pyenv rw
-~/.rustup rw
+~/.local/bin ro
+~/.npm ro
+~/.pyenv ro
+~/.rustup ro
 
-# Current workspace
-. cow
+# Home git repos
+~ git-rw
 ";
 
 pub(crate) fn builtin_default_profile_source() -> &'static str {
