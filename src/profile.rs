@@ -43,10 +43,17 @@ pub enum Visibility {
 
 impl Profile {
     pub fn parse(profile_src: &str, launch_cwd: &Path) -> Result<Self> {
+        let home = home_dir_from_env()?;
+        Self::parse_with_home(profile_src, launch_cwd, &home)
+    }
+
+    pub fn parse_with_home(profile_src: &str, launch_cwd: &Path, home: &Path) -> Result<Self> {
         let cwd = normalize_abs(launch_cwd)
             .context("launch cwd for profile parsing must be an absolute normalized path")?;
+        let home = normalize_abs(home)
+            .context("home for profile parsing must be an absolute normalized path")?;
 
-        let parsed = parse_lines(profile_src, &cwd)?;
+        let parsed = parse_lines(profile_src, &cwd, &home)?;
         let mut rules = Vec::new();
         let mut globset_builder = GlobSetBuilder::new();
         let mut glob_to_rule = Vec::new();
@@ -136,10 +143,22 @@ impl Profile {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn normalize_source(profile_src: &str, launch_cwd: &Path) -> Result<String> {
+    let home = home_dir_from_env()?;
+    normalize_source_with_home(profile_src, launch_cwd, &home)
+}
+
+pub fn normalize_source_with_home(
+    profile_src: &str,
+    launch_cwd: &Path,
+    home: &Path,
+) -> Result<String> {
     let cwd = normalize_abs(launch_cwd)
         .context("launch cwd for profile normalization must be an absolute normalized path")?;
-    let parsed = parse_lines(profile_src, &cwd)?;
+    let home = normalize_abs(home)
+        .context("home for profile normalization must be an absolute normalized path")?;
+    let parsed = parse_lines(profile_src, &cwd, &home)?;
     let mut out = String::new();
     for line in parsed {
         out.push_str(&line.pattern);
@@ -158,7 +177,7 @@ pub(crate) struct NormalizedRuleLine {
 }
 
 pub(crate) fn parse_normalized_rule_lines(profile_src: &str) -> Result<Vec<NormalizedRuleLine>> {
-    let parsed = parse_lines(profile_src, Path::new("/"))?;
+    let parsed = parse_lines(profile_src, Path::new("/"), Path::new("/"))?;
     let mut out = Vec::with_capacity(parsed.len());
     for line in parsed {
         let path = PathBuf::from(&line.pattern);
@@ -198,7 +217,7 @@ fn action_to_str(action: RuleAction) -> &'static str {
     }
 }
 
-fn parse_lines(profile_src: &str, cwd: &Path) -> Result<Vec<ParsedRuleLine>> {
+fn parse_lines(profile_src: &str, cwd: &Path, home: &Path) -> Result<Vec<ParsedRuleLine>> {
     let mut out = Vec::new();
     for (idx, line) in profile_src.lines().enumerate() {
         let trimmed = line.trim();
@@ -219,7 +238,7 @@ fn parse_lines(profile_src: &str, cwd: &Path) -> Result<Vec<ParsedRuleLine>> {
 
         let action = parse_action(action_token)
             .with_context(|| format!("line {} has invalid action", idx + 1))?;
-        let pattern = normalize_pattern(pattern_token, cwd)
+        let pattern = normalize_pattern(pattern_token, cwd, home)
             .with_context(|| format!("line {} has invalid pattern", idx + 1))?;
         out.push(ParsedRuleLine {
             pattern,
@@ -230,13 +249,10 @@ fn parse_lines(profile_src: &str, cwd: &Path) -> Result<Vec<ParsedRuleLine>> {
     Ok(out)
 }
 
-fn normalize_pattern(token: &str, cwd: &Path) -> Result<String> {
+fn normalize_pattern(token: &str, cwd: &Path, home: &Path) -> Result<String> {
     let normalized = if token == "." {
         cwd.to_path_buf()
     } else if token == "~" || token.starts_with("~/") {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set for '~' expansion"))?;
         let suffix = token.strip_prefix("~/").unwrap_or("");
         normalize_abs(&home.join(suffix))
             .with_context(|| format!("invalid home-expanded pattern: {token}"))?
@@ -255,6 +271,12 @@ fn normalize_pattern(token: &str, cwd: &Path) -> Result<String> {
         .to_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("path pattern is not valid UTF-8"))
+}
+
+fn home_dir_from_env() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set for '~' expansion"))
 }
 
 fn glob_patterns_for_rule(pattern: &str) -> Vec<String> {
@@ -380,7 +402,8 @@ mod tests {
     use super::*;
 
     fn parse(src: &str) -> Profile {
-        Profile::parse(src, Path::new("/work")).expect("profile should parse")
+        Profile::parse_with_home(src, Path::new("/work"), Path::new("/home/tester"))
+            .expect("profile should parse")
     }
 
     #[test]
@@ -422,9 +445,7 @@ mod tests {
 
     #[test]
     fn tilde_expands_to_home() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
+        let home = PathBuf::from("/home/tester");
         let profile = parse(
             r#"
             ~/tmp rw
@@ -542,7 +563,7 @@ mod tests {
 
     #[test]
     fn normalize_source_drops_blank_and_comment_lines() {
-        let normalized = normalize_source(
+        let normalized = normalize_source_with_home(
             r#"
             # only effective rules remain
             /etc ro
@@ -550,6 +571,7 @@ mod tests {
             /work rw
             "#,
             Path::new("/work"),
+            Path::new("/home/tester"),
         )
         .expect("normalize source");
         assert_eq!(normalized, "/etc ro\n/work rw\n");
@@ -557,10 +579,9 @@ mod tests {
 
     #[test]
     fn normalize_source_expands_tilde() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
-        let normalized = normalize_source("~/x ro\n", Path::new("/work")).expect("normalize");
+        let home = PathBuf::from("/home/tester");
+        let normalized = normalize_source_with_home("~/x ro\n", Path::new("/work"), home.as_path())
+            .expect("normalize");
         let expected = format!("{}/x ro\n", home.display());
         assert_eq!(normalized, expected);
     }

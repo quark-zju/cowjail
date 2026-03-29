@@ -298,7 +298,7 @@ pub(crate) fn remove_jail(paths: &JailPaths) -> Result<()> {
     remove_known_state_artifacts(paths)
 }
 
-fn home_dir() -> Result<PathBuf> {
+pub(crate) fn home_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot resolve cowjail home paths"))?;
     Ok(PathBuf::from(home))

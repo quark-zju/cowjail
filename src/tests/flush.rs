@@ -545,8 +545,13 @@ fn flush_profile_override_can_allow_previously_blocked_write() {
 
 #[test]
 fn load_profile_uses_builtin_default_profile() {
-    let loaded = profile_loader::load_profile(Path::new(cli::DEFAULT_PROFILE))
-        .expect("load builtin default");
+    let home = Path::new("/home/tester");
+    let loaded = profile_loader::load_profile_with_context(
+        Path::new(cli::DEFAULT_PROFILE),
+        Path::new("/work"),
+        home,
+    )
+    .expect("load builtin default");
     assert_eq!(
         loaded.profile.first_match_action(Path::new("/bin/sh")),
         Some(profile::RuleAction::ReadOnly)
@@ -554,6 +559,24 @@ fn load_profile_uses_builtin_default_profile() {
     assert_eq!(
         loaded.profile.first_match_action(Path::new("/tmp")),
         Some(profile::RuleAction::Passthrough)
+    );
+    assert_eq!(
+        loaded
+            .profile
+            .first_match_action(&home.join(".config/app/config.json")),
+        Some(profile::RuleAction::Cow)
+    );
+    assert_eq!(
+        loaded
+            .profile
+            .first_match_action(&home.join(".cache/tool/cache.db")),
+        Some(profile::RuleAction::Cow)
+    );
+    assert_eq!(
+        loaded
+            .profile
+            .first_match_action(&home.join(".local/share/tool/data.json")),
+        Some(profile::RuleAction::Cow)
     );
 }
 

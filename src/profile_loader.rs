@@ -136,7 +136,16 @@ pub(crate) fn append_profile_header(
 
 pub(crate) fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
     let cwd = jail::current_pwd()?;
-    let resolved = resolve_profile_path(profile_path)?;
+    let home = jail::home_dir()?;
+    load_profile_with_context(profile_path, &cwd, &home)
+}
+
+pub(crate) fn load_profile_with_context(
+    profile_path: &Path,
+    cwd: &Path,
+    home: &Path,
+) -> Result<LoadedProfile> {
+    let resolved = resolve_profile_path_with_home(profile_path, home)?;
     let (source_name, source) = match fs::read_to_string(&resolved) {
         Ok(raw) => (resolved.display().to_string(), raw),
         Err(err)
@@ -153,15 +162,15 @@ pub(crate) fn load_profile(profile_path: &Path) -> Result<LoadedProfile> {
                 .with_context(|| format!("failed to read profile file: {}", resolved.display()));
         }
     };
-    let expanded = expand_includes(&source, &source_name)?;
+    let expanded = expand_includes(&source, &source_name, home)?;
     let expanded_source = expanded_to_string(&expanded);
     let parse_source = strip_directive_lines(&expanded_source);
     let normalized_rule_sources = effective_rule_sources(&expanded);
 
     let source_name = format!("profile file: {}", resolved.display());
-    let profile = profile::Profile::parse(&parse_source, &cwd)
+    let profile = profile::Profile::parse_with_home(&parse_source, cwd, home)
         .with_context(|| format!("failed to parse {source_name}"))?;
-    let normalized_source = profile::normalize_source(&parse_source, &cwd)
+    let normalized_source = profile::normalize_source_with_home(&parse_source, cwd, home)
         .with_context(|| format!("failed to normalize {source_name}"))?;
     let record_max_size_bytes = match parse_record_max_size_override(&expanded_source)
         .with_context(|| format!("failed to parse max_size from {source_name}"))?
@@ -196,6 +205,11 @@ pub(crate) fn default_record_dir_from_home(home: &Path) -> PathBuf {
 }
 
 fn resolve_profile_path(profile_path: &Path) -> Result<PathBuf> {
+    let home = jail::home_dir()?;
+    resolve_profile_path_with_home(profile_path, &home)
+}
+
+fn resolve_profile_path_with_home(profile_path: &Path, home: &Path) -> Result<PathBuf> {
     if profile_path.is_absolute() || profile_path.components().count() > 1 {
         return Ok(profile_path.to_path_buf());
     }
@@ -203,17 +217,16 @@ fn resolve_profile_path(profile_path: &Path) -> Result<PathBuf> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("profile name is not valid UTF-8"))?;
     jail::validate_explicit_name(name).context("invalid profile name")?;
-    jail::profile_definition_path(name)
+    Ok(jail::profile_definition_path_in(
+        &jail::layout_from_home(home),
+        name,
+    ))
 }
 
-fn expand_includes(source: &str, source_name: &str) -> Result<Vec<ExpandedLine>> {
+fn expand_includes(source: &str, source_name: &str, home: &Path) -> Result<Vec<ExpandedLine>> {
     let mut stack = Vec::new();
-    expand_includes_with(
-        source,
-        source_name,
-        &mut stack,
-        &mut read_named_profile_source,
-    )
+    let mut resolver = |name: &str| read_named_profile_source_with_home(name, home);
+    expand_includes_with(source, source_name, &mut stack, &mut resolver)
 }
 
 fn expand_includes_with<F>(
@@ -282,8 +295,8 @@ where
     Ok(out)
 }
 
-fn read_named_profile_source(name: &str) -> Result<Option<IncludedSource>> {
-    let path = jail::profile_definition_path(name)?;
+fn read_named_profile_source_with_home(name: &str, home: &Path) -> Result<Option<IncludedSource>> {
+    let path = jail::profile_definition_path_in(&jail::layout_from_home(home), name);
     match fs::read_to_string(&path) {
         Ok(raw) => Ok(Some(IncludedSource {
             source_name: path.display().to_string(),
