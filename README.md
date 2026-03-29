@@ -65,7 +65,7 @@ cowjail profile edit default.local
 This lets you extend the default policy without copying the whole `default` profile.
 
 ```bash
-cowjail run -- your-command arg1 arg2  # run inside jail
+cowjail run -- codex      # or opencode, bash, ...
 ```
 
 Changes by the command won't affect the real filesystem directly. Use `cowjail flush` to view and apply changes:
