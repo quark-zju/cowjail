@@ -145,12 +145,13 @@ fn root_help_text(verbose: bool) -> String {
         "  cowjail <subcommand> [options]\n\n",
         "COMMON:\n",
         "  cowjail run [--profile <profile>] [-v|--verbose] command ...\n",
-        "  cowjail help profile\n\n",
+        "\n",
         "PROFILE:\n",
-        "  cowjail profile list\n",
-        "  cowjail profile show [name]\n",
         "  cowjail profile edit [name]\n",
+        "  cowjail profile show [name]\n",
+        "  cowjail profile list\n",
         "  cowjail profile rm [name]\n",
+        "  cowjail help profile\n",
     ));
     if verbose {
         out.push_str(concat!(
