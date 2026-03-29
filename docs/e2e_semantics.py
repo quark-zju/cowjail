@@ -424,8 +424,7 @@ def main() -> None:
                 cowjail_bin,
                 base_env,
                 "_rm",
-                "--profile",
-                str(profile_path),
+                "*",
                 check=False,
             )
 
