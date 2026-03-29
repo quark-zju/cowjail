@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use fs_err as fs;
+use log::{debug, trace};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcIdentity {
@@ -28,8 +29,10 @@ pub(crate) struct GitRwFilter {
 
 impl GitRwFilter {
     pub(crate) fn new() -> Self {
+        let system_git = resolve_system_git();
+        debug!("git-rw: resolved system git path to {:?}", system_git);
         Self {
-            system_git: resolve_system_git(),
+            system_git,
             proc_cache: Mutex::new(HashMap::new()),
             repo_root_cache: Mutex::new(HashMap::new()),
         }
@@ -54,15 +57,26 @@ impl GitRwFilter {
             if let Ok(cache) = self.repo_root_cache.lock()
                 && let Some(cached) = cache.get(&current)
             {
+                trace!(
+                    "git-rw: repo root cache hit path={} repo_root={:?}",
+                    current.display(),
+                    cached
+                );
                 return cached.clone();
             }
 
             visited.push(current.clone());
             if current.join(".git/config").is_file() {
+                debug!(
+                    "git-rw: detected repo root {} while resolving {}",
+                    current.display(),
+                    path.display()
+                );
                 self.fill_repo_root_cache(&visited, Some(current.clone()));
                 return Some(current);
             }
             let Some(parent) = current.parent() else {
+                trace!("git-rw: no repo root found while resolving {}", path.display());
                 self.fill_repo_root_cache(&visited, None);
                 return None;
             };
@@ -72,16 +86,26 @@ impl GitRwFilter {
 
     pub(crate) fn path_is_git_repo_member(&self, path: &Path) -> bool {
         if self.is_git_metadata_path(path) {
+            trace!("git-rw: metadata path {} is not a repo member", path.display());
             return false;
         }
-        self.repo_root_for(path).is_some()
+        let is_member = self.repo_root_for(path).is_some();
+        trace!(
+            "git-rw: repo membership path={} member={}",
+            path.display(),
+            is_member
+        );
+        is_member
     }
 
     pub(crate) fn allow_git_metadata_for_pid(&self, pid: u32, mount_root: Option<&Path>) -> bool {
         let proc_dir = PathBuf::from(format!("/proc/{pid}"));
         let meta = match fs::metadata(&proc_dir) {
             Ok(meta) => meta,
-            Err(_) => return false,
+            Err(err) => {
+                debug!("git-rw: deny pid={pid} metadata access: stat {} failed: {err}", proc_dir.display());
+                return false;
+            }
         };
         let identity = ProcIdentity {
             ctime: meta.ctime(),
@@ -92,10 +116,16 @@ impl GitRwFilter {
             && let Some(entry) = cache.get(&pid)
             && entry.identity == identity
         {
+            trace!(
+                "git-rw: proc cache hit pid={} allowed={}",
+                pid,
+                entry.allowed
+            );
             return entry.allowed;
         }
 
         let allowed = self.inspect_process(pid, mount_root);
+        debug!("git-rw: evaluated pid={} allowed={}", pid, allowed);
         if let Ok(mut cache) = self.proc_cache.lock() {
             cache.insert(pid, CachedDecision { identity, allowed });
         }
@@ -104,35 +134,60 @@ impl GitRwFilter {
 
     fn inspect_process(&self, pid: u32, mount_root: Option<&Path>) -> bool {
         let Some(system_git) = self.system_git.as_ref() else {
+            debug!("git-rw: deny pid={pid}: no system git resolved");
             return false;
         };
 
         let exe_path = match fs::read_link(format!("/proc/{pid}/exe")) {
             Ok(path) => strip_mount_root_prefix(path, mount_root),
-            Err(_) => return false,
+            Err(err) => {
+                debug!("git-rw: deny pid={pid}: read /proc/{pid}/exe failed: {err}");
+                return false;
+            }
         };
         let exe_path = normalize_git_exe_path(&exe_path);
         if exe_path.as_ref() != Some(system_git) {
+            debug!(
+                "git-rw: deny pid={pid}: exe path {:?} does not match trusted git {}",
+                exe_path,
+                system_git.display()
+            );
             return false;
         }
 
         let cmdline = match fs::read(format!("/proc/{pid}/cmdline")) {
             Ok(data) => data,
-            Err(_) => return false,
+            Err(err) => {
+                debug!("git-rw: deny pid={pid}: read /proc/{pid}/cmdline failed: {err}");
+                return false;
+            }
         };
         let Some(subcommand) = first_git_subcommand(&cmdline) else {
+            debug!("git-rw: deny pid={pid}: no git subcommand found");
             return false;
         };
-        matches!(
+        let allowed = matches!(
             subcommand,
             "commit" | "status" | "add" | "rm" | "revert" | "log"
-        )
+        );
+        debug!(
+            "git-rw: pid={} subcommand={} allowed={}",
+            pid,
+            subcommand,
+            allowed
+        );
+        allowed
     }
 
     fn fill_repo_root_cache(&self, visited: &[PathBuf], repo_root: Option<PathBuf>) {
         let Ok(mut cache) = self.repo_root_cache.lock() else {
             return;
         };
+        trace!(
+            "git-rw: fill repo root cache visited={} repo_root={:?}",
+            visited.len(),
+            repo_root
+        );
         for path in visited {
             cache.insert(path.clone(), repo_root.clone());
         }

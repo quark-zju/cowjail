@@ -61,6 +61,7 @@ dependencies = [
  "fuser",
  "globset",
  "libc",
+ "log",
  "pico-args",
  "serde",
  "serde_cbor",
