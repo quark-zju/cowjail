@@ -8,6 +8,9 @@ use crate::{cli, jail, profile, record};
 pub(crate) const DEFAULT_RECORD_MAX_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
+~/.config/cowjail deny
+~/.local/state/cowjail deny
+%include default.local
 /tmp rw
 /bin ro
 /sbin ro
@@ -26,22 +29,21 @@ const BUILTIN_DEFAULT_PROFILE_SOURCE: &str = "\
 /dev/tty rw
 /dev/urandom ro
 /dev/zero rw
-~/.config/cowjail deny
-~/.local/state/cowjail deny
+~/.ssh deny
+~/.agents rw
 ~/bin ro
-~/.claude rw
-~/.codex rw
-~/.agents/ rw
 ~/.cache/claude-cli-nodejs rw
 ~/.cache/opencode rw
+~/.cargo rw
+~/.claude rw
+~/.codex rw
 ~/.config/opencode rw
-~/.local/share/opencode rw
-~/.local/state/opencode rw
 ~/.gitconfig* ro
 ~/.gitignore* ro
-~/.ssh deny
+~/.local/share/opencode rw
+~/.local/state/opencode rw
+~/.npm rw
 /proc rw
-%include default.local
 . cow
 ";
 
