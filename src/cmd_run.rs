@@ -139,7 +139,10 @@ fn run_child_in_jail(
             if let Err(err) = privileges::drop_to_real_user() {
                 return Err(std::io::Error::other(err.to_string()));
             }
-            close_fds_best_effort_from(3);
+            // Do not close inherited high-numbered fds here. std::process keeps
+            // an internal error-report pipe open across pre_exec so the child
+            // can report execve failures back to the parent. Closing it here
+            // turns normal exec errors into an abort inside the Rust stdlib.
             Ok(())
         });
     }
