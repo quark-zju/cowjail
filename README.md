@@ -2,11 +2,11 @@
 
 `leash` is a Linux filesystem safety layer for coding agents - keep your AI on a leash.
 
-It combines:
+What it does:
 
-- profile-based filesystem visibility and write policy (`ro` / `rw` / `git-rw` / `deny` / `hide`)
-- git-aware writable working trees with `.git` metadata protection
-- IPC/PID/MNT namespace isolation to reduce escapes via host IPC services (for example `systemd-run`)
+- blocks reads of sensitive files (like `~/.ssh`, browser profiles, system secrets)
+- controls what can be written (`/tmp`, agent state, git working copies)
+- protects `.git` metadata so only trusted `git` commands can write it
 
 Out of scope:
 
@@ -15,72 +15,46 @@ Out of scope:
 
 `leash` 是一个 Linux 文件系统防护层，主要面向 AI 编码工具。
 
-包含：
+能做什么：
 
-- 配置文件控制读写策略（`ro` / `rw` / `git-rw` / `deny` / `hide`）
-- 针对 git working tree 的可写支持，以及对 `.git` 元数据的额外保护
-- IPC/PID/MNT 隔离，减少逃逸如 `systemd-run` 的可能性
+- 阻止读取敏感文件（如 `~/.ssh`、浏览器配置、系统机密）
+- 控制可写路径（`/tmp`、agent 状态目录、git 工作区）
+- 保护 `.git` 元数据，只允许可信 `git` 命令写入
 
 不包含：
 
 - 网络/容器隔离
 - 非 Linux 系统支持
 
-## Project status
-
-I personally use this project with `codex` and `opencode`.
-
-## Install
-
-Install from GitHub:
+## Install & Quick start
 
 ```bash
 cargo install --git https://github.com/quark-zju/leash leash
-```
-
-Then bootstrap setuid helper:
-
-```bash
 leash _suid
+leash run codex # or opencode, bash, ...
 ```
 
-Shell completion: put this line in your shell rc file:
+Shell completion (optional): put this line in your shell rc file:
 
 ```bash
 source <(leash completion)
 ```
 
-## Usage
+## Profiles
 
-### Quick start
-
-Use `leash run` to run a command. It uses the built-in `default` profile.
+Check which paths are read-only or writable:
 
 ```bash
-leash run codex # or opencode, bash, ...
+leash profile show
 ```
 
-The built-in `default` profile is tuned for coding-agent workflows:
-
-- writes inside detected git working trees are allowed through `git-rw`
-- writes under broad user state trees like `~/.config`, `~/.cache`, `~/.local` are still controlled by explicit rules
-- writes under agent-specific directories like `~/.codex`, `~/.claude`, `~/.agents` go directly to the host
-- writes under `/tmp` go directly to the host
-
-So the default behavior is: keep most of the home directory read-only, allow direct writes where the profile explicitly permits them, and make repository worktrees writable while keeping `.git` metadata read-only unless the caller is trusted `git`.
-
-### Custom profile
-
-If a tool needs access to another path, edit your `default` profile override directly. For example, to allow writes under `~/Downloads`:
+Modify your local override (applies on the next `leash run`):
 
 ```bash
-leash profile edit default
-~/Downloads rw
+leash profile edit
 ```
 
-The shipped builtin fragments are also inspectable through `leash profile show builtin:deny-sensitive`, `builtin:basic`, and `builtin:agents`, but they are read-only.
-
-See [`docs/PROFILE.md`](docs/PROFILE.md) for profile syntax and more examples.
+Profile syntax and details: [`docs/PROFILE.md`](docs/PROFILE.md)
 
 ## More Docs
 
@@ -91,13 +65,6 @@ See [`docs/PROFILE.md`](docs/PROFILE.md) for profile syntax and more examples.
 - Privilege model: [`docs/PRIVILEGE_MODEL.md`](docs/PRIVILEGE_MODEL.md)
 - Troubleshooting: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 - Semantic E2E script: [`docs/e2e_semantics.py`](docs/e2e_semantics.py)
-
-## Known Limitations
-
-- hardlinks are not supported by the current FUSE layer
-- mmap-heavy workloads may degrade or fail
-- metadata behavior is partial (`setattr` supports truncate and common passthrough metadata updates for regular files; uid/gid persistence is not fully implemented)
-- git detection currently focuses on plain `.git/config` repositories; worktree and helper-process handling is intentionally conservative
 
 ## License
 
