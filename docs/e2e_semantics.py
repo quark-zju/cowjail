@@ -234,7 +234,6 @@ def main() -> None:
                 /lib64 ro
                 /etc ro
                 /proc rw
-                /tmp rw
                 /dev/null rw
                 /dev/urandom ro
                 """
