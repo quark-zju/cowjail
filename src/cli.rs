@@ -415,7 +415,7 @@ fn parse_flush(mut args: Arguments) -> Result<Command> {
         return Ok(help_command(HelpTopic::Flush, false));
     }
     let verbose = args.contains(["-v", "--verbose"]);
-    let dry_run = args.contains("--dry-run");
+    let dry_run = args.contains(["-n", "--dry-run"]);
     let selector = parse_optional_jail_selector(args, "flush")?;
 
     Ok(Command::Flush(FlushCommand {
@@ -460,7 +460,7 @@ fn parse_low_level_flush(mut args: Arguments) -> Result<Command> {
         return Ok(help_command(HelpTopic::LowLevelFlush, true));
     }
     let verbose = args.contains(["-v", "--verbose"]);
-    let dry_run = args.contains("--dry-run");
+    let dry_run = args.contains(["-n", "--dry-run"]);
     let profile = args.opt_value_from_str("--profile")?;
     let record = args
         .value_from_os_str("--record", parse_pathbuf)
@@ -568,6 +568,16 @@ mod tests {
         assert!(!flush.verbose);
         assert!(flush.name.is_none());
         assert!(flush.profile.is_none());
+    }
+
+    #[test]
+    fn parse_flush_short_dry_run() {
+        let cmd = parse_from(os(&["flush", "-n"])).expect("flush should parse with short dry-run");
+        let flush = match cmd {
+            Command::Flush(flush) => flush,
+            other => panic!("expected flush, got {other:?}"),
+        };
+        assert!(flush.dry_run);
     }
 
     #[test]
@@ -919,6 +929,17 @@ mod tests {
     fn parse_low_level_flush_requires_record() {
         let err = parse_from(os(&["_flush"])).expect_err("_flush without record should fail");
         assert!(err.to_string().contains("_flush requires --record"));
+    }
+
+    #[test]
+    fn parse_low_level_flush_short_dry_run() {
+        let cmd = parse_from(os(&["_flush", "-n", "--record", "/tmp/r"]))
+            .expect("_flush should parse with short dry-run");
+        let flush = match cmd {
+            Command::LowLevelFlush(flush) => flush,
+            other => panic!("expected low-level flush, got {other:?}"),
+        };
+        assert!(flush.dry_run);
     }
 
     #[test]
