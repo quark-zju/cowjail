@@ -694,6 +694,29 @@ impl CowFs {
         }
     }
 
+    fn remap_known_inos_subtree(&mut self, from: &Path, to: &Path) {
+        let old_paths: Vec<PathBuf> = self
+            .path_to_ino
+            .keys()
+            .filter(|path| **path == from || is_strict_descendant(from, path))
+            .cloned()
+            .collect();
+
+        for old_path in old_paths {
+            let Some(ino) = self.path_to_ino.remove(&old_path) else {
+                continue;
+            };
+            let suffix = old_path.strip_prefix(from).unwrap_or(Path::new(""));
+            let new_path = if suffix.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(suffix)
+            };
+            self.ino_to_path.insert(ino, new_path.clone());
+            self.path_to_ino.insert(new_path, ino);
+        }
+    }
+
     fn move_overlay_subtree(&mut self, from: &Path, to: &Path) -> bool {
         let entries: Vec<(PathBuf, OverlayNode)> = self
             .overlay
@@ -1392,6 +1415,7 @@ impl Filesystem for CowFs {
                     reply.error(io_errno(&err));
                     return;
                 }
+                self.remap_known_inos_subtree(&from, &to);
             }
             _ => {
                 reply.error(EACCES);
@@ -1731,6 +1755,44 @@ mod tests {
             fs.overlay.get(&to.join("child.txt")),
             Some(OverlayNode::Regular { .. })
         ));
+    }
+
+    #[test]
+    fn rename_remaps_known_inode_for_file() {
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let from = PathBuf::from("/tmp/cowjail-rename-map-from");
+        let to = PathBuf::from("/tmp/cowjail-rename-map-to");
+        fs::write(&from, b"x").expect("seed source");
+
+        let ino = fs.ensure_ino(&from);
+        fs.remap_known_inos_subtree(&from, &to);
+
+        assert_eq!(fs.path_for_ino(ino), Some(to.as_path()));
+        assert_eq!(fs.path_to_ino.get(&to).copied(), Some(ino));
+        assert!(!fs.path_to_ino.contains_key(&from));
+
+        let _ = fs::remove_file(&from);
+        let _ = fs::remove_file(&to);
+    }
+
+    #[test]
+    fn rename_remaps_known_inodes_for_subtree() {
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** rw");
+        let from = PathBuf::from("/tmp/cowjail-rename-map-dir-from");
+        let child = from.join("child.txt");
+        let to = PathBuf::from("/tmp/cowjail-rename-map-dir-to");
+        let moved_child = to.join("child.txt");
+
+        let dir_ino = fs.ensure_ino(&from);
+        let child_ino = fs.ensure_ino(&child);
+        fs.remap_known_inos_subtree(&from, &to);
+
+        assert_eq!(fs.path_for_ino(dir_ino), Some(to.as_path()));
+        assert_eq!(fs.path_for_ino(child_ino), Some(moved_child.as_path()));
+        assert_eq!(fs.path_to_ino.get(&to).copied(), Some(dir_ino));
+        assert_eq!(fs.path_to_ino.get(&moved_child).copied(), Some(child_ino));
+        assert!(!fs.path_to_ino.contains_key(&from));
+        assert!(!fs.path_to_ino.contains_key(&child));
     }
 
     #[test]
