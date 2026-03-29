@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import shlex
 import shutil
@@ -22,13 +23,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bin",
         type=Path,
-        default=Path("target/debug/cowjail"),
-        help="path to the cowjail binary",
+        help="path to the cowjail binary; defaults to cargo metadata target/debug/cowjail",
     )
     parser.add_argument(
         "--keep-temp",
         action="store_true",
         help="keep the temporary workspace for debugging",
+    )
+    parser.add_argument(
+        "--no-bootstrap-suid",
+        action="store_true",
+        help="do not run cargo run -- _suid automatically when the binary is not yet usable",
     )
     return parser.parse_args()
 
@@ -38,16 +43,35 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def require_usable_binary(cowjail_bin: Path) -> None:
+def resolve_default_binary() -> Path:
+    completed = run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        env=os.environ.copy(),
+    )
+    data = json.loads(completed.stdout)
+    target_dir = Path(data["target_directory"])
+    return (target_dir / "debug" / "cowjail").resolve()
+
+
+def binary_is_usable(cowjail_bin: Path) -> bool:
     if not cowjail_bin.is_file():
-        fail(f"cowjail binary not found: {cowjail_bin}")
+        return False
 
     if os.geteuid() == 0:
-        return
+        return True
 
     meta = cowjail_bin.stat()
-    if meta.st_uid == 0 and meta.st_mode & stat.S_ISUID:
+    return bool(meta.st_uid == 0 and meta.st_mode & stat.S_ISUID)
+
+
+def ensure_usable_binary(cowjail_bin: Path, *, bootstrap_suid: bool) -> None:
+    if binary_is_usable(cowjail_bin):
         return
+
+    if bootstrap_suid:
+        run(["cargo", "run", "--", "_suid"], env=os.environ.copy())
+        if binary_is_usable(cowjail_bin):
+            return
 
     fail(
         "cowjail run requires root or a setuid-root binary; run the binary once with _suid first"
@@ -116,8 +140,10 @@ def jail_run(
 
 def main() -> None:
     args = parse_args()
-    cowjail_bin = args.bin.resolve()
-    require_usable_binary(cowjail_bin)
+    cowjail_bin = (
+        args.bin.resolve() if args.bin is not None else resolve_default_binary()
+    )
+    ensure_usable_binary(cowjail_bin, bootstrap_suid=not args.no_bootstrap_suid)
 
     system_git = shutil.which("git")
     if system_git is None:

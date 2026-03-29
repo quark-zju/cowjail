@@ -90,13 +90,15 @@ If your workspace filesystem is mounted with `nosuid`, place the binary on a mou
 For a quick high-level regression pass over `ro`, `rw`, `hide`, `deny`, and `git-rw`, run:
 
 ```bash
-python3 docs/e2e_semantics.py --bin ./target/debug/cowjail
+python3 docs/e2e_semantics.py
 ```
 
-The script expects either:
+By default the script:
 
-1. to run as root, or
-2. the target binary to already be setuid-root via `_suid`
+1. uses `cargo metadata` to locate `target/debug/cowjail`
+2. runs `cargo run -- _suid` automatically when the binary is not yet usable for `run`
+
+Use `--bin <path>` to point at another binary, or `--no-bootstrap-suid` if you want to manage `_suid` manually.
 
 ## `rm` fails with mount-related errors
 
