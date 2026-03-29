@@ -34,7 +34,7 @@ pub struct CowFs {
     path_to_ino: std::collections::HashMap<PathBuf, u64>,
     overlay: std::collections::HashMap<PathBuf, OverlayNode>,
     atime_overrides: std::collections::HashMap<PathBuf, SystemTime>,
-    passthrough_handles: std::collections::HashMap<u64, fs::File>,
+    handles: std::collections::HashMap<u64, OpenHandle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,6 +61,11 @@ enum WriteMode {
     Cow,
 }
 
+enum OpenHandle {
+    Passthrough { ino: u64, file: fs::File },
+    Cow { ino: u64 },
+}
+
 impl CowFs {
     pub fn new(profile: Profile, record: record::Writer) -> Self {
         let mut ino_to_path = std::collections::HashMap::new();
@@ -78,7 +83,7 @@ impl CowFs {
             path_to_ino,
             overlay: std::collections::HashMap::new(),
             atime_overrides: std::collections::HashMap::new(),
-            passthrough_handles: std::collections::HashMap::new(),
+            handles: std::collections::HashMap::new(),
         }
     }
 
@@ -355,8 +360,9 @@ impl CowFs {
 
     #[cfg(test)]
     fn open_passthrough_handle_for_test(&mut self, path: &Path, flags: i32) -> Result<u64, i32> {
+        let ino = self.ensure_ino(path);
         let file = Self::open_passthrough_file(path, flags, false)?;
-        Ok(self.allocate_passthrough_handle(file))
+        Ok(self.allocate_passthrough_handle(ino, file))
     }
 
     #[cfg(test)]
@@ -507,27 +513,48 @@ impl CowFs {
 
     fn host_attr_for_handle(&mut self, path: &Path, fh: u64) -> Result<FileAttr, i32> {
         let meta = self
-            .passthrough_handles
+            .handles
             .get(&fh)
+            .and_then(|handle| match handle {
+                OpenHandle::Passthrough { file, .. } => Some(file),
+                OpenHandle::Cow { .. } => None,
+            })
             .ok_or(ENOENT)?
             .metadata()
             .map_err(|err| io_errno(&err))?;
         Ok(self.attr_for_path(path, &meta))
     }
 
-    fn allocate_passthrough_handle(&mut self, file: fs::File) -> u64 {
+    fn allocate_passthrough_handle(&mut self, ino: u64, file: fs::File) -> u64 {
         let fh = self.next_fh;
         self.next_fh += 1;
-        self.passthrough_handles.insert(fh, file);
+        self.handles
+            .insert(fh, OpenHandle::Passthrough { ino, file });
         fh
     }
 
-    fn passthrough_file_mut(&mut self, fh: u64) -> Option<&mut fs::File> {
-        self.passthrough_handles.get_mut(&fh)
+    fn allocate_cow_handle(&mut self, ino: u64) -> u64 {
+        let fh = self.next_fh;
+        self.next_fh += 1;
+        self.handles.insert(fh, OpenHandle::Cow { ino });
+        fh
     }
 
-    fn remove_passthrough_handle(&mut self, fh: u64) {
-        self.passthrough_handles.remove(&fh);
+    fn handle_ino(&self, fh: u64) -> Option<u64> {
+        self.handles.get(&fh).map(|handle| match handle {
+            OpenHandle::Passthrough { ino, .. } | OpenHandle::Cow { ino } => *ino,
+        })
+    }
+
+    fn passthrough_file_mut(&mut self, fh: u64) -> Option<&mut fs::File> {
+        self.handles.get_mut(&fh).and_then(|handle| match handle {
+            OpenHandle::Passthrough { file, .. } => Some(file),
+            OpenHandle::Cow { .. } => None,
+        })
+    }
+
+    fn remove_handle(&mut self, fh: u64) {
+        self.handles.remove(&fh);
     }
 
     fn open_passthrough_file(path: &Path, flags: i32, create_new: bool) -> Result<fs::File, i32> {
@@ -871,7 +898,8 @@ impl Filesystem for CowFs {
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
-        let Some(path) = self.path_for_ino(ino).map(ToOwned::to_owned) else {
+        let resolved_ino = fh.and_then(|fh| self.handle_ino(fh)).unwrap_or(ino);
+        let Some(path) = self.path_for_ino(resolved_ino).map(ToOwned::to_owned) else {
             reply.error(ENOENT);
             return;
         };
@@ -998,11 +1026,12 @@ impl Filesystem for CowFs {
                     return;
                 }
             };
-            let fh = self.allocate_passthrough_handle(file);
+            let fh = self.allocate_passthrough_handle(ino, file);
             reply.opened(fh, 0);
             return;
         }
-        reply.opened(0, 0);
+        let fh = self.allocate_cow_handle(ino);
+        reply.opened(fh, 0);
     }
 
     fn read(
@@ -1016,7 +1045,8 @@ impl Filesystem for CowFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let Some(path) = self.path_for_ino(ino).map(ToOwned::to_owned) else {
+        let resolved_ino = self.handle_ino(fh).unwrap_or(ino);
+        let Some(path) = self.path_for_ino(resolved_ino).map(ToOwned::to_owned) else {
             reply.error(ENOENT);
             return;
         };
@@ -1180,7 +1210,8 @@ impl Filesystem for CowFs {
                     return;
                 }
                 let attr = self.attr_for_overlay(&path, &node);
-                reply.created(&TTL, &attr, 0, 0, 0);
+                let fh = self.allocate_cow_handle(attr.ino);
+                reply.created(&TTL, &attr, 0, fh, 0);
             }
             WriteMode::Passthrough => {
                 let file = match Self::open_passthrough_file(&path, flags, true) {
@@ -1197,7 +1228,6 @@ impl Filesystem for CowFs {
                     reply.error(io_errno(&err));
                     return;
                 }
-                let fh = self.allocate_passthrough_handle(file);
                 let attr = match self.host_attr(&path) {
                     Ok(attr) => attr,
                     Err(code) => {
@@ -1205,6 +1235,7 @@ impl Filesystem for CowFs {
                         return;
                     }
                 };
+                let fh = self.allocate_passthrough_handle(attr.ino, file);
                 reply.created(&TTL, &attr, 0, fh, 0);
             }
         }
@@ -1222,7 +1253,8 @@ impl Filesystem for CowFs {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let Some(path) = self.path_for_ino(ino).map(ToOwned::to_owned) else {
+        let resolved_ino = self.handle_ino(fh).unwrap_or(ino);
+        let Some(path) = self.path_for_ino(resolved_ino).map(ToOwned::to_owned) else {
             reply.error(ENOENT);
             return;
         };
@@ -1313,7 +1345,7 @@ impl Filesystem for CowFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.remove_passthrough_handle(fh);
+        self.remove_handle(fh);
         reply.ok();
     }
 
@@ -1948,8 +1980,43 @@ mod tests {
             .expect("attr via handle after rename");
         assert_eq!(attr.size, 5);
 
-        fs.remove_passthrough_handle(fh);
+        fs.remove_handle(fh);
         let _ = fs::remove_file(&to);
+    }
+
+    #[test]
+    fn cow_handle_uses_remapped_inode_path_after_rename() {
+        let (_dir, _record_path, mut fs) = test_fs("/tmp/** cow");
+        let from = PathBuf::from("/tmp/cowjail-cow-handle-from");
+        let to = PathBuf::from("/tmp/cowjail-cow-handle-to");
+        let ino = fs.ensure_ino(&from);
+        fs.overlay_set(
+            from.clone(),
+            OverlayNode::Regular {
+                data: b"hello".to_vec(),
+                mode: 0o644,
+            },
+        );
+
+        let fh = fs.allocate_cow_handle(ino);
+        fs.apply_rename_paths(&from, &to)
+            .expect("rename overlay path");
+        fs.remap_known_inos_subtree(&from, &to);
+
+        assert_eq!(fs.handle_ino(fh), Some(ino));
+        assert_eq!(fs.path_for_ino(ino), Some(to.as_path()));
+        let current = fs
+            .path_for_ino(fs.handle_ino(fh).expect("handle ino"))
+            .expect("path");
+        match fs.effective_node(current) {
+            Ok(Some(NodeRef::Overlay(OverlayNode::Regular { data, .. }))) => {
+                assert_eq!(data, b"hello")
+            }
+            Ok(_) => panic!("expected overlay regular after rename"),
+            Err(code) => panic!("effective node failed: {code}"),
+        }
+
+        fs.remove_handle(fh);
     }
 
     #[test]
