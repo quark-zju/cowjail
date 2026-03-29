@@ -20,7 +20,7 @@ Out of scope:
 
 - 配置文件控制读写策略（`ro` / `rw` / `cow` / `deny` / `hide`）
 - 写隔离（`cow` 写操作先记录，仅在隔离区可见，后可选是否写回真实系统）
-- IPC/PID/MNT 隔离，防止如 `systemd-run` 逃过文件系统隔离
+- IPC/PID/MNT 隔离，减少逃逸如 `systemd-run` 的可能性
 
 不包含：
 
