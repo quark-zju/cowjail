@@ -183,6 +183,42 @@ impl LeashFs {
         self.mutation_errno_for_pid(path, requester_pid)
     }
 
+    fn resolved_host_target(path: &Path) -> Option<PathBuf> {
+        let resolved = fs::canonicalize(path).ok()?;
+        if resolved == path {
+            None
+        } else {
+            Some(resolved)
+        }
+    }
+
+    fn open_policy_errno_for_pid(
+        &self,
+        path: &Path,
+        requester_pid: Option<u32>,
+        write: bool,
+    ) -> Option<i32> {
+        let check_path = |candidate: &Path| {
+            if write {
+                if let Some(errno) = self.mutation_errno_for_pid(candidate, requester_pid) {
+                    return Some(errno);
+                }
+                if self.write_mode_for_pid(candidate, requester_pid) == WriteMode::Forbidden {
+                    return Some(EACCES);
+                }
+                None
+            } else {
+                self.access_errno_for_pid(candidate, requester_pid)
+            }
+        };
+
+        if let Some(errno) = check_path(path) {
+            return Some(errno);
+        }
+        let resolved = Self::resolved_host_target(path)?;
+        check_path(&resolved)
+    }
+
     fn runtime_guard_root(&self) -> Option<&Path> {
         let mount_root = self.mount_root.as_deref()?;
         if mount_root.file_name() != Some(OsStr::new(crate::ns_runtime::MOUNT_DIR_NAME)) {
@@ -658,16 +694,8 @@ impl Filesystem for LeashFs {
             reply.error(ENOENT);
             return;
         };
-        if flags & libc::O_ACCMODE != libc::O_RDONLY {
-            if let Some(errno) = self.mutation_errno_for_pid(&path, Some(req.pid())) {
-                reply.error(errno);
-                return;
-            }
-            if self.write_mode_for_pid(&path, Some(req.pid())) == WriteMode::Forbidden {
-                reply.error(EACCES);
-                return;
-            }
-        } else if let Some(errno) = self.access_errno_for_pid(&path, Some(req.pid())) {
+        let is_write = flags & libc::O_ACCMODE != libc::O_RDONLY;
+        if let Some(errno) = self.open_policy_errno_for_pid(&path, Some(req.pid()), is_write) {
             reply.error(errno);
             return;
         }
@@ -1098,12 +1126,8 @@ impl Filesystem for LeashFs {
             reply.error(ENOENT);
             return;
         };
-        if let Some(errno) = self.mutation_errno_for_pid(&path, Some(req.pid())) {
+        if let Some(errno) = self.open_policy_errno_for_pid(&path, Some(req.pid()), true) {
             reply.error(errno);
-            return;
-        }
-        if self.write_mode_for_pid(&path, Some(req.pid())) == WriteMode::Forbidden {
-            reply.error(EACCES);
             return;
         }
         match self.apply_passthrough_setattr(&path, size, mode, atime, mtime) {
@@ -1482,6 +1506,42 @@ mod tests {
         let meta = fs::metadata(&path).expect("metadata");
         assert_eq!(meta.atime(), 56_789);
         assert_eq!(meta.mtime(), 56_789);
+    }
+
+    #[test]
+    fn open_policy_resolves_symlink_target_for_reads() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path();
+        let allowed_dir = base.join("allowed");
+        let denied_dir = base.join("denied");
+        let denied_file = denied_dir.join("secret.txt");
+        let link = allowed_dir.join("secret-link");
+        fs::create_dir_all(&allowed_dir).expect("mkdir allowed");
+        fs::create_dir_all(&denied_dir).expect("mkdir denied");
+        fs::write(&denied_file, b"secret").expect("write denied file");
+        std::os::unix::fs::symlink(&denied_file, &link).expect("create symlink");
+
+        let profile_src = format!("{} rw\n{} deny\n", allowed_dir.display(), denied_dir.display());
+        let fs = test_fs(&profile_src);
+        assert_eq!(fs.open_policy_errno_for_pid(&link, None, false), Some(EACCES));
+    }
+
+    #[test]
+    fn open_policy_resolves_symlink_target_for_writes() {
+        let dir = tempdir().expect("tempdir");
+        let base = dir.path();
+        let allowed_dir = base.join("allowed");
+        let denied_dir = base.join("denied");
+        let denied_file = denied_dir.join("secret.txt");
+        let link = allowed_dir.join("secret-link");
+        fs::create_dir_all(&allowed_dir).expect("mkdir allowed");
+        fs::create_dir_all(&denied_dir).expect("mkdir denied");
+        fs::write(&denied_file, b"secret").expect("write denied file");
+        std::os::unix::fs::symlink(&denied_file, &link).expect("create symlink");
+
+        let profile_src = format!("{} rw\n{} deny\n", allowed_dir.display(), denied_dir.display());
+        let fs = test_fs(&profile_src);
+        assert_eq!(fs.open_policy_errno_for_pid(&link, None, true), Some(EACCES));
     }
 
     #[test]

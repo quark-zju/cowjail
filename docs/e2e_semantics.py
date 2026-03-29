@@ -199,6 +199,7 @@ def main() -> None:
         rw_file = rw_dir / "note.txt"
         hidden_file = hidden_dir / "secret.txt"
         deny_file = deny_dir / "secret.txt"
+        deny_link = rw_dir / "deny-link"
         repo_file = repo / "tracked.txt"
         nonrepo_file = nonrepo / "loose.txt"
 
@@ -206,6 +207,7 @@ def main() -> None:
         rw_file.write_text("rw-before\n")
         hidden_file.write_text("hidden\n")
         deny_file.write_text("deny\n")
+        deny_link.symlink_to(deny_file)
         repo_file.write_text("repo-before\n")
         nonrepo_file.write_text("nonrepo-before\n")
 
@@ -323,6 +325,46 @@ def main() -> None:
                 "Permission denied",
                 what="deny stderr",
             )
+
+            print("[3.5/5] verifying symlink target policy")
+            completed = jail_run(
+                leash_bin,
+                base_env,
+                profile_path,
+                "/bin/sh",
+                "-lc",
+                'cat "$1"',
+                "sh",
+                str(deny_link),
+                check=False,
+            )
+            if completed.returncode == 0:
+                fail("symlink into deny path unexpectedly became readable")
+            assert_contains(
+                completed.stderr,
+                "Permission denied",
+                what="deny symlink read stderr",
+            )
+
+            completed = jail_run(
+                leash_bin,
+                base_env,
+                profile_path,
+                "/bin/sh",
+                "-lc",
+                'printf blocked >"$1"',
+                "sh",
+                str(deny_link),
+                check=False,
+            )
+            if completed.returncode == 0:
+                fail("symlink into deny path unexpectedly became writable")
+            assert_contains(
+                completed.stderr,
+                "Permission denied",
+                what="deny symlink write stderr",
+            )
+            assert_eq(deny_file.read_text(), "deny\n", what="host deny file content")
 
             print("[4/5] verifying git-rw worktree and non-repo behavior")
             jail_run(
