@@ -241,8 +241,7 @@ fn op_allowed_by_ownership(op: &op::Operation) -> Result<bool> {
                     parent_owns(path)
                 }
             }
-            op::FileState::Regular { .. }
-            | op::FileState::Symlink(_) => {
+            op::FileState::Regular { .. } | op::FileState::Symlink(_) => {
                 if path.exists() {
                     owns(path)
                 } else {

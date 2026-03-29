@@ -109,6 +109,28 @@ fn remove_jail_can_follow_profile_selected_generated_identity() {
 }
 
 #[test]
+fn resolve_in_must_exist_does_not_create_generated_jail_for_profile_selector() {
+    let temp = tempdir().expect("tempdir");
+    let mut layout = jail::layout_from_home(temp.path());
+    layout.runtime_root = temp.path().join("run");
+    let profile_path = temp.path().join("test.profile");
+    fs::write(&profile_path, ". rw\n/tmp ro\n").expect("write profile");
+    let profile_arg = profile_path.to_str().expect("utf-8 path");
+    let expected_name = jail::derive_auto_name(". rw\n/tmp ro\n");
+
+    let err = jail::resolve_in(
+        &layout,
+        None,
+        Some(profile_arg),
+        jail::ResolveMode::MustExist,
+    )
+    .expect_err("must-exist resolve should fail without creating");
+    assert!(err.to_string().contains("jail does not exist"));
+    assert!(!layout.state_root.join(&expected_name).exists());
+    assert!(!layout.runtime_root.join(&expected_name).exists());
+}
+
+#[test]
 fn resolve_in_rejects_rebinding_existing_named_jail_to_different_profile() {
     let temp = tempdir().expect("tempdir");
     let mut layout = jail::layout_from_home(temp.path());

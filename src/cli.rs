@@ -65,7 +65,8 @@ pub struct ListCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowCommand {
-    pub name: String,
+    pub name: Option<String>,
+    pub profile: Option<String>,
     pub verbose: bool,
 }
 
@@ -353,14 +354,12 @@ fn parse_show(mut args: Arguments) -> Result<Command> {
         return Ok(help_command(HelpTopic::Show, false));
     }
     let verbose = args.contains(["-v", "--verbose"]);
-    let name = args
-        .free_from_str::<String>()
-        .context("show requires NAME")?;
-    let extra = args.finish();
-    if !extra.is_empty() {
-        bail!("show got unexpected trailing arguments");
-    }
-    Ok(Command::Show(ShowCommand { name, verbose }))
+    let selector = parse_optional_jail_selector(args, "show")?;
+    Ok(Command::Show(ShowCommand {
+        name: selector.name,
+        profile: selector.profile,
+        verbose,
+    }))
 }
 
 fn parse_rm(mut args: Arguments) -> Result<Command> {
@@ -369,25 +368,9 @@ fn parse_rm(mut args: Arguments) -> Result<Command> {
     }
     let verbose = args.contains(["-v", "--verbose"]);
     let allow_dirty = args.contains("--allow-dirty");
-    let name_flag = args.opt_value_from_str("--name")?;
-    let profile = args.opt_value_from_str("--profile")?;
-    let extra = args.finish();
-    if extra.len() > 1 {
-        bail!("rm got unexpected trailing arguments");
-    }
-    let positional_name = extra.first().map(|raw| {
-        raw.to_str()
-            .ok_or_else(|| anyhow::anyhow!("rm NAME must be valid UTF-8"))
-            .map(ToOwned::to_owned)
-    });
-    let positional_name = positional_name.transpose()?;
-    if name_flag.is_some() && positional_name.is_some() {
-        bail!("rm accepts only one NAME source: positional NAME or --name <name>");
-    }
-    let name = name_flag.or(positional_name);
-    if name.is_some() && profile.is_some() {
-        bail!("rm accepts only one of --name <name> or --profile <profile>");
-    }
+    let selector = parse_optional_jail_selector(args, "rm")?;
+    let name = selector.name;
+    let profile = selector.profile;
     if name.is_none() && profile.is_none() {
         bail!("rm requires NAME, --name <name>, or --profile <profile>");
     }
@@ -433,32 +416,43 @@ fn parse_flush(mut args: Arguments) -> Result<Command> {
     }
     let verbose = args.contains(["-v", "--verbose"]);
     let dry_run = args.contains("--dry-run");
+    let selector = parse_optional_jail_selector(args, "flush")?;
+
+    Ok(Command::Flush(FlushCommand {
+        name: selector.name,
+        profile: selector.profile,
+        dry_run,
+        verbose,
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JailSelector {
+    name: Option<String>,
+    profile: Option<String>,
+}
+
+fn parse_optional_jail_selector(mut args: Arguments, command: &str) -> Result<JailSelector> {
     let name_flag = args.opt_value_from_str("--name")?;
     let profile = args.opt_value_from_str("--profile")?;
     let extra = args.finish();
     if extra.len() > 1 {
-        bail!("flush got unexpected trailing arguments");
+        bail!("{command} got unexpected trailing arguments");
     }
     let positional_name = extra.first().map(|raw| {
         raw.to_str()
-            .ok_or_else(|| anyhow::anyhow!("flush NAME must be valid UTF-8"))
+            .ok_or_else(|| anyhow::anyhow!("{command} NAME must be valid UTF-8"))
             .map(ToOwned::to_owned)
     });
     let positional_name = positional_name.transpose()?;
     if name_flag.is_some() && positional_name.is_some() {
-        bail!("flush accepts only one NAME source: positional NAME or --name <name>");
+        bail!("{command} accepts only one NAME source: positional NAME or --name <name>");
     }
     let name = name_flag.or(positional_name);
     if name.is_some() && profile.is_some() {
-        bail!("flush accepts only one of --name <name> or --profile <profile>");
+        bail!("{command} accepts only one of --name <name> or --profile <profile>");
     }
-
-    Ok(Command::Flush(FlushCommand {
-        name,
-        profile,
-        dry_run,
-        verbose,
-    }))
+    Ok(JailSelector { name, profile })
 }
 
 fn parse_low_level_flush(mut args: Arguments) -> Result<Command> {
@@ -768,9 +762,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_show_requires_name() {
-        let err = parse_from(os(&["show"])).expect_err("show without name should fail");
-        assert!(err.to_string().contains("show requires NAME"));
+    fn parse_show_accepts_implicit_selector() {
+        let cmd = parse_from(os(&["show"])).expect("show without selector should parse");
+        let show = match cmd {
+            Command::Show(show) => show,
+            other => panic!("expected show, got {other:?}"),
+        };
+        assert!(show.name.is_none());
+        assert!(show.profile.is_none());
+        assert!(!show.verbose);
     }
 
     #[test]
@@ -780,7 +780,8 @@ mod tests {
             Command::Show(show) => show,
             other => panic!("expected show, got {other:?}"),
         };
-        assert_eq!(show.name, "agent");
+        assert_eq!(show.name.as_deref(), Some("agent"));
+        assert!(show.profile.is_none());
         assert!(!show.verbose);
     }
 
@@ -791,8 +792,31 @@ mod tests {
             Command::Show(show) => show,
             other => panic!("expected show, got {other:?}"),
         };
-        assert_eq!(show.name, "agent");
+        assert_eq!(show.name.as_deref(), Some("agent"));
+        assert!(show.profile.is_none());
         assert!(show.verbose);
+    }
+
+    #[test]
+    fn parse_show_accepts_profile_selector() {
+        let cmd = parse_from(os(&["show", "--profile", "dev"])).expect("show profile should parse");
+        let show = match cmd {
+            Command::Show(show) => show,
+            other => panic!("expected show, got {other:?}"),
+        };
+        assert!(show.name.is_none());
+        assert_eq!(show.profile.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn parse_show_requires_exactly_one_selector_source() {
+        let err = parse_from(os(&["show", "--name", "a", "b"]))
+            .expect_err("show with positional and --name should fail");
+        assert!(err.to_string().contains("only one NAME source"));
+
+        let err = parse_from(os(&["show", "--name", "a", "--profile", "b"]))
+            .expect_err("show with name and profile should fail");
+        assert!(err.to_string().contains("only one of"));
     }
 
     #[test]

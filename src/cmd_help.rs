@@ -89,10 +89,14 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
         HelpTopic::Show => concat!(
             "cowjail show\n\n",
             "USAGE:\n",
-            "  cowjail show [-v|--verbose] <name>\n\n",
+            "  cowjail show [--name <name> | <name> | --profile <profile>] [-v|--verbose]\n\n",
+            "NOTES:\n",
+            "  () means required choice, [] means optional\n\n",
             "DESCRIPTION:\n",
             "  Print jail profile and pending unflushed write-op count.\n\n",
             "OPTIONS:\n",
+            "  --name <name>         Show a jail by name (same as positional NAME)\n",
+            "  --profile <profile>   Show the jail selected by profile-derived identity\n",
             "  -v, --verbose         Also print pending write paths"
         )
         .to_string(),

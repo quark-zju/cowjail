@@ -9,8 +9,14 @@ use crate::run_with_log;
 
 pub(crate) fn show_command(show: ShowCommand) -> Result<()> {
     let resolved = run_with_log(
-        || jail::resolve(Some(show.name.as_str()), None, jail::ResolveMode::MustExist),
-        || format!("resolve jail '{}'", show.name),
+        || {
+            jail::resolve(
+                show.name.as_deref(),
+                show.profile.as_deref(),
+                jail::ResolveMode::MustExist,
+            )
+        },
+        || "resolve show jail".to_string(),
     )?;
     let frames = run_with_log(
         || record::read_frames_best_effort(&resolved.paths.record_path),
