@@ -110,7 +110,6 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
             "OPTIONS:\n",
             "  --name <name>         Remove by jail name or glob (same as positional NAME)\n",
             "  --profile <profile>   Remove the jail selected by profile-derived identity\n",
-            "  --allow-dirty         Skip pending-write warning and delay before remove\n",
             "  -v, --verbose         Print cleanup syscall progress",
         )
         .to_string(),

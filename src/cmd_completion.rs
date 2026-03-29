@@ -102,7 +102,7 @@ const BASH_COMPLETION: &str = r#"_cowjail_complete() {
   case "$cmd1" in
     run) COMPREPLY=( $(compgen -W "--name --profile -v --verbose" -- "$cur") ) ;;
     flush) COMPREPLY=( $(compgen -W "--name --profile -n --dry-run -v --verbose" -- "$cur") ) ;;
-    rm) COMPREPLY=( $(compgen -W "--name --profile --allow-dirty -v --verbose" -- "$cur") ) ;;
+    rm) COMPREPLY=( $(compgen -W "--name --profile -v --verbose" -- "$cur") ) ;;
     add) COMPREPLY=( $(compgen -W "--name --profile" -- "$cur") ) ;;
     show) COMPREPLY=( $(compgen -W "-v --verbose" -- "$cur") ) ;;
     _mount) COMPREPLY=( $(compgen -W "--profile --record -v --verbose" -- "$cur") ) ;;

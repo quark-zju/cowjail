@@ -75,7 +75,6 @@ pub struct RmCommand {
     pub name: Option<String>,
     pub profile: Option<String>,
     pub verbose: bool,
-    pub allow_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,7 +366,6 @@ fn parse_rm(mut args: Arguments) -> Result<Command> {
         return Ok(help_command(HelpTopic::Rm, false));
     }
     let verbose = args.contains(["-v", "--verbose"]);
-    let allow_dirty = args.contains("--allow-dirty");
     let selector = parse_optional_jail_selector(args, "rm")?;
     let name = selector.name;
     let profile = selector.profile;
@@ -378,7 +376,6 @@ fn parse_rm(mut args: Arguments) -> Result<Command> {
         name,
         profile,
         verbose,
-        allow_dirty,
     }))
 }
 
@@ -850,7 +847,6 @@ mod tests {
         assert_eq!(rm.name.as_deref(), Some("agent"));
         assert!(rm.profile.is_none());
         assert!(!rm.verbose);
-        assert!(!rm.allow_dirty);
     }
 
     #[test]
@@ -862,19 +858,6 @@ mod tests {
         };
         assert_eq!(rm.name.as_deref(), Some("agent"));
         assert!(rm.verbose);
-        assert!(!rm.allow_dirty);
-    }
-
-    #[test]
-    fn parse_rm_allow_dirty_flag() {
-        let cmd = parse_from(os(&["rm", "--allow-dirty", "agent"]))
-            .expect("rm with --allow-dirty should parse");
-        let rm = match cmd {
-            Command::Rm(rm) => rm,
-            other => panic!("expected rm, got {other:?}"),
-        };
-        assert_eq!(rm.name.as_deref(), Some("agent"));
-        assert!(rm.allow_dirty);
     }
 
     #[test]
