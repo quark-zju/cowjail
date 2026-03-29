@@ -147,8 +147,8 @@ fn validate_drop_to_real_user_uids(uid: u32, euid: u32) -> Result<()> {
         }
         bail!("drop_to_real_user requires root euid (current euid={euid})");
     }
-    if uid == 0 {
-        bail!("drop_to_real_user requires non-root real uid target (current uid=0)");
+    if uid == 0 && euid != 0 {
+        bail!("drop_to_real_user requires non-root real uid target (current uid=0, euid={euid})");
     }
     Ok(())
 }
@@ -178,9 +178,8 @@ mod tests {
     }
 
     #[test]
-    fn drop_validation_rejects_root_target() {
-        let err = validate_drop_to_real_user_uids(0, 0).expect_err("must not target root");
-        assert!(err.to_string().contains("non-root real uid target"));
+    fn drop_validation_accepts_sudo() {
+        validate_drop_to_real_user_uids(0, 0).expect("root -> root is okay (sudo)")
     }
 
     #[test]
