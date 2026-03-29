@@ -16,12 +16,64 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
+def decode_mountinfo_path(value: str) -> str:
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+def mount_options_for_path(path: Path) -> set[str]:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+
+    best_mountpoint = Path("/")
+    best_options: set[str] = set()
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+            for line in fh:
+                fields = line.strip().split()
+                if len(fields) < 6:
+                    continue
+                mountpoint = Path(decode_mountinfo_path(fields[4]))
+                if mountpoint != Path("/") and not str(resolved).startswith(
+                    str(mountpoint) + os.sep
+                ) and resolved != mountpoint:
+                    continue
+                if len(str(mountpoint)) >= len(str(best_mountpoint)):
+                    best_mountpoint = mountpoint
+                    best_options = set(fields[5].split(","))
+    except OSError:
+        return set()
+    return best_options
+
+
+def default_work_root() -> Path:
+    candidates = [Path("/var/tmp"), ROOT_DIR / ".e2e-work", Path("/tmp")]
+    viable: list[Path] = []
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        viable.append(candidate)
+        if "nosuid" not in mount_options_for_path(candidate):
+            return candidate
+    if viable:
+        return viable[0]
+    return Path("/tmp")
+
+
 def init_work_dir() -> Path:
     configured = os.environ.get("COWJAIL_E2E_WORK_ROOT")
     if configured:
         base = Path(configured)
     else:
-        base = Path("/tmp")
+        base = default_work_root()
     try:
         base.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(prefix="cowjail-e2e-", dir=str(base)))
