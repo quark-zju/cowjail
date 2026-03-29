@@ -277,7 +277,7 @@ impl CowFs {
                 if self.git_rw_filter.path_is_git_repo_member(path) {
                     Visibility::Action(RuleAction::Passthrough)
                 } else {
-                    Visibility::Action(RuleAction::Hide)
+                    Visibility::Action(RuleAction::ReadOnly)
                 }
             }
             other => other,
@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     #[test]
-    fn git_rw_hides_non_repo_paths() {
+    fn git_rw_makes_non_repo_paths_read_only() {
         let dir = tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         let outside = dir.path().join("notes.txt");
@@ -2606,9 +2606,10 @@ mod tests {
 
         let profile_src = format!("{} git-rw\n", dir.path().display());
         let (_holder, _record_path, fs) = test_fs(&profile_src);
-        assert_eq!(fs.access_errno(&outside), Some(ENOENT));
-        assert_eq!(fs.mutation_errno(&outside), Some(EPERM));
-        assert!(!fs.is_visible(&outside));
+        assert_eq!(fs.access_errno(&outside), None);
+        assert_eq!(fs.mutation_errno(&outside), None);
+        assert!(fs.is_visible(&outside));
+        assert_eq!(fs.write_mode(&outside), WriteMode::Forbidden);
     }
 
     #[test]
