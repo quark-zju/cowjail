@@ -96,16 +96,25 @@ Example:
 
 ## Default Profile Resolution
 
-When `--profile default` is used, or `run` and `add` omit `--profile`, `leash` resolves profile source in this order:
+When a command resolves the profile name `default` (for example, `leash run` without `--profile`, or an explicit `--profile default`), `leash` loads the source in this order:
 
 1. `~/.config/leash/profiles/default` when the file exists
 2. built-in fallback source when the file is missing
 
-The built-in fallback source is assembled from readonly builtin fragments and ends with `~ git-rw`.
-If you want a user override, create or edit `~/.config/leash/profiles/default`.
+The fallback is the built-in `builtin:default` profile. If you want a user override, create or edit `~/.config/leash/profiles/default`:
 
-To inspect the currently effective on-disk default profile, use:
+```bash
+leash profile edit default
+```
+
+To inspect the currently effective default profile source, use:
 
 ```bash
 leash profile show
+```
+
+If `~/.config/leash/profiles/default` is absent, `leash profile show` displays the built-in fallback source. To remove a user override and return to the built-in default, run:
+
+```bash
+leash profile rm default
 ```
