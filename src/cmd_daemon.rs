@@ -20,6 +20,7 @@ use crate::privileges;
 use crate::run_env;
 
 const FAN_MARK_MNTNS: libc::c_uint = 0x0000_0110;
+const FAN_REPORT_MNT: libc::c_uint = 0x0000_4000;
 const PERMISSION_MASK: u64 =
     libc::FAN_OPEN_PERM | libc::FAN_OPEN_EXEC_PERM | libc::FAN_EVENT_ON_CHILD;
 
@@ -131,7 +132,7 @@ impl SessionObserver {
     fn new(namespace_file: &File, policy: AccessPolicy) -> Result<Self> {
         let fd = unsafe {
             libc::fanotify_init(
-                (libc::FAN_CLOEXEC | libc::FAN_CLASS_CONTENT) as libc::c_uint,
+                (libc::FAN_CLOEXEC | libc::FAN_CLASS_CONTENT | FAN_REPORT_MNT) as libc::c_uint,
                 (libc::O_RDONLY | libc::O_LARGEFILE) as libc::c_uint,
             )
         };
