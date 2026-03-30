@@ -168,18 +168,22 @@ impl SessionObserver {
 
     #[cfg(not(test))]
     fn mark_namespace(&self, namespace_file: &File) -> Result<()> {
+        let namespace_path = format!("/proc/self/fd/{}", namespace_file.as_raw_fd());
+        let namespace_path_c = std::ffi::CString::new(namespace_path.clone())
+            .context("mount namespace fd path contains interior NUL byte")?;
         let rc = unsafe {
             libc::fanotify_mark(
                 self.fd.as_raw_fd(),
                 libc::FAN_MARK_ADD | FAN_MARK_MNTNS,
                 PERMISSION_MASK,
-                namespace_file.as_raw_fd(),
-                std::ptr::null(),
+                libc::AT_FDCWD,
+                namespace_path_c.as_ptr(),
             )
         };
         if rc != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("fanotify_mark(FAN_MARK_MNTNS) failed");
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("fanotify_mark(FAN_MARK_MNTNS) failed for {namespace_path}")
+            });
         }
         Ok(())
     }
