@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -8,15 +8,88 @@ use std::time::{Duration, Instant};
 
 use crate::cmd_daemon;
 
-pub(crate) fn ensure_daemon_running(verbose: bool, profile_source: &str) -> Result<()> {
+pub(crate) fn ensure_daemon_running(verbose: bool, profile_source: &str) -> Result<OwnedFd> {
     let socket_path = cmd_daemon::default_socket_path();
     if ping_daemon(&socket_path).is_ok() {
-        return Ok(());
+        return daemon_pidfd(&socket_path);
     }
 
     spawn_daemon_process(verbose)?;
     wait_for_daemon(&socket_path, Duration::from_secs(2))?;
-    set_profile(profile_source)
+    set_profile(profile_source)?;
+    daemon_pidfd(&socket_path)
+}
+
+fn daemon_pidfd(socket_path: &std::path::Path) -> Result<OwnedFd> {
+    let pid = daemon_pid_from_socket(socket_path)?;
+    open_pidfd(pid)
+}
+
+fn daemon_pid_from_socket(socket_path: &std::path::Path) -> Result<libc::pid_t> {
+    let mut stream = UnixStream::connect(socket_path).with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+    let creds = peer_credentials_for_stream(&stream)?;
+    stream.write_all(b"ping\n").with_context(|| {
+        format!(
+            "failed to finalize daemon pidfd probe request to {}",
+            socket_path.display()
+        )
+    })?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).with_context(|| {
+        format!(
+            "failed to read daemon pidfd probe response from {}",
+            socket_path.display()
+        )
+    })?;
+    if response.trim() != "pong" {
+        bail!("unexpected daemon pidfd probe response: {}", response.trim());
+    }
+    Ok(creds.pid)
+}
+
+fn open_pidfd(pid: libc::pid_t) -> Result<OwnedFd> {
+    let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, libc::PIDFD_NONBLOCK) as libc::c_int };
+    if raw_fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("pidfd_open failed for daemon pid {pid}"));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("fcntl(F_GETFD) failed for daemon pidfd");
+    }
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("fcntl(F_SETFD) failed for daemon pidfd");
+    }
+    Ok(fd)
+}
+
+fn peer_credentials_for_stream(stream: &UnixStream) -> Result<libc::ucred> {
+    let fd = stream.as_raw_fd();
+    let mut creds = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut creds as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("getsockopt(SO_PEERCRED) failed");
+    }
+    Ok(creds)
 }
 
 fn ping_daemon(socket_path: &std::path::Path) -> Result<()> {

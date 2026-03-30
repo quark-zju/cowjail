@@ -41,7 +41,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         cwd.display()
     );
 
-    run_with_log(
+    let daemon_pidfd = run_with_log(
         || daemon_client::ensure_daemon_running(run.verbose, &resolved.normalized_profile),
         || "ensure daemon".to_string(),
     )?;
@@ -50,7 +50,7 @@ pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
         "unshare run namespaces".to_string()
     })?;
     let status = run_with_log(
-        || run_env::run_child_in_jail(&run, &cwd, &resolved.normalized_profile),
+        || run_env::run_child_in_jail(&run, &cwd, &resolved.normalized_profile, daemon_pidfd),
         || format!("execute jailed command {:?}", run.program),
     )?;
 

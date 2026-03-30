@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -22,15 +23,26 @@ pub(crate) fn run_child_in_jail(
     run: &RunCommand,
     old_cwd: &Path,
     profile_source: &str,
+    daemon_pidfd: OwnedFd,
 ) -> Result<std::process::ExitStatus> {
     let cwd_c = CString::new(old_cwd.as_os_str().as_encoded_bytes())
         .context("cwd contains interior NUL byte")?;
     let profile_source = profile_source.to_string();
+    let daemon_pidfd_raw = daemon_pidfd.as_raw_fd();
 
     let mut cmd = ProcessCommand::new(&run.program);
     cmd.args(&run.args);
     unsafe {
         cmd.pre_exec(move || {
+            let duplicated_pidfd = libc::dup(daemon_pidfd_raw);
+            if duplicated_pidfd < 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!("dup daemon pidfd failed: {err}"),
+                ));
+            }
+            let daemon_pidfd = OwnedFd::from_raw_fd(duplicated_pidfd);
             if let Err(err) = make_mounts_private() {
                 return Err(std::io::Error::other(err.to_string()));
             }
@@ -64,7 +76,7 @@ pub(crate) fn run_child_in_jail(
                     ));
                 }
             }
-            if let Err(err) = enter_pid_namespace_worker_or_reap() {
+            if let Err(err) = enter_pid_namespace_worker_or_reap(daemon_pidfd) {
                 return Err(std::io::Error::other(err.to_string()));
             }
             if let Err(err) = privileges::drop_to_real_user() {
@@ -92,7 +104,7 @@ pub(crate) fn setup_run_namespaces() -> Result<()> {
     Ok(())
 }
 
-fn enter_pid_namespace_worker_or_reap() -> Result<()> {
+fn enter_pid_namespace_worker_or_reap(daemon_pidfd: OwnedFd) -> Result<()> {
     let worker_pid = unsafe { libc::fork() };
     if worker_pid < 0 {
         return Err(std::io::Error::last_os_error()).context("fork for pidns worker failed");
@@ -102,16 +114,20 @@ fn enter_pid_namespace_worker_or_reap() -> Result<()> {
             unsafe { libc::_exit(1) };
         }
         let _ = set_process_name(c"leash-init");
-        run_pidns_init_reaper(worker_pid);
+        run_pidns_init_reaper(worker_pid, daemon_pidfd);
     }
+    drop(daemon_pidfd);
     Ok(())
 }
 
-fn run_pidns_init_reaper(worker_pid: libc::pid_t) -> ! {
+fn run_pidns_init_reaper(worker_pid: libc::pid_t, daemon_pidfd: OwnedFd) -> ! {
     let mut worker_status: Option<libc::c_int> = None;
     loop {
+        if daemon_pidfd_ready(&daemon_pidfd) {
+            unsafe { libc::_exit(1) }
+        }
         let mut status: libc::c_int = 0;
-        let rc = unsafe { libc::waitpid(-1, &mut status, 0) };
+        let rc = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
         if rc < 0 {
             let err = std::io::Error::last_os_error();
             match err.raw_os_error() {
@@ -119,6 +135,12 @@ fn run_pidns_init_reaper(worker_pid: libc::pid_t) -> ! {
                 Some(libc::ECHILD) => break,
                 _ => unsafe { libc::_exit(1) },
             }
+        }
+        if rc == 0 {
+            if wait_for_worker_or_daemon(&daemon_pidfd) {
+                unsafe { libc::_exit(1) }
+            }
+            continue;
         }
         if rc == worker_pid {
             worker_status = Some(status);
@@ -139,6 +161,38 @@ fn exit_from_wait_status(status: libc::c_int) -> ! {
         unsafe { libc::_exit(128 + sig) };
     }
     unsafe { libc::_exit(1) }
+}
+
+fn daemon_pidfd_ready(daemon_pidfd: &OwnedFd) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd: daemon_pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let rc = unsafe { libc::poll(&mut pollfd, 1, 0) };
+    rc > 0 && (pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0
+}
+
+fn wait_for_worker_or_daemon(daemon_pidfd: &OwnedFd) -> bool {
+    let mut pollfd = libc::pollfd {
+        fd: daemon_pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let rc = unsafe { libc::poll(&mut pollfd, 1, 50) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return true;
+        }
+        if rc > 0 && (pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0 {
+            return true;
+        }
+        return false;
+    }
 }
 
 fn make_mounts_private() -> Result<()> {

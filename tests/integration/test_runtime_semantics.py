@@ -319,6 +319,56 @@ class LeashIntegrationTestCase(unittest.TestCase):
 
 
 class RuntimeSemanticsTests(LeashIntegrationTestCase):
+    def test_daemon_exit_kills_running_pid_namespace(self) -> None:
+        runner = subprocess.Popen(
+            [
+                str(self.leash_bin),
+                "run",
+                "--profile",
+                str(self.profile_path),
+                "--",
+                "/bin/sh",
+                "-lc",
+                "while :; do sleep 1; done",
+            ],
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            time.sleep(0.5)
+            initial_code = runner.poll()
+            if initial_code is not None:
+                self.fail(
+                    f"jailed process exited before daemon shutdown: rc={initial_code} stderr={runner.stderr.read()}"
+                )
+
+            run_cmd(
+                [str(self.leash_bin), "_shutdown-daemon"],
+                env=self.env,
+                capture_stdout=False,
+            )
+
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                code = runner.poll()
+                if code is not None:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("jailed process kept running after daemon shutdown")
+
+            self.assertNotEqual(code, 0)
+        finally:
+            if runner.poll() is None:
+                runner.kill()
+                runner.wait(timeout=5)
+            if runner.stdout is not None:
+                runner.stdout.close()
+            if runner.stderr is not None:
+                runner.stderr.close()
+
     def test_tail_streams_daemon_decisions(self) -> None:
         tail = subprocess.Popen(
             [str(self.leash_bin), "tail"],
