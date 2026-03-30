@@ -118,14 +118,14 @@ impl LeashFs {
         }
     }
 
-    fn access_errno_for_pid(&self, path: &Path, _requester_pid: Option<u32>) -> Option<i32> {
+    fn access_errno_for_pid(&self, path: &Path, requester_pid: Option<u32>) -> Option<i32> {
         if is_blocked_proc_thread_self(path) {
             return Some(ENOENT);
         }
         if self.is_hard_blocked_runtime_path(path) {
             return Some(EACCES);
         }
-        match self.dynamic_visibility(path) {
+        match self.dynamic_visibility_for_pid(path, requester_pid) {
             Visibility::Hidden | Visibility::Action(RuleAction::Hide) => Some(ENOENT),
             Visibility::Action(RuleAction::Deny) => Some(EACCES),
             Visibility::ImplicitAncestor if !self.path_is_directory(path) => Some(ENOENT),
@@ -157,7 +157,7 @@ impl LeashFs {
         {
             return Some(EACCES);
         }
-        match self.dynamic_visibility(path) {
+        match self.dynamic_visibility_for_pid(path, requester_pid) {
             Visibility::Hidden | Visibility::Action(RuleAction::Hide) => Some(EPERM),
             Visibility::Action(RuleAction::Deny) => Some(EACCES),
             Visibility::ImplicitAncestor if !self.path_is_directory(path) => Some(ENOENT),
@@ -241,7 +241,16 @@ impl LeashFs {
     }
 
     fn dynamic_visibility(&self, path: &Path) -> Visibility {
-        match self.profile.visibility(path) {
+        self.dynamic_visibility_for_exe(path, None)
+    }
+
+    fn dynamic_visibility_for_pid(&self, path: &Path, requester_pid: Option<u32>) -> Visibility {
+        let exe_path = requester_pid.and_then(process_exe_path);
+        self.dynamic_visibility_for_exe(path, exe_path.as_deref())
+    }
+
+    fn dynamic_visibility_for_exe(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
+        match self.profile.visibility_for_exe(path, exe_path) {
             Visibility::Action(RuleAction::GitRw) => {
                 if self.git_rw_filter.path_is_git_repo_member(path) {
                     Visibility::Action(RuleAction::Passthrough)
@@ -272,7 +281,7 @@ impl LeashFs {
                 WriteMode::Forbidden
             };
         }
-        match self.dynamic_visibility(path) {
+        match self.dynamic_visibility_for_pid(path, requester_pid) {
             Visibility::Action(RuleAction::Passthrough) => WriteMode::Passthrough,
             _ => WriteMode::Forbidden,
         }
@@ -1268,6 +1277,10 @@ fn rewrite_proc_exe_readlink_target(
     }
 }
 
+fn process_exe_path(pid: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
 fn is_proc_exe_path(path: &Path) -> bool {
     let Ok(without_proc) = path.strip_prefix("/proc") else {
         return false;
@@ -1549,9 +1562,16 @@ mod tests {
         fs::write(&denied_file, b"secret").expect("write denied file");
         std::os::unix::fs::symlink(&denied_file, &link).expect("create symlink");
 
-        let profile_src = format!("{} rw\n{} deny\n", allowed_dir.display(), denied_dir.display());
+        let profile_src = format!(
+            "{} rw\n{} deny\n",
+            allowed_dir.display(),
+            denied_dir.display()
+        );
         let fs = test_fs(&profile_src);
-        assert_eq!(fs.open_policy_errno_for_pid(&link, None, false), Some(EACCES));
+        assert_eq!(
+            fs.open_policy_errno_for_pid(&link, None, false),
+            Some(EACCES)
+        );
     }
 
     #[test]
@@ -1567,9 +1587,16 @@ mod tests {
         fs::write(&denied_file, b"secret").expect("write denied file");
         std::os::unix::fs::symlink(&denied_file, &link).expect("create symlink");
 
-        let profile_src = format!("{} rw\n{} deny\n", allowed_dir.display(), denied_dir.display());
+        let profile_src = format!(
+            "{} rw\n{} deny\n",
+            allowed_dir.display(),
+            denied_dir.display()
+        );
         let fs = test_fs(&profile_src);
-        assert_eq!(fs.open_policy_errno_for_pid(&link, None, true), Some(EACCES));
+        assert_eq!(
+            fs.open_policy_errno_for_pid(&link, None, true),
+            Some(EACCES)
+        );
     }
 
     #[test]

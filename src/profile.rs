@@ -16,12 +16,16 @@ pub enum RuleAction {
 #[derive(Debug, Clone)]
 struct Rule {
     action: RuleAction,
+    conditions: Vec<Condition>,
+    implicit_visible_ancestors: BTreeSet<PathBuf>,
+    implicit_ancestor_globset: GlobSet,
 }
 
 #[derive(Debug, Clone)]
 struct ParsedRuleLine {
     pattern: String,
     action: RuleAction,
+    normalized_conditions: Vec<String>,
     line_no: usize,
 }
 
@@ -30,8 +34,30 @@ pub struct Profile {
     rules: Vec<Rule>,
     globset: GlobSet,
     glob_to_rule: Vec<usize>,
-    implicit_visible_ancestors: BTreeSet<PathBuf>,
-    implicit_ancestor_globset: GlobSet,
+}
+
+pub trait ExeResolver {
+    fn resolve(&self, name: &str) -> Option<PathBuf>;
+}
+
+struct PathExeResolver;
+
+impl ExeResolver for PathExeResolver {
+    fn resolve(&self, name: &str) -> Option<PathBuf> {
+        let path_var = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Condition {
+    Exe(Option<PathBuf>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,25 +80,26 @@ impl Profile {
         let home = normalize_abs(home)
             .context("home for profile parsing must be an absolute normalized path")?;
 
-        let parsed = parse_lines(profile_src, &cwd, &home)?;
+        let exe_resolver = PathExeResolver;
+        let parsed = parse_lines(profile_src, &cwd, &home, &exe_resolver)?;
         let mut rules = Vec::new();
         let mut globset_builder = GlobSetBuilder::new();
         let mut glob_to_rule = Vec::new();
-        let mut implicit_visible_ancestors = BTreeSet::new();
-        let mut implicit_ancestor_globset_builder = GlobSetBuilder::new();
-        let mut implicit_ancestor_globs = BTreeSet::new();
         for line in &parsed {
             let action = line.action;
             let pattern = line.pattern.clone();
-            if action_requires_visible_ancestors(action) {
-                gather_implicit_ancestors(&pattern, &mut implicit_visible_ancestors);
-                for ancestor_glob in implicit_ancestor_globs_for_rule(&pattern) {
-                    implicit_ancestor_globs.insert(ancestor_glob);
-                }
-            }
+            let conditions = compile_conditions(&line.normalized_conditions, &exe_resolver)
+                .with_context(|| format!("line {} has invalid conditions", line.line_no))?;
+            let (implicit_visible_ancestors, implicit_ancestor_globset) =
+                build_implicit_ancestor_sets(&pattern, action)?;
 
             let rule_idx = rules.len();
-            rules.push(Rule { action });
+            rules.push(Rule {
+                action,
+                conditions,
+                implicit_visible_ancestors,
+                implicit_ancestor_globset,
+            });
 
             for glob_pattern in glob_patterns_for_rule(&pattern) {
                 let glob = GlobBuilder::new(&glob_pattern)
@@ -89,33 +116,32 @@ impl Profile {
         let globset = globset_builder
             .build()
             .context("failed to build globset for profile")?;
-        for glob_pattern in implicit_ancestor_globs {
-            let glob = GlobBuilder::new(&glob_pattern)
-                .literal_separator(true)
-                .build()
-                .with_context(|| format!("invalid implicit ancestor glob: {glob_pattern}"))?;
-            implicit_ancestor_globset_builder.add(glob);
-        }
-        let implicit_ancestor_globset = implicit_ancestor_globset_builder
-            .build()
-            .context("failed to build implicit ancestor globset for profile")?;
 
         Ok(Self {
             rules,
             globset,
             glob_to_rule,
-            implicit_visible_ancestors,
-            implicit_ancestor_globset,
         })
     }
 
     pub fn first_match_action(&self, abs_path: &Path) -> Option<RuleAction> {
+        self.first_match_action_for_exe(abs_path, None)
+    }
+
+    pub fn first_match_action_for_exe(
+        &self,
+        abs_path: &Path,
+        exe_path: Option<&Path>,
+    ) -> Option<RuleAction> {
         let normalized = normalize_abs(abs_path).ok()?;
         let matched = self.globset.matches(&normalized);
 
         let mut first_rule_idx: Option<usize> = None;
         for glob_idx in &matched {
             let rule_idx = self.glob_to_rule[*glob_idx];
+            if !self.rules[rule_idx].conditions_match(exe_path) {
+                continue;
+            }
             if first_rule_idx.is_none_or(|existing| rule_idx < existing) {
                 first_rule_idx = Some(rule_idx);
             }
@@ -125,27 +151,36 @@ impl Profile {
     }
 
     pub fn visibility(&self, abs_path: &Path) -> Visibility {
+        self.visibility_for_exe(abs_path, None)
+    }
+
+    pub fn visibility_for_exe(&self, abs_path: &Path, exe_path: Option<&Path>) -> Visibility {
         let Ok(normalized) = normalize_abs(abs_path) else {
             return Visibility::Hidden;
         };
 
-        if let Some(action) = self.first_match_action(&normalized) {
-            if action == RuleAction::Hide && self.is_implicit_visible_ancestor(&normalized) {
+        if let Some(action) = self.first_match_action_for_exe(&normalized, exe_path) {
+            if action == RuleAction::Hide && self.is_implicit_visible_ancestor(&normalized, exe_path)
+            {
                 return Visibility::ImplicitAncestor;
             }
             return Visibility::Action(action);
         }
 
-        if self.is_implicit_visible_ancestor(&normalized) {
+        if self.is_implicit_visible_ancestor(&normalized, exe_path) {
             return Visibility::ImplicitAncestor;
         }
 
         Visibility::Hidden
     }
 
-    fn is_implicit_visible_ancestor(&self, normalized: &Path) -> bool {
-        self.implicit_visible_ancestors.contains(normalized)
-            || self.implicit_ancestor_globset.is_match(normalized)
+    fn is_implicit_visible_ancestor(&self, normalized: &Path, exe_path: Option<&Path>) -> bool {
+        self.rules.iter().any(|rule| {
+            action_requires_visible_ancestors(rule.action)
+                && rule.conditions_match(exe_path)
+                && (rule.implicit_visible_ancestors.contains(normalized)
+                    || rule.implicit_ancestor_globset.is_match(normalized))
+        })
     }
 }
 
@@ -164,12 +199,17 @@ pub fn normalize_source_with_home(
         .context("launch cwd for profile normalization must be an absolute normalized path")?;
     let home = normalize_abs(home)
         .context("home for profile normalization must be an absolute normalized path")?;
-    let parsed = parse_lines(profile_src, &cwd, &home)?;
+    let exe_resolver = PathExeResolver;
+    let parsed = parse_lines(profile_src, &cwd, &home, &exe_resolver)?;
     let mut out = String::new();
     for line in parsed {
         out.push_str(&line.pattern);
         out.push(' ');
         out.push_str(action_to_str(line.action));
+        if !line.normalized_conditions.is_empty() {
+            out.push_str(" when ");
+            out.push_str(&line.normalized_conditions.join(","));
+        }
         out.push('\n');
     }
     Ok(out)
@@ -183,9 +223,13 @@ pub(crate) struct NormalizedRuleLine {
 }
 
 pub(crate) fn parse_normalized_rule_lines(profile_src: &str) -> Result<Vec<NormalizedRuleLine>> {
-    let parsed = parse_lines(profile_src, Path::new("/"), Path::new("/"))?;
+    let exe_resolver = PathExeResolver;
+    let parsed = parse_lines(profile_src, Path::new("/"), Path::new("/"), &exe_resolver)?;
     let mut out = Vec::with_capacity(parsed.len());
     for line in parsed {
+        if !line.normalized_conditions.is_empty() {
+            bail!("line {} conditional rules are not supported here", line.line_no);
+        }
         let path = PathBuf::from(&line.pattern);
         if !path.is_absolute() {
             bail!(
@@ -230,7 +274,34 @@ fn action_requires_visible_ancestors(action: RuleAction) -> bool {
     )
 }
 
-fn parse_lines(profile_src: &str, cwd: &Path, home: &Path) -> Result<Vec<ParsedRuleLine>> {
+fn compile_conditions(tokens: &[String], exe_resolver: &dyn ExeResolver) -> Result<Vec<Condition>> {
+    let mut out = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        if let Some(rest) = token.strip_prefix("exe=") {
+            out.push(Condition::Exe(resolve_exe(rest, exe_resolver)?));
+        } else {
+            bail!("unknown condition '{token}'")
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_exe(value: &str, resolver: &dyn ExeResolver) -> Result<Option<PathBuf>> {
+    if value.starts_with('/') {
+        return Ok(Some(PathBuf::from(value)));
+    }
+    if value.contains('/') {
+        bail!("invalid exe= value '{value}': must be a bare name or an absolute path");
+    }
+    Ok(resolver.resolve(value))
+}
+
+fn parse_lines(
+    profile_src: &str,
+    cwd: &Path,
+    home: &Path,
+    exe_resolver: &dyn ExeResolver,
+) -> Result<Vec<ParsedRuleLine>> {
     let mut out = Vec::new();
     for (idx, line) in profile_src.lines().enumerate() {
         let trimmed = line.trim();
@@ -245,9 +316,23 @@ fn parse_lines(profile_src: &str, cwd: &Path, home: &Path) -> Result<Vec<ParsedR
         let action_token = parts
             .next()
             .with_context(|| format!("line {} missing action", idx + 1))?;
-        if parts.next().is_some() {
-            bail!("line {} has extra tokens", idx + 1);
-        }
+
+        let normalized_conditions = match parts.next() {
+            None => Vec::new(),
+            Some("when") => {
+                let conds_str = parts
+                    .next()
+                    .with_context(|| format!("line {} missing conditions", idx + 1))?;
+                if parts.next().is_some() {
+                    bail!("line {} has extra tokens after conditions", idx + 1);
+                }
+                conds_str
+                    .split(',')
+                    .map(|raw| normalize_condition(raw.trim(), exe_resolver))
+                    .collect::<Result<Vec<_>>>()?
+            }
+            Some(other) => bail!("line {} expected 'when' but got '{other}'", idx + 1),
+        };
 
         let action = parse_action(action_token)
             .with_context(|| format!("line {} has invalid action", idx + 1))?;
@@ -256,10 +341,22 @@ fn parse_lines(profile_src: &str, cwd: &Path, home: &Path) -> Result<Vec<ParsedR
         out.push(ParsedRuleLine {
             pattern,
             action,
+            normalized_conditions,
             line_no: idx + 1,
         });
     }
     Ok(out)
+}
+
+fn normalize_condition(raw: &str, exe_resolver: &dyn ExeResolver) -> Result<String> {
+    if let Some(rest) = raw.strip_prefix("exe=") {
+        let resolved = resolve_exe(rest, exe_resolver)?;
+        return Ok(match resolved {
+            Some(path) => format!("exe={}", path.display()),
+            None => format!("exe={rest}"),
+        });
+    }
+    bail!("unknown condition '{raw}'")
 }
 
 fn normalize_pattern(token: &str, cwd: &Path, home: &Path) -> Result<String> {
@@ -284,6 +381,43 @@ fn normalize_pattern(token: &str, cwd: &Path, home: &Path) -> Result<String> {
         .to_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("path pattern is not valid UTF-8"))
+}
+
+impl Rule {
+    fn conditions_match(&self, exe_path: Option<&Path>) -> bool {
+        self.conditions.iter().all(|cond| cond.matches(exe_path))
+    }
+}
+
+impl Condition {
+    fn matches(&self, exe_path: Option<&Path>) -> bool {
+        match self {
+            Condition::Exe(Some(expected)) => exe_path == Some(expected.as_path()),
+            Condition::Exe(None) => false,
+        }
+    }
+}
+
+fn build_implicit_ancestor_sets(
+    pattern: &str,
+    action: RuleAction,
+) -> Result<(BTreeSet<PathBuf>, GlobSet)> {
+    let mut implicit_visible_ancestors = BTreeSet::new();
+    let mut implicit_ancestor_globset_builder = GlobSetBuilder::new();
+    if action_requires_visible_ancestors(action) {
+        gather_implicit_ancestors(pattern, &mut implicit_visible_ancestors);
+        for ancestor_glob in implicit_ancestor_globs_for_rule(pattern) {
+            let glob = GlobBuilder::new(&ancestor_glob)
+                .literal_separator(true)
+                .build()
+                .with_context(|| format!("invalid implicit ancestor glob: {ancestor_glob}"))?;
+            implicit_ancestor_globset_builder.add(glob);
+        }
+    }
+    let implicit_ancestor_globset = implicit_ancestor_globset_builder
+        .build()
+        .context("failed to build implicit ancestor globset for profile")?;
+    Ok((implicit_visible_ancestors, implicit_ancestor_globset))
 }
 
 fn home_dir_from_env() -> Result<PathBuf> {
@@ -414,9 +548,58 @@ fn normalize_abs(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    struct MockExeResolver(std::collections::HashMap<String, PathBuf>);
+
+    impl ExeResolver for MockExeResolver {
+        fn resolve(&self, name: &str) -> Option<PathBuf> {
+            self.0.get(name).cloned()
+        }
+    }
+
     fn parse(src: &str) -> Profile {
         Profile::parse_with_home(src, Path::new("/work"), Path::new("/home/tester"))
             .expect("profile should parse")
+    }
+
+    fn parse_with_exe(src: &str, exe_pairs: &[(&str, &str)]) -> Profile {
+        let resolver = MockExeResolver(
+            exe_pairs
+                .iter()
+                .map(|(name, path)| (name.to_string(), PathBuf::from(path)))
+                .collect(),
+        );
+        let cwd = PathBuf::from("/work");
+        let home = PathBuf::from("/home/tester");
+        let parsed = parse_lines(src, &cwd, &home, &resolver).expect("parse lines");
+        let mut rules = Vec::new();
+        let mut globset_builder = GlobSetBuilder::new();
+        let mut glob_to_rule = Vec::new();
+        for line in &parsed {
+            let conditions = compile_conditions(&line.normalized_conditions, &resolver)
+                .expect("compile conditions");
+            let (implicit_visible_ancestors, implicit_ancestor_globset) =
+                build_implicit_ancestor_sets(&line.pattern, line.action).expect("ancestor sets");
+            let rule_idx = rules.len();
+            rules.push(Rule {
+                action: line.action,
+                conditions,
+                implicit_visible_ancestors,
+                implicit_ancestor_globset,
+            });
+            for glob_pattern in glob_patterns_for_rule(&line.pattern) {
+                let glob = GlobBuilder::new(&glob_pattern)
+                    .literal_separator(true)
+                    .build()
+                    .expect("glob");
+                globset_builder.add(glob);
+                glob_to_rule.push(rule_idx);
+            }
+        }
+        Profile {
+            rules,
+            globset: globset_builder.build().expect("globset"),
+            glob_to_rule,
+        }
     }
 
     #[test]
@@ -663,5 +846,37 @@ mod tests {
         assert_eq!(lines[1].path, PathBuf::from("/tmp"));
         assert_eq!(lines[1].action, RuleAction::Passthrough);
         assert_eq!(lines[1].line_no, 2);
+    }
+
+    #[test]
+    fn exe_condition_matches_resolved_binary() {
+        let profile = parse_with_exe(
+            "/tmp rw when exe=git\n/tmp ro\n",
+            &[("git", "/usr/bin/git")],
+        );
+        assert_eq!(
+            profile.first_match_action_for_exe(Path::new("/tmp/file"), Some(Path::new("/usr/bin/git"))),
+            Some(RuleAction::Passthrough)
+        );
+        assert_eq!(
+            profile.first_match_action_for_exe(Path::new("/tmp/file"), Some(Path::new("/usr/bin/vim"))),
+            Some(RuleAction::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn conditional_rule_does_not_make_ancestor_visible_without_matching_exe() {
+        let profile = parse_with_exe(
+            "/foo/bar rw when exe=git\n",
+            &[("git", "/usr/bin/git")],
+        );
+        assert_eq!(
+            profile.visibility_for_exe(Path::new("/foo"), Some(Path::new("/usr/bin/vim"))),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            profile.visibility_for_exe(Path::new("/foo"), Some(Path::new("/usr/bin/git"))),
+            Visibility::ImplicitAncestor
+        );
     }
 }

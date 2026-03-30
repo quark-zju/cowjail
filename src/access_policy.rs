@@ -128,7 +128,7 @@ impl<R: RepoPolicy> AccessPolicy<R> {
             };
         }
 
-        match self.dynamic_visibility(requested_path) {
+        match self.dynamic_visibility_with_exe(requested_path, exe_path) {
             Visibility::Hidden => Permission::Deny,
             Visibility::ImplicitAncestor => Permission::ReadOnly,
             Visibility::Action(RuleAction::Hide | RuleAction::Deny) => Permission::Deny,
@@ -138,8 +138,8 @@ impl<R: RepoPolicy> AccessPolicy<R> {
         }
     }
 
-    fn dynamic_visibility(&self, path: &Path) -> Visibility {
-        match self.profile.visibility(path) {
+    fn dynamic_visibility_with_exe(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
+        match self.profile.visibility_for_exe(path, exe_path) {
             Visibility::Action(RuleAction::GitRw) => {
                 if self.repo.is_repo_member(path) {
                     Visibility::Action(RuleAction::Passthrough)
@@ -149,6 +149,10 @@ impl<R: RepoPolicy> AccessPolicy<R> {
             }
             other => other,
         }
+    }
+
+    fn dynamic_visibility(&self, path: &Path) -> Visibility {
+        self.dynamic_visibility_with_exe(path, None)
     }
 }
 
