@@ -17,7 +17,7 @@ use fuser::{
 use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, EPERM};
 
 use crate::git_rw_filter::GitRwFilter;
-use crate::profile::{Profile, RuleAction, Visibility};
+use crate::profile::{CachingFsCheck, Profile, RuleAction, Visibility};
 
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
@@ -25,6 +25,7 @@ const ROOT_INO: u64 = 1;
 pub struct LeashFs {
     profile: Profile,
     git_rw_filter: GitRwFilter,
+    fs_check: CachingFsCheck,
     mount_root: Option<PathBuf>,
     next_ino: u64,
     next_fh: u64,
@@ -53,6 +54,7 @@ impl LeashFs {
         Self {
             profile,
             git_rw_filter: GitRwFilter::new(),
+            fs_check: CachingFsCheck::default(),
             mount_root: None,
             next_ino: ROOT_INO + 1,
             next_fh: 1,
@@ -250,7 +252,7 @@ impl LeashFs {
     }
 
     fn dynamic_visibility_for_exe(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
-        match self.profile.visibility_for_exe(path, exe_path) {
+        match self.profile.visibility_with_checks(path, exe_path, &self.fs_check) {
             Visibility::Action(RuleAction::GitRw) => {
                 if self.git_rw_filter.path_is_git_repo_member(path) {
                     Visibility::Action(RuleAction::Passthrough)

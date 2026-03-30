@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -40,6 +42,10 @@ pub trait ExeResolver {
     fn resolve(&self, name: &str) -> Option<PathBuf>;
 }
 
+pub trait FsCheck {
+    fn exists(&self, path: &Path) -> bool;
+}
+
 struct PathExeResolver;
 
 impl ExeResolver for PathExeResolver {
@@ -55,9 +61,52 @@ impl ExeResolver for PathExeResolver {
     }
 }
 
+pub struct RealFsCheck;
+
+impl FsCheck for RealFsCheck {
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+}
+
+pub struct CachingFsCheck<F = RealFsCheck> {
+    inner: F,
+    cache: Mutex<HashMap<PathBuf, bool>>,
+}
+
+impl Default for CachingFsCheck<RealFsCheck> {
+    fn default() -> Self {
+        Self::new(RealFsCheck)
+    }
+}
+
+impl<F> CachingFsCheck<F> {
+    pub fn new(inner: F) -> Self {
+        Self {
+            inner,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<F: FsCheck> FsCheck for CachingFsCheck<F> {
+    fn exists(&self, path: &Path) -> bool {
+        if let Some(cached) = self.cache.lock().expect("fs cache poisoned").get(path).copied() {
+            return cached;
+        }
+        let exists = self.inner.exists(path);
+        self.cache
+            .lock()
+            .expect("fs cache poisoned")
+            .insert(path.to_path_buf(), exists);
+        exists
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Condition {
     Exe(Option<PathBuf>),
+    AncestorHas(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,13 +182,22 @@ impl Profile {
         abs_path: &Path,
         exe_path: Option<&Path>,
     ) -> Option<RuleAction> {
+        self.first_match_action_with_checks(abs_path, exe_path, &RealFsCheck)
+    }
+
+    pub fn first_match_action_with_checks(
+        &self,
+        abs_path: &Path,
+        exe_path: Option<&Path>,
+        fs_check: &dyn FsCheck,
+    ) -> Option<RuleAction> {
         let normalized = normalize_abs(abs_path).ok()?;
         let matched = self.globset.matches(&normalized);
 
         let mut first_rule_idx: Option<usize> = None;
         for glob_idx in &matched {
             let rule_idx = self.glob_to_rule[*glob_idx];
-            if !self.rules[rule_idx].conditions_match(exe_path) {
+            if !self.rules[rule_idx].conditions_match(&normalized, exe_path, fs_check) {
                 continue;
             }
             if first_rule_idx.is_none_or(|existing| rule_idx < existing) {
@@ -155,29 +213,44 @@ impl Profile {
     }
 
     pub fn visibility_for_exe(&self, abs_path: &Path, exe_path: Option<&Path>) -> Visibility {
+        self.visibility_with_checks(abs_path, exe_path, &RealFsCheck)
+    }
+
+    pub fn visibility_with_checks(
+        &self,
+        abs_path: &Path,
+        exe_path: Option<&Path>,
+        fs_check: &dyn FsCheck,
+    ) -> Visibility {
         let Ok(normalized) = normalize_abs(abs_path) else {
             return Visibility::Hidden;
         };
 
-        if let Some(action) = self.first_match_action_for_exe(&normalized, exe_path) {
-            if action == RuleAction::Hide && self.is_implicit_visible_ancestor(&normalized, exe_path)
+        if let Some(action) = self.first_match_action_with_checks(&normalized, exe_path, fs_check) {
+            if action == RuleAction::Hide
+                && self.is_implicit_visible_ancestor(&normalized, exe_path, fs_check)
             {
                 return Visibility::ImplicitAncestor;
             }
             return Visibility::Action(action);
         }
 
-        if self.is_implicit_visible_ancestor(&normalized, exe_path) {
+        if self.is_implicit_visible_ancestor(&normalized, exe_path, fs_check) {
             return Visibility::ImplicitAncestor;
         }
 
         Visibility::Hidden
     }
 
-    fn is_implicit_visible_ancestor(&self, normalized: &Path, exe_path: Option<&Path>) -> bool {
+    fn is_implicit_visible_ancestor(
+        &self,
+        normalized: &Path,
+        exe_path: Option<&Path>,
+        fs_check: &dyn FsCheck,
+    ) -> bool {
         self.rules.iter().any(|rule| {
             action_requires_visible_ancestors(rule.action)
-                && rule.conditions_match(exe_path)
+                && rule.conditions_match(normalized, exe_path, fs_check)
                 && (rule.implicit_visible_ancestors.contains(normalized)
                     || rule.implicit_ancestor_globset.is_match(normalized))
         })
@@ -279,6 +352,8 @@ fn compile_conditions(tokens: &[String], exe_resolver: &dyn ExeResolver) -> Resu
     for token in tokens {
         if let Some(rest) = token.strip_prefix("exe=") {
             out.push(Condition::Exe(resolve_exe(rest, exe_resolver)?));
+        } else if let Some(rest) = token.strip_prefix("ancestor-has=") {
+            out.push(Condition::AncestorHas(rest.to_string()));
         } else {
             bail!("unknown condition '{token}'")
         }
@@ -356,6 +431,9 @@ fn normalize_condition(raw: &str, exe_resolver: &dyn ExeResolver) -> Result<Stri
             None => format!("exe={rest}"),
         });
     }
+    if let Some(rest) = raw.strip_prefix("ancestor-has=") {
+        return Ok(format!("ancestor-has={rest}"));
+    }
     bail!("unknown condition '{raw}'")
 }
 
@@ -384,16 +462,35 @@ fn normalize_pattern(token: &str, cwd: &Path, home: &Path) -> Result<String> {
 }
 
 impl Rule {
-    fn conditions_match(&self, exe_path: Option<&Path>) -> bool {
-        self.conditions.iter().all(|cond| cond.matches(exe_path))
+    fn conditions_match(&self, path: &Path, exe_path: Option<&Path>, fs_check: &dyn FsCheck) -> bool {
+        self.conditions
+            .iter()
+            .all(|cond| cond.matches(path, exe_path, fs_check))
     }
 }
 
 impl Condition {
-    fn matches(&self, exe_path: Option<&Path>) -> bool {
+    fn matches(&self, path: &Path, exe_path: Option<&Path>, fs_check: &dyn FsCheck) -> bool {
         match self {
             Condition::Exe(Some(expected)) => exe_path == Some(expected.as_path()),
             Condition::Exe(None) => false,
+            Condition::AncestorHas(name) => ancestor_has(path, name, fs_check),
+        }
+    }
+}
+
+fn ancestor_has(path: &Path, name: &str, fs_check: &dyn FsCheck) -> bool {
+    let mut dir = match path.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => return false,
+    };
+    loop {
+        if fs_check.exists(&dir.join(name)) {
+            return true;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent.to_path_buf(),
+            _ => return false,
         }
     }
 }
@@ -547,12 +644,34 @@ fn normalize_abs(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     struct MockExeResolver(std::collections::HashMap<String, PathBuf>);
 
     impl ExeResolver for MockExeResolver {
         fn resolve(&self, name: &str) -> Option<PathBuf> {
             self.0.get(name).cloned()
+        }
+    }
+
+    struct CountingFsCheck {
+        hits: Cell<usize>,
+        existing: std::collections::HashSet<PathBuf>,
+    }
+
+    impl CountingFsCheck {
+        fn new(paths: &[&str]) -> Self {
+            Self {
+                hits: Cell::new(0),
+                existing: paths.iter().map(PathBuf::from).collect(),
+            }
+        }
+    }
+
+    impl FsCheck for CountingFsCheck {
+        fn exists(&self, path: &Path) -> bool {
+            self.hits.set(self.hits.get() + 1);
+            self.existing.contains(path)
         }
     }
 
@@ -878,5 +997,36 @@ mod tests {
             profile.visibility_for_exe(Path::new("/foo"), Some(Path::new("/usr/bin/git"))),
             Visibility::ImplicitAncestor
         );
+    }
+
+    #[test]
+    fn ancestor_has_condition_matches_when_marker_exists() {
+        let profile = parse("/work/**/*.rs rw when ancestor-has=.git\n/work ro\n");
+        let fs_check = CountingFsCheck::new(&["/work/repo/.git"]);
+        assert_eq!(
+            profile.first_match_action_with_checks(
+                Path::new("/work/repo/src/lib.rs"),
+                None,
+                &fs_check,
+            ),
+            Some(RuleAction::Passthrough)
+        );
+        assert_eq!(
+            profile.first_match_action_with_checks(
+                Path::new("/work/loose/src/lib.rs"),
+                None,
+                &fs_check,
+            ),
+            Some(RuleAction::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn caching_fs_check_reuses_ancestor_probe_results() {
+        let inner = CountingFsCheck::new(&["/work/repo/.git"]);
+        let cache = CachingFsCheck::new(inner);
+        assert!(cache.exists(Path::new("/work/repo/.git")));
+        assert!(cache.exists(Path::new("/work/repo/.git")));
+        assert_eq!(cache.inner.hits.get(), 1);
     }
 }

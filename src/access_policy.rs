@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use fs_err as fs;
 
 use crate::git_rw_filter::GitRwFilter;
-use crate::profile::{Profile, RuleAction, Visibility};
+use crate::profile::{CachingFsCheck, Profile, RuleAction, Visibility};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestedAccess {
@@ -76,6 +76,7 @@ impl RepoPolicy for FsRepoPolicy {
 pub(crate) struct AccessPolicy<R = FsRepoPolicy> {
     profile: Profile,
     repo: R,
+    fs_check: CachingFsCheck,
 }
 
 impl AccessPolicy<FsRepoPolicy> {
@@ -83,6 +84,7 @@ impl AccessPolicy<FsRepoPolicy> {
         Self {
             profile,
             repo: FsRepoPolicy::new(system_git),
+            fs_check: CachingFsCheck::default(),
         }
     }
 
@@ -105,7 +107,11 @@ impl AccessPolicy<FsRepoPolicy> {
 
 impl<R: RepoPolicy> AccessPolicy<R> {
     pub(crate) fn with_repo_policy(profile: Profile, repo: R) -> Self {
-        Self { profile, repo }
+        Self {
+            profile,
+            repo,
+            fs_check: CachingFsCheck::default(),
+        }
     }
 
     pub(crate) fn check_permission(
@@ -139,7 +145,7 @@ impl<R: RepoPolicy> AccessPolicy<R> {
     }
 
     fn dynamic_visibility_with_exe(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
-        match self.profile.visibility_for_exe(path, exe_path) {
+        match self.profile.visibility_with_checks(path, exe_path, &self.fs_check) {
             Visibility::Action(RuleAction::GitRw) => {
                 if self.repo.is_repo_member(path) {
                     Visibility::Action(RuleAction::Passthrough)
