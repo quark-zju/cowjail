@@ -174,6 +174,11 @@ class LeashIntegrationTestCase(unittest.TestCase):
             text=True,
         )
         self._wait_for_daemon()
+        run_cmd(
+            [str(self.leash_bin), "_set-profile", str(self.profile_path)],
+            env=self.env,
+            capture_stdout=False,
+        )
 
     def tearDown(self) -> None:
         if hasattr(self, "daemon"):
@@ -247,6 +252,20 @@ class LeashIntegrationTestCase(unittest.TestCase):
         self._dump_debug_logs(note=f"missing daemon log marker: {needle}")
         self.fail(f"daemon log never contained {needle!r}")
 
+    def wait_for_daemon_log_all(
+        self, needles: list[str], *, timeout: float = 5.0
+    ) -> None:
+        deadline = time.time() + timeout
+        daemon_log_path = self.tmpdir / "daemon.log"
+        while time.time() < deadline:
+            if daemon_log_path.exists():
+                content = daemon_log_path.read_text(encoding="utf-8", errors="replace")
+                if all(needle in content for needle in needles):
+                    return
+            time.sleep(0.05)
+        self._dump_debug_logs(note=f"missing daemon log markers: {needles}")
+        self.fail(f"daemon log never contained all of {needles!r}")
+
     def _dump_debug_logs(
         self,
         completed: subprocess.CompletedProcess[str] | None = None,
@@ -285,8 +304,14 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
             str(self.rw_file),
         )
         self.assertEqual(self.rw_file.read_text(), "rw-after")
-        self.wait_for_daemon_log("fanotify: controlled pid=")
-        self.wait_for_daemon_log("path=/usr/bin/bash")
+        self.wait_for_daemon_log_all(
+            [
+                "fanotify: controlled pid=",
+                f"path={self.rw_file}",
+                "decision=allow-rw",
+                "access=write",
+            ]
+        )
 
         accessed = self.leash_run(
             "/bin/sh",
@@ -298,6 +323,12 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
         )
         self.assertEqual(accessed.stdout, "deny\n")
         self.assertEqual(self.deny_file.read_text(), "deny\n")
+        self.wait_for_daemon_log_all(
+            [
+                f"path={self.deny_file}",
+                "decision=deny",
+            ]
+        )
 
     def test_git_activity_is_logged_from_controlled_pidns(self) -> None:
         shell_read = self.leash_run(
@@ -321,7 +352,14 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
 
         config_text = (self.repo / ".git" / "config").read_text()
         self.assertIn("test = 1", config_text)
-        self.wait_for_daemon_log("fanotify: controlled pid=")
+        self.wait_for_daemon_log_all(
+            [
+                "fanotify: controlled pid=",
+                f"path={self.repo / '.git' / 'config'}",
+                f"exe={self.system_git}",
+                "decision=allow-rw",
+            ]
+        )
 
 
 if __name__ == "__main__":

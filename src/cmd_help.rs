@@ -9,6 +9,7 @@ const HELP_TOPIC_NAMES: &[(&str, HelpTopic)] = &[
     ("_list", HelpTopic::LowLevelList),
     ("_show", HelpTopic::LowLevelShow),
     ("_rm", HelpTopic::LowLevelRm),
+    ("_set-profile", HelpTopic::LowLevelSetProfile),
     ("_suid", HelpTopic::LowLevelSuid),
 ];
 
@@ -105,6 +106,14 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
             "  -v, --verbose         Print cleanup syscall progress"
         )
         .to_string(),
+        HelpTopic::LowLevelSetProfile => concat!(
+            "leash _set-profile\n\n",
+            "USAGE:\n",
+            "  leash _set-profile <path>\n\n",
+            "DESCRIPTION:\n",
+            "  Send a normalized profile source file to the running daemon."
+        )
+        .to_string(),
         HelpTopic::Run => concat!(
             "leash run\n\n",
             "USAGE:\n",
@@ -153,6 +162,7 @@ fn root_help_text(verbose: bool) -> String {
             "  leash _list\n",
             "  leash _show [-v|--verbose] <name-or-glob> [<name-or-glob> ...]\n",
             "  leash _rm [-v|--verbose] <name-or-glob> [<name-or-glob> ...]\n",
+            "  leash _set-profile <path>\n",
             "  leash _suid [-v|--verbose]\n",
         ));
     }

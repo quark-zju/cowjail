@@ -17,6 +17,7 @@ pub enum Command {
     LowLevelList(ListCommand),
     LowLevelShow(ShowCommand),
     LowLevelRm(RmCommand),
+    LowLevelSetProfile(LowLevelSetProfileCommand),
     LowLevelSuid(LowLevelSuidCommand),
 }
 
@@ -30,6 +31,7 @@ pub enum HelpTopic {
     LowLevelList,
     LowLevelShow,
     LowLevelRm,
+    LowLevelSetProfile,
     LowLevelSuid,
 }
 
@@ -81,6 +83,11 @@ pub struct LowLevelDaemonCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowLevelSetProfileCommand {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionCommand {
     pub shell: Option<String>,
 }
@@ -112,6 +119,7 @@ where
         "_list" => parse_list(args)?,
         "_show" => parse_show(args)?,
         "_rm" => parse_rm(args)?,
+        "_set-profile" => parse_low_level_set_profile(args)?,
         "_suid" => parse_low_level_suid(args)?,
         other => bail!("unknown subcommand: {other}"),
     };
@@ -323,6 +331,16 @@ fn parse_low_level_suid(mut args: Arguments) -> Result<Command> {
         bail!("_suid got unexpected trailing arguments");
     }
     Ok(Command::LowLevelSuid(LowLevelSuidCommand { verbose }))
+}
+
+fn parse_low_level_set_profile(mut args: Arguments) -> Result<Command> {
+    let extra = args.finish();
+    if extra.len() != 1 {
+        bail!("_set-profile requires exactly one <path> argument");
+    }
+    Ok(Command::LowLevelSetProfile(LowLevelSetProfileCommand {
+        path: PathBuf::from(&extra[0]),
+    }))
 }
 
 #[cfg(test)]
