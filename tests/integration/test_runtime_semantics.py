@@ -96,6 +96,7 @@ class LeashIntegrationTestCase(unittest.TestCase):
         self.socket_dir = self.runtime / "leash"
         self.socket_path = self.socket_dir / "leashd.sock"
         self.profile_path = self.tmpdir / "runtime.profile"
+        self.default_profile_path = self.home / ".config" / "leash" / "profiles" / "default"
 
         for path in [
             self.home / ".config" / "leash" / "profiles",
@@ -395,6 +396,72 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
                 "decision=allow-rw",
             ]
         )
+
+
+class ProfileCommandTests(LeashIntegrationTestCase):
+    def test_profile_show_reports_match_and_difference(self) -> None:
+        source = f"{self.rw_dir} rw\n{self.fixture} ro\n/bin ro\n/usr ro\n"
+        self.default_profile_path.write_text(source)
+        run_cmd(
+            [str(self.leash_bin), "_set-profile", str(self.default_profile_path)],
+            env=self.env,
+            capture_stdout=False,
+        )
+
+        shown = run_cmd(
+            [str(self.leash_bin), "profile", "show"],
+            env=self.env,
+        )
+        self.assertIn(source, shown.stdout)
+        self.assertIn("# daemon profile matches default profile", shown.stdout)
+
+        changed = f"{self.deny_dir} deny\n{self.fixture} ro\n/bin ro\n/usr ro\n"
+        self.default_profile_path.write_text(changed)
+        shown = run_cmd(
+            [str(self.leash_bin), "profile", "show"],
+            env=self.env,
+        )
+        self.assertIn(changed, shown.stdout)
+        self.assertIn("# daemon profile differs from default profile", shown.stdout)
+
+    def test_profile_edit_updates_default_profile_and_daemon(self) -> None:
+        original = f"{self.rw_dir} rw\n{self.fixture} ro\n/bin ro\n/usr ro\n"
+        updated = f"{self.deny_dir} deny\n{self.fixture} ro\n/bin ro\n/usr ro\n"
+        self.default_profile_path.write_text(original)
+        run_cmd(
+            [str(self.leash_bin), "_set-profile", str(self.default_profile_path)],
+            env=self.env,
+            capture_stdout=False,
+        )
+
+        editor_script = self.tmpdir / "write-profile.py"
+        editor_script.write_text(
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env python3
+                import pathlib
+                import sys
+
+                pathlib.Path(sys.argv[1]).write_text({updated!r})
+                """
+            )
+        )
+        editor_script.chmod(0o755)
+        self.env["EDITOR"] = f"python3 {editor_script}"
+
+        edited = run_cmd(
+            [str(self.leash_bin), "profile", "edit"],
+            env=self.env,
+        )
+        self.assertEqual(self.default_profile_path.read_text(), updated)
+        self.assertIn("daemon profile: updated (was different from disk)", edited.stderr)
+
+        shown = run_cmd(
+            [str(self.leash_bin), "profile", "show"],
+            env=self.env,
+        )
+        self.assertIn(updated, shown.stdout)
+        self.assertIn("# daemon profile matches default profile", shown.stdout)
 
 
 if __name__ == "__main__":
