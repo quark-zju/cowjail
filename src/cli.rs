@@ -596,7 +596,7 @@ mod tests {
         );
         let text = crate::cmd_help::help_text(HelpTopic::Profile, false);
         assert!(text.contains("ACTIONS:"));
-        assert!(text.contains("git-rw"));
+        assert!(text.contains("ancestor-has="));
     }
 
     #[test]

@@ -381,7 +381,7 @@ mod tests {
     fn render_show_comments_expanded_include_body() {
         let home = Path::new("/home/tester");
         let rendered = render_profile_source_for_show_with(
-            "%include builtin:basic\n~ git-rw\n",
+            "%include builtin:basic\n~ rw when ancestor-has=.git\n",
             "builtin:default",
             home,
             &mut Vec::new(),
@@ -390,7 +390,7 @@ mod tests {
         .expect("show rendering should succeed");
         assert!(rendered.contains("%include builtin:basic\n"));
         assert!(rendered.contains("  # /bin ro\n"));
-        assert!(rendered.contains("~ git-rw\n"));
+        assert!(rendered.contains("~ rw when ancestor-has=.git\n"));
     }
 
     #[test]

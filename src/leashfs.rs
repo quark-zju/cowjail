@@ -252,16 +252,7 @@ impl LeashFs {
     }
 
     fn dynamic_visibility_for_exe(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
-        match self.profile.visibility_with_checks(path, exe_path, &self.fs_check) {
-            Visibility::Action(RuleAction::GitRw) => {
-                if self.git_rw_filter.path_is_git_repo_member(path) {
-                    Visibility::Action(RuleAction::Passthrough)
-                } else {
-                    Visibility::Action(RuleAction::ReadOnly)
-                }
-            }
-            other => other,
-        }
+        self.profile.visibility_with_checks(path, exe_path, &self.fs_check)
     }
 
     fn write_mode_for_pid(&self, path: &Path, requester_pid: Option<u32>) -> WriteMode {
@@ -1310,6 +1301,13 @@ mod tests {
         LeashFs::new(parse_profile(profile_src))
     }
 
+    fn explicit_git_rules(root: &Path) -> String {
+        format!(
+            "{0}/**/.git/COMMIT_EDITMSG rw\n{0}/**/.git rw when exe=git\n{0}/**/.git deny\n{0} rw when ancestor-has=.git\n{0} ro\n",
+            root.display()
+        )
+    }
+
     #[test]
     fn mkdir_prefers_eexist_for_visible_existing_directory() {
         let dir = tempdir().expect("tempdir");
@@ -1389,7 +1387,7 @@ mod tests {
         fs::create_dir_all(repo.join("src")).expect("mkdir src");
         fs::write(repo.join(".git/config"), b"[core]\n").expect("write config");
 
-        let profile_src = format!("{} git-rw\n", dir.path().display());
+        let profile_src = explicit_git_rules(dir.path());
         let fs = test_fs(&profile_src);
         assert_eq!(
             fs.write_mode(&repo.join("src/lib.rs")),
@@ -1410,7 +1408,7 @@ mod tests {
         fs::write(repo.join(".git/config"), b"[core]\n").expect("write config");
         fs::write(&outside, b"note").expect("write outside file");
 
-        let profile_src = format!("{} git-rw\n", dir.path().display());
+        let profile_src = explicit_git_rules(dir.path());
         let fs = test_fs(&profile_src);
         assert_eq!(fs.access_errno(&outside), None);
         assert_eq!(fs.mutation_errno(&outside), None);
@@ -1419,15 +1417,15 @@ mod tests {
     }
 
     #[test]
-    fn git_metadata_is_read_only_without_trusted_git_process() {
+    fn git_metadata_is_denied_without_trusted_git_process() {
         let dir = tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
         fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
         fs::write(repo.join(".git/config"), b"[core]\n").expect("write config");
 
-        let profile_src = format!("{} git-rw\n", dir.path().display());
+        let profile_src = explicit_git_rules(dir.path());
         let fs = test_fs(&profile_src);
-        assert_eq!(fs.access_errno(&repo.join(".git/config")), None);
+        assert_eq!(fs.access_errno(&repo.join(".git/config")), Some(EACCES));
         assert_eq!(fs.mutation_errno(&repo.join(".git/config")), Some(EACCES));
         assert_eq!(
             fs.write_mode(&repo.join(".git/config")),
@@ -1442,7 +1440,7 @@ mod tests {
         fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
         fs::write(repo.join(".git/config"), b"[core]\n").expect("write config");
 
-        let profile_src = format!("{} git-rw\n", dir.path().display());
+        let profile_src = explicit_git_rules(dir.path());
         let fs = test_fs(&profile_src);
         assert_eq!(fs.mutation_errno(&repo.join(".git")), Some(EACCES));
         assert_eq!(fs.write_mode(&repo.join(".git")), WriteMode::Forbidden);
@@ -1456,7 +1454,7 @@ mod tests {
         fs::write(repo.join(".git/config"), b"[core]\n").expect("write config");
         fs::write(repo.join(".git/COMMIT_EDITMSG"), b"").expect("write COMMIT_EDITMSG");
 
-        let profile_src = format!("{} git-rw\n", dir.path().display());
+        let profile_src = explicit_git_rules(dir.path());
         let fs = test_fs(&profile_src);
         let commit_editmsg = repo.join(".git/COMMIT_EDITMSG");
         // Non-git processes (pid=None) must be allowed to write COMMIT_EDITMSG

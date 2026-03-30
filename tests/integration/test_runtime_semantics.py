@@ -147,7 +147,10 @@ class LeashIntegrationTestCase(unittest.TestCase):
                 f"""\
                 {self.deny_dir} deny
                 {self.rw_dir} rw
-                {self.workspace} git-rw
+                {self.workspace}/**/.git/COMMIT_EDITMSG rw
+                {self.workspace}/**/.git rw when exe=git
+                {self.workspace}/**/.git deny
+                {self.workspace} rw when ancestor-has=.git
                 {self.fixture} ro
                 /bin ro
                 /sbin ro

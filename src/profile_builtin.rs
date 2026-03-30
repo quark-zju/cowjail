@@ -2,7 +2,11 @@ pub(crate) const DEFAULT_PROFILE_SOURCE: &str = "\
 %include builtin:deny-sensitive
 %include builtin:basic
 %include builtin:agents
-~ git-rw
+~/**/.git/COMMIT_EDITMSG rw
+~/**/.git rw when exe=git
+~/**/.git deny
+~ rw when ancestor-has=.git
+~ ro
 ";
 
 const DENY_SENSITIVE_PROFILE_SOURCE: &str = "\

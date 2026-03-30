@@ -32,7 +32,6 @@ impl Permission {
 }
 
 pub(crate) trait RepoPolicy {
-    fn is_repo_member(&self, path: &Path) -> bool;
     fn is_git_metadata_path(&self, path: &Path) -> bool;
     fn is_exact_git_dir_path(&self, path: &Path) -> bool;
     fn is_commit_editmsg_path(&self, path: &Path) -> bool;
@@ -52,10 +51,6 @@ impl FsRepoPolicy {
 }
 
 impl RepoPolicy for FsRepoPolicy {
-    fn is_repo_member(&self, path: &Path) -> bool {
-        self.git.path_is_git_repo_member(path)
-    }
-
     fn is_git_metadata_path(&self, path: &Path) -> bool {
         self.git.is_git_metadata_path(path)
     }
@@ -134,31 +129,17 @@ impl<R: RepoPolicy> AccessPolicy<R> {
             };
         }
 
-        match self.dynamic_visibility_with_exe(requested_path, exe_path) {
+        match self.dynamic_visibility(requested_path, exe_path) {
             Visibility::Hidden => Permission::Deny,
             Visibility::ImplicitAncestor => Permission::ReadOnly,
             Visibility::Action(RuleAction::Hide | RuleAction::Deny) => Permission::Deny,
             Visibility::Action(RuleAction::ReadOnly) => Permission::ReadOnly,
             Visibility::Action(RuleAction::Passthrough) => Permission::ReadWrite,
-            Visibility::Action(RuleAction::GitRw) => unreachable!("git-rw must be normalized"),
         }
     }
 
-    fn dynamic_visibility_with_exe(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
-        match self.profile.visibility_with_checks(path, exe_path, &self.fs_check) {
-            Visibility::Action(RuleAction::GitRw) => {
-                if self.repo.is_repo_member(path) {
-                    Visibility::Action(RuleAction::Passthrough)
-                } else {
-                    Visibility::Action(RuleAction::ReadOnly)
-                }
-            }
-            other => other,
-        }
-    }
-
-    fn dynamic_visibility(&self, path: &Path) -> Visibility {
-        self.dynamic_visibility_with_exe(path, None)
+    fn dynamic_visibility(&self, path: &Path, exe_path: Option<&Path>) -> Visibility {
+        self.profile.visibility_with_checks(path, exe_path, &self.fs_check)
     }
 }
 
@@ -169,7 +150,6 @@ mod tests {
 
     #[derive(Default)]
     struct MockRepoPolicy {
-        repo_members: BTreeSet<PathBuf>,
         git_metadata: BTreeSet<PathBuf>,
         exact_git_dirs: BTreeSet<PathBuf>,
         commit_editmsg: BTreeSet<PathBuf>,
@@ -177,10 +157,6 @@ mod tests {
     }
 
     impl RepoPolicy for MockRepoPolicy {
-        fn is_repo_member(&self, path: &Path) -> bool {
-            self.repo_members.contains(path)
-        }
-
         fn is_git_metadata_path(&self, path: &Path) -> bool {
             self.git_metadata.contains(path)
         }
@@ -239,22 +215,32 @@ mod tests {
     }
 
     #[test]
-    fn git_rw_worktree_member_is_writable() {
-        let profile =
-            Profile::parse("/src git-rw\n", Path::new("/")).expect("profile should parse");
-        let mut repo = MockRepoPolicy::default();
-        repo.repo_members.insert(PathBuf::from("/src/repo/lib.rs"));
-        let policy = AccessPolicy::with_repo_policy(profile, repo);
+    fn ancestor_has_worktree_rule_is_writable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let file = repo.join("src/lib.rs");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir src");
+        std::fs::write(&file, b"fn main() {}\n").expect("write file");
+        let profile = Profile::parse(
+            &format!("{} rw when ancestor-has=.git\n{} ro\n", temp.path().display(), temp.path().display()),
+            Path::new("/"),
+        )
+        .expect("profile should parse");
+        let policy = AccessPolicy::with_repo_policy(profile, MockRepoPolicy::default());
         assert_eq!(
-            policy.check_permission(Path::new("/src/repo/lib.rs"), None, RequestedAccess::Write),
+            policy.check_permission(&file, None, RequestedAccess::Write),
             Permission::ReadWrite
         );
     }
 
     #[test]
-    fn git_rw_non_repo_member_is_read_only() {
-        let profile =
-            Profile::parse("/src git-rw\n", Path::new("/")).expect("profile should parse");
+    fn fallback_ro_rule_is_read_only() {
+        let profile = Profile::parse(
+            "/src rw when ancestor-has=.git\n/src ro\n",
+            Path::new("/"),
+        )
+        .expect("profile should parse");
         let policy = AccessPolicy::with_repo_policy(profile, MockRepoPolicy::default());
         assert_eq!(
             policy.check_permission(Path::new("/src/random.txt"), None, RequestedAccess::Write),
@@ -264,8 +250,11 @@ mod tests {
 
     #[test]
     fn git_metadata_requires_trusted_git_for_writes() {
-        let profile =
-            Profile::parse("/src git-rw\n", Path::new("/")).expect("profile should parse");
+        let profile = Profile::parse(
+            "/src/**/.git rw when exe=git\n/src/**/.git deny\n/src ro\n",
+            Path::new("/"),
+        )
+        .expect("profile should parse");
         let mut repo = MockRepoPolicy::default();
         repo.git_metadata
             .insert(PathBuf::from("/src/repo/.git/config"));
@@ -292,8 +281,11 @@ mod tests {
 
     #[test]
     fn commit_editmsg_is_writable_without_trusted_git() {
-        let profile =
-            Profile::parse("/src git-rw\n", Path::new("/")).expect("profile should parse");
+        let profile = Profile::parse(
+            "/src/**/.git/COMMIT_EDITMSG rw\n/src/**/.git deny\n/src ro\n",
+            Path::new("/"),
+        )
+        .expect("profile should parse");
         let mut repo = MockRepoPolicy::default();
         let path = PathBuf::from("/src/repo/.git/COMMIT_EDITMSG");
         repo.git_metadata.insert(path.clone());

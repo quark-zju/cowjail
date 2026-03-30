@@ -10,7 +10,6 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 pub enum RuleAction {
     ReadOnly,
     Passthrough,
-    GitRw,
     Deny,
     Hide,
 }
@@ -323,10 +322,9 @@ fn parse_action(token: &str) -> Result<RuleAction> {
     match token {
         "ro" => Ok(RuleAction::ReadOnly),
         "rw" => Ok(RuleAction::Passthrough),
-        "git-rw" => Ok(RuleAction::GitRw),
         "deny" => Ok(RuleAction::Deny),
         "hide" => Ok(RuleAction::Hide),
-        _ => bail!("action must be one of ro/rw/git-rw/deny/hide"),
+        _ => bail!("action must be one of ro/rw/deny/hide"),
     }
 }
 
@@ -334,17 +332,13 @@ fn action_to_str(action: RuleAction) -> &'static str {
     match action {
         RuleAction::ReadOnly => "ro",
         RuleAction::Passthrough => "rw",
-        RuleAction::GitRw => "git-rw",
         RuleAction::Deny => "deny",
         RuleAction::Hide => "hide",
     }
 }
 
 fn action_requires_visible_ancestors(action: RuleAction) -> bool {
-    matches!(
-        action,
-        RuleAction::ReadOnly | RuleAction::Passthrough | RuleAction::GitRw
-    )
+    matches!(action, RuleAction::ReadOnly | RuleAction::Passthrough)
 }
 
 fn compile_conditions(tokens: &[String], exe_resolver: &dyn ExeResolver) -> Result<Vec<Condition>> {
@@ -927,19 +921,6 @@ mod tests {
             .expect("normalize");
         let expected = format!("{}/x ro\n", home.display());
         assert_eq!(normalized, expected);
-    }
-
-    #[test]
-    fn parse_git_rw_action() {
-        let profile = parse(
-            r#"
-            /work git-rw
-            "#,
-        );
-        assert_eq!(
-            profile.first_match_action(Path::new("/work/repo/file.txt")),
-            Some(RuleAction::GitRw)
-        );
     }
 
     #[test]
