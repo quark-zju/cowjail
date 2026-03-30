@@ -42,6 +42,7 @@ pub(crate) fn daemon_command(cmd: LowLevelDaemonCommand) -> Result<()> {
         .with_context(|| format!("failed to bind daemon socket {}", socket_path.display()))?;
     fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to chmod daemon socket {}", socket_path.display()))?;
+    privileges::ensure_owned_by_real_user(&socket_path)?;
     crate::vlog!("daemon: listening on {}", socket_path.display());
     let observer = FilesystemObserver::new()?;
     let host_pidns = pid_namespace_key_for_pid(1)?

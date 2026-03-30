@@ -51,7 +51,7 @@ fn edit_profile() -> Result<()> {
         if let Some(active) = daemon_client::get_profile_if_running()? {
             let loaded = profile_loader::load_profile(Path::new(cli::DEFAULT_PROFILE))?;
             daemon_client::set_profile(&loaded.normalized_source)?;
-            if active == loaded.normalized_source {
+            if profile_sources_match(&active, &loaded.normalized_source) {
                 eprintln!("daemon profile: updated (was already consistent)");
             } else {
                 eprintln!("daemon profile: updated (was different from disk)");
@@ -75,7 +75,7 @@ fn show_profile() -> Result<()> {
 
     if let Some(active) = daemon_client::get_profile_if_running()? {
         let loaded = profile_loader::load_profile(Path::new(cli::DEFAULT_PROFILE))?;
-        if active == loaded.normalized_source {
+        if profile_sources_match(&active, &loaded.normalized_source) {
             println!("# daemon profile matches default profile");
         } else {
             println!("# daemon profile differs from default profile");
@@ -142,6 +142,10 @@ fn write_temp_profile(content: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn profile_sources_match(active: &str, disk: &str) -> bool {
+    active.trim_end_matches('\n') == disk.trim_end_matches('\n')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +174,12 @@ mod tests {
         let text = fs::read_to_string(&path).expect("temp profile content");
         assert_eq!(text, "/tmp rw\n");
         fs::remove_file(path).expect("cleanup temp profile");
+    }
+
+    #[test]
+    fn profile_source_match_ignores_terminal_newline() {
+        assert!(profile_sources_match("/tmp rw", "/tmp rw\n"));
+        assert!(profile_sources_match("/tmp rw\n", "/tmp rw"));
+        assert!(!profile_sources_match("/tmp ro\n", "/tmp rw\n"));
     }
 }

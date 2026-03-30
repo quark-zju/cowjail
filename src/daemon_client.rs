@@ -51,7 +51,7 @@ pub(crate) fn get_profile_if_running() -> Result<Option<String>> {
     let Some(body) = response.strip_prefix("ok\n") else {
         bail!("daemon returned unexpected get-profile response: {}", response.trim());
     };
-    Ok(Some(body.trim_end_matches('\n').to_string()))
+    Ok(Some(body.strip_suffix('\n').unwrap_or(body).to_string()))
 }
 
 fn send_request(socket_path: &std::path::Path, request: &str) -> Result<String> {
