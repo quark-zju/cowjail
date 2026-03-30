@@ -12,6 +12,7 @@ pub enum Command {
     Help { topic: HelpTopic, verbose: bool },
     Completion(CompletionCommand),
     Profile(ProfileCommand),
+    Tail(TailCommand),
     Run(RunCommand),
     LowLevelDaemon(LowLevelDaemonCommand),
     LowLevelList(ListCommand),
@@ -26,6 +27,7 @@ pub enum Command {
 pub enum HelpTopic {
     Root,
     Profile,
+    Tail,
     Run,
     Completion,
     LowLevelDaemon,
@@ -72,6 +74,9 @@ pub struct RunCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailCommand;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowLevelSuidCommand {
     pub verbose: bool,
 }
@@ -114,6 +119,7 @@ where
         "help" => parse_help(args)?,
         "completion" => parse_completion(args)?,
         "profile" => parse_profile(args)?,
+        "tail" => parse_tail(args)?,
         "run" => parse_run(args)?,
         "_daemon" => parse_low_level_daemon(args)?,
         "_list" => parse_list(args)?,
@@ -188,6 +194,17 @@ fn parse_profile(mut args: Arguments) -> Result<Command> {
         }
         other => bail!("unknown profile subcommand: {other}"),
     }
+}
+
+fn parse_tail(mut args: Arguments) -> Result<Command> {
+    if args.contains(["-h", "--help"]) {
+        return Ok(help_command(HelpTopic::Tail, false));
+    }
+    let extra = args.finish();
+    if !extra.is_empty() {
+        bail!("tail got unexpected trailing arguments");
+    }
+    Ok(Command::Tail(TailCommand))
 }
 
 fn help_command(topic: HelpTopic, verbose: bool) -> Command {
@@ -391,6 +408,18 @@ mod tests {
     fn parse_profile_rejects_removed_list_subcommand() {
         let err = parse_from(os(&["profile", "list"])).expect_err("profile list should fail");
         assert!(err.to_string().contains("unknown profile subcommand"));
+    }
+
+    #[test]
+    fn parse_tail_has_no_args() {
+        let cmd = parse_from(os(&["tail"])).expect("tail should parse");
+        assert_eq!(cmd, Command::Tail(TailCommand));
+    }
+
+    #[test]
+    fn parse_tail_rejects_extra_args() {
+        let err = parse_from(os(&["tail", "now"])).expect_err("tail extra args should fail");
+        assert!(err.to_string().contains("unexpected trailing arguments"));
     }
 
     #[test]

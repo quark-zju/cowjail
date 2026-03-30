@@ -3,6 +3,7 @@ use crate::profile_loader;
 
 const HELP_TOPIC_NAMES: &[(&str, HelpTopic)] = &[
     ("profile", HelpTopic::Profile),
+    ("tail", HelpTopic::Tail),
     ("completion", HelpTopic::Completion),
     ("run", HelpTopic::Run),
     ("_daemon", HelpTopic::LowLevelDaemon),
@@ -62,6 +63,15 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
             "  ./**/.git rw when exe=git\n",
             "  . rw when ancestor-has=.git\n",
             "  /home/*/.ssh deny",
+        )
+        .to_string(),
+        HelpTopic::Tail => concat!(
+            "leash tail\n\n",
+            "USAGE:\n",
+            "  leash tail\n\n",
+            "DESCRIPTION:\n",
+            "  Stream live daemon decision logs from a running daemon to stdout.\n",
+            "  The daemon writes to a non-blocking pipe and drops the stream when the client goes away."
         )
         .to_string(),
         HelpTopic::Completion => concat!(
@@ -155,6 +165,7 @@ fn root_help_text(verbose: bool) -> String {
         "  leash <subcommand> [options]\n\n",
         "COMMON:\n",
         "  leash run [--profile <profile>] [-v|--verbose] command ...\n",
+        "  leash tail\n",
         "\n",
         "PROFILE:\n",
         "  leash profile edit\n",

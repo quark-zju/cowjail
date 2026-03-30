@@ -5,6 +5,7 @@ mod cmd_help;
 mod cmd_jail;
 mod cmd_profile;
 mod cmd_run;
+mod cmd_tail;
 mod cmd_show;
 mod cmd_suid;
 mod daemon_client;
@@ -75,6 +76,10 @@ fn try_main() -> Result<i32> {
             cmd_profile::profile_command(profile).context("profile subcommand failed")?;
             Ok(0)
         }
+        Command::Tail(tail) => {
+            cmd_tail::tail_command(tail).context("tail subcommand failed")?;
+            Ok(0)
+        }
         Command::LowLevelList(list) => {
             cmd_jail::list_command(list).context("_list subcommand failed")?;
             Ok(0)
@@ -115,6 +120,7 @@ fn command_verbose(cmd: &Command) -> bool {
         Command::Completion(_) => false,
         Command::LowLevelDaemon(daemon) => daemon.verbose,
         Command::Profile(_) => false,
+        Command::Tail(_) => false,
         Command::Run(run) => run.verbose,
         Command::LowLevelShow(show) => show.verbose,
         Command::LowLevelRm(rm) => rm.verbose,
@@ -136,6 +142,7 @@ fn require_priviledge_reason(cmd: &Command) -> Option<&'static str> {
         Command::Help { .. }
         | Command::Completion(_)
         | Command::Profile(_)
+        | Command::Tail(_)
         | Command::LowLevelList(_)
         | Command::LowLevelShow(_) => None,
     }

@@ -3,15 +3,13 @@ use fs_err as fs;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::AsRawFd;
-#[cfg(not(test))]
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 #[cfg(not(test))]
 use std::thread;
 
@@ -34,6 +32,7 @@ const OBSERVE_MASK: u64 =
 pub(crate) fn daemon_command(cmd: LowLevelDaemonCommand) -> Result<()> {
     privileges::require_root_euid("leash _daemon")?;
     ensure_running_in_root_pid_namespace()?;
+    ignore_sigpipe()?;
     run_env::set_process_name(c"leashd")?;
 
     let socket_path = cmd.socket.unwrap_or_else(default_socket_path);
@@ -50,13 +49,19 @@ pub(crate) fn daemon_command(cmd: LowLevelDaemonCommand) -> Result<()> {
     let host_pidns = pid_namespace_key_for_pid(1)?
         .ok_or_else(|| anyhow::anyhow!("failed to resolve host pid namespace for pid 1"))?;
     let active_profile = Arc::new(RwLock::new(None));
+    let tail_subscribers = Arc::new(Mutex::new(Vec::new()));
     let observed_mount_points = mark_initial_filesystems(&observer)?;
-    observer.spawn_thread(host_pidns, active_profile.clone())?;
+    observer.spawn_thread(
+        host_pidns,
+        active_profile.clone(),
+        tail_subscribers.clone(),
+    )?;
     let mut state = DaemonState {
         active_profile,
         host_pidns,
         observer,
         observed_mount_points,
+        tail_subscribers,
     };
 
     loop {
@@ -185,6 +190,7 @@ struct DaemonState {
     host_pidns: NamespaceKey,
     observer: FilesystemObserver,
     observed_mount_points: BTreeSet<PathBuf>,
+    tail_subscribers: Arc<Mutex<Vec<TailSubscriber>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +198,55 @@ struct ActiveProfile {
     source: String,
     #[cfg_attr(test, allow(dead_code))]
     compiled: CompiledProfile,
+}
+
+#[derive(Debug)]
+struct TailSubscriber {
+    fd: OwnedFd,
+}
+
+#[derive(Debug, Default)]
+struct TailBroadcaster {
+    subscribers: Arc<Mutex<Vec<TailSubscriber>>>,
+}
+
+impl TailBroadcaster {
+    fn new(subscribers: Arc<Mutex<Vec<TailSubscriber>>>) -> Self {
+        Self { subscribers }
+    }
+
+    fn register(&self, fd: OwnedFd) -> Result<()> {
+        configure_tail_fd_nonblocking(&fd)?;
+        self.subscribers
+            .lock()
+            .expect("tail subscriber lock poisoned")
+            .push(TailSubscriber { fd });
+        Ok(())
+    }
+
+    fn broadcast_line(&self, line: &str) {
+        let payload = format!("{line}\n");
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .expect("tail subscriber lock poisoned");
+        subscribers.retain_mut(|subscriber| match write_tail_line(&subscriber.fd, &payload) {
+            TailWriteResult::Keep => true,
+            TailWriteResult::Drop => false,
+        });
+    }
+}
+
+impl DaemonState {
+    fn tail_broadcaster(&self) -> TailBroadcaster {
+        TailBroadcaster::new(self.tail_subscribers.clone())
+    }
+}
+
+#[derive(Debug)]
+struct ReceivedRequest {
+    request: String,
+    passed_fd: Option<OwnedFd>,
 }
 
 #[cfg(test)]
@@ -202,12 +257,9 @@ impl Default for DaemonState {
             host_pidns: NamespaceKey { dev: 1, ino: 1 },
             observer: FilesystemObserver::new().expect("test observer should initialize"),
             observed_mount_points: BTreeSet::new(),
+            tail_subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
-}
-
-struct ReceivedRequest {
-    request: String,
 }
 
 struct FilesystemObserver {
@@ -244,6 +296,7 @@ impl FilesystemObserver {
         &self,
         _host_pidns: NamespaceKey,
         _active_profile: Arc<RwLock<Option<ActiveProfile>>>,
+        _tail_subscribers: Arc<Mutex<Vec<TailSubscriber>>>,
     ) -> Result<()> {
         Ok(())
     }
@@ -258,6 +311,7 @@ impl FilesystemObserver {
         &self,
         host_pidns: NamespaceKey,
         active_profile: Arc<RwLock<Option<ActiveProfile>>>,
+        tail_subscribers: Arc<Mutex<Vec<TailSubscriber>>>,
     ) -> Result<()> {
         let file = self
             .fd
@@ -265,7 +319,7 @@ impl FilesystemObserver {
             .context("failed to clone fanotify fd for observer thread")?;
         thread::Builder::new()
             .name("leash-fanotify".to_string())
-            .spawn(move || observe_events(file, host_pidns, active_profile))
+            .spawn(move || observe_events(file, host_pidns, active_profile, tail_subscribers))
             .context("failed to spawn fanotify observer thread")?;
         Ok(())
     }
@@ -360,7 +414,7 @@ fn handle_client(
         peer.pid,
         peer.uid
     );
-    let response = handle_request(state, request, peer);
+    let response = handle_request(state, request, peer, received.passed_fd);
     stream
         .write_all(response.body.as_bytes())
         .context("failed to write daemon response")?;
@@ -373,7 +427,12 @@ struct RequestResponse {
     shutdown: bool,
 }
 
-fn handle_request(state: &mut DaemonState, request: &str, _peer: PeerCredentials) -> RequestResponse {
+fn handle_request(
+    state: &mut DaemonState,
+    request: &str,
+    _peer: PeerCredentials,
+    passed_fd: Option<OwnedFd>,
+) -> RequestResponse {
     let mut lines = request.lines();
     let Some(command) = lines.next().map(str::trim) else {
         return RequestResponse {
@@ -449,6 +508,22 @@ fn handle_request(state: &mut DaemonState, request: &str, _peer: PeerCredentials
                 },
             }
         }
+        "tail" => match passed_fd {
+            Some(fd) => match TailBroadcaster::new(state.tail_subscribers.clone()).register(fd) {
+                Ok(()) => RequestResponse {
+                    body: "ok tailing\n".to_string(),
+                    shutdown: false,
+                },
+                Err(err) => RequestResponse {
+                    body: format!("error tail-register:{}\n", err),
+                    shutdown: false,
+                },
+            },
+            None => RequestResponse {
+                body: "error missing-tail-fd\n".to_string(),
+                shutdown: false,
+            },
+        },
         "shutdown" => RequestResponse {
             body: "ok shutting-down\n".to_string(),
             shutdown: true,
@@ -467,7 +542,9 @@ fn recv_request(stream: &UnixStream) -> Result<ReceivedRequest> {
         iov_base: data.as_mut_ptr() as *mut libc::c_void,
         iov_len: data.len(),
     };
-    let mut control = [0u8; 128];
+    let mut control = vec![0u8; unsafe {
+        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint) as usize
+    }];
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
@@ -485,7 +562,71 @@ fn recv_request(stream: &UnixStream) -> Result<ReceivedRequest> {
     let request = std::str::from_utf8(&data[..received as usize])
         .context("daemon request was not valid UTF-8")?
         .to_string();
-    Ok(ReceivedRequest { request })
+    let passed_fd = received_fd_from_message(&msg)?;
+    Ok(ReceivedRequest { request, passed_fd })
+}
+
+fn received_fd_from_message(msg: &libc::msghdr) -> Result<Option<OwnedFd>> {
+    let mut current = unsafe { libc::CMSG_FIRSTHDR(msg) };
+    while !current.is_null() {
+        let header = unsafe { &*current };
+        if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+            let data_len = header.cmsg_len as usize
+                - unsafe { libc::CMSG_LEN(0) as usize };
+            if data_len < std::mem::size_of::<libc::c_int>() {
+                bail!("received short SCM_RIGHTS payload from daemon client");
+            }
+            let raw_fd = unsafe { *(libc::CMSG_DATA(current) as *const libc::c_int) };
+            let owned = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            return Ok(Some(owned));
+        }
+        current = unsafe { libc::CMSG_NXTHDR(msg, current) };
+    }
+    Ok(None)
+}
+
+fn configure_tail_fd_nonblocking(fd: &OwnedFd) -> Result<()> {
+    let raw_fd = fd.as_raw_fd();
+    let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("fcntl(F_GETFL) failed for tail fd");
+    }
+    if unsafe { libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("fcntl(F_SETFL) failed for tail fd");
+    }
+    let fd_flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+    if fd_flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("fcntl(F_GETFD) failed for tail fd");
+    }
+    if unsafe { libc::fcntl(raw_fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("fcntl(F_SETFD) failed for tail fd");
+    }
+    Ok(())
+}
+
+fn ignore_sigpipe() -> Result<()> {
+    let rc = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    if rc == libc::SIG_ERR {
+        return Err(std::io::Error::last_os_error()).context("failed to ignore SIGPIPE for daemon");
+    }
+    Ok(())
+}
+
+enum TailWriteResult {
+    Keep,
+    Drop,
+}
+
+fn write_tail_line(fd: &OwnedFd, line: &str) -> TailWriteResult {
+    let rc = unsafe { libc::write(fd.as_raw_fd(), line.as_ptr() as *const libc::c_void, line.len()) };
+    if rc >= 0 {
+        return TailWriteResult::Keep;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EAGAIN) => TailWriteResult::Keep,
+        Some(libc::EPIPE) | Some(libc::EBADF) | Some(libc::ECONNRESET) => TailWriteResult::Drop,
+        _ => TailWriteResult::Drop,
+    }
 }
 
 fn pid_namespace_key_for_pid(pid: libc::pid_t) -> Result<Option<NamespaceKey>> {
@@ -552,9 +693,11 @@ fn observe_events(
     file: File,
     host_pidns: NamespaceKey,
     active_profile: Arc<RwLock<Option<ActiveProfile>>>,
+    tail_subscribers: Arc<Mutex<Vec<TailSubscriber>>>,
 ) {
     let fd = file.as_raw_fd();
     let mut buffer = [0u8; 8192];
+    let broadcaster = TailBroadcaster::new(tail_subscribers);
     loop {
         let rc = unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
         if rc < 0 {
@@ -625,7 +768,7 @@ fn observe_events(
                         (None, _) => "no-path".to_string(),
                         (_, Err(_)) => "profile-lock-error".to_string(),
                     };
-                    crate::vlog!(
+                    let line = format!(
                         "fanotify: controlled pid={} pidns={}:{} mask={} access={} exe={} decision={} path={}",
                         meta.pid,
                         pidns.dev,
@@ -639,6 +782,8 @@ fn observe_events(
                         decision,
                         path
                     );
+                    crate::vlog!("{line}");
+                    broadcaster.broadcast_line(&line);
                 }
                 Ok(Some(_)) | Ok(None) => {}
                 Err(err) => {
@@ -763,11 +908,11 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        let update = handle_request(&mut state, "set-profile\n/work rw\n/etc ro", peer);
+        let update = handle_request(&mut state, "set-profile\n/work rw\n/etc ro", peer, None);
         assert_eq!(update.body, "ok profile-updated\n");
         assert!(!update.shutdown);
 
-        let query = handle_request(&mut state, "get-profile", peer);
+        let query = handle_request(&mut state, "get-profile", peer, None);
         assert_eq!(query.body, "ok\n/work rw\n/etc ro\n");
         assert!(!query.shutdown);
     }
@@ -780,7 +925,7 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        let response = handle_request(&mut state, "get-profile", peer);
+        let response = handle_request(&mut state, "get-profile", peer, None);
         assert_eq!(response.body, "ok\n");
         assert!(!response.shutdown);
     }
@@ -793,9 +938,44 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        let response = handle_request(&mut state, "set-profile", peer);
+        let response = handle_request(&mut state, "set-profile", peer, None);
         assert_eq!(response.body, "error missing-profile-source\n");
         assert!(!response.shutdown);
+    }
+
+    #[test]
+    fn tail_request_requires_passed_fd() {
+        let mut state = DaemonState::default();
+        let peer = PeerCredentials {
+            pid: unsafe { libc::getpid() },
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let response = handle_request(&mut state, "tail", peer, None);
+        assert_eq!(response.body, "error missing-tail-fd\n");
+        assert!(!response.shutdown);
+    }
+
+    #[test]
+    fn tail_broadcaster_drops_closed_subscriber() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let state = DaemonState::default();
+        state
+            .tail_broadcaster()
+            .register(write_fd)
+            .expect("register tail fd");
+        drop(read_fd);
+
+        state.tail_broadcaster().broadcast_line("fanotify: test");
+
+        let subscribers = state
+            .tail_subscribers
+            .lock()
+            .expect("tail subscriber lock poisoned");
+        assert!(subscribers.is_empty());
     }
 
     #[test]
@@ -806,7 +986,7 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        let response = handle_request(&mut state, "shutdown", peer);
+        let response = handle_request(&mut state, "shutdown", peer, None);
         assert_eq!(response.body, "ok shutting-down\n");
         assert!(response.shutdown);
     }

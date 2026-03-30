@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -54,6 +55,27 @@ pub(crate) fn get_profile_if_running() -> Result<Option<String>> {
     Ok(Some(body.strip_suffix('\n').unwrap_or(body).to_string()))
 }
 
+pub(crate) fn subscribe_tail_fd(fd: BorrowedFd<'_>) -> Result<()> {
+    let mut stream = UnixStream::connect(cmd_daemon::default_socket_path()).with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            cmd_daemon::default_socket_path().display()
+        )
+    })?;
+    send_request_with_fd(&stream, "tail", fd)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).with_context(|| {
+        format!(
+            "failed to read daemon response from {}",
+            cmd_daemon::default_socket_path().display()
+        )
+    })?;
+    if response.trim() == "ok tailing" {
+        return Ok(());
+    }
+    bail!("daemon refused tail request: {}", response.trim())
+}
+
 fn send_request(socket_path: &std::path::Path, request: &str) -> Result<String> {
     let Some(response) = try_send_request(socket_path, request)? else {
         bail!(
@@ -98,6 +120,43 @@ fn try_send_request(socket_path: &std::path::Path, request: &str) -> Result<Opti
         )
     })?;
     Ok(Some(response))
+}
+
+fn send_request_with_fd(stream: &UnixStream, request: &str, fd: BorrowedFd<'_>) -> Result<()> {
+    let message = format!("{request}\n");
+    let mut iov = libc::iovec {
+        iov_base: message.as_ptr() as *mut libc::c_void,
+        iov_len: message.len(),
+    };
+    let mut control = vec![0u8; unsafe {
+        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint) as usize
+    }];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = control.len();
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            bail!("failed to construct daemon control message for fd passing");
+        }
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as libc::c_uint) as _;
+        std::ptr::write(libc::CMSG_DATA(cmsg) as *mut libc::c_int, fd.as_raw_fd());
+        msg.msg_controllen = (*cmsg).cmsg_len;
+    }
+
+    let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
+    if sent < 0 {
+        return Err(std::io::Error::last_os_error()).context("sendmsg failed for daemon request");
+    }
+    if sent as usize != message.len() {
+        bail!("short sendmsg while sending daemon request with fd");
+    }
+    Ok(())
 }
 
 fn daemon_not_running_error(err: &std::io::Error) -> bool {

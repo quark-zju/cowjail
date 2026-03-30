@@ -319,6 +319,47 @@ class LeashIntegrationTestCase(unittest.TestCase):
 
 
 class RuntimeSemanticsTests(LeashIntegrationTestCase):
+    def test_tail_streams_daemon_decisions(self) -> None:
+        tail = subprocess.Popen(
+            [str(self.leash_bin), "tail"],
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.leash_run(
+                "/bin/sh",
+                "-lc",
+                'printf rw-after >"$1"; sleep 0.2',
+                "sh",
+                str(self.rw_file),
+            )
+            deadline = time.time() + 5
+            observed = ""
+            while time.time() < deadline:
+                chunk = tail.stdout.readline()
+                if not chunk:
+                    if tail.poll() is not None:
+                        self.fail(f"tail exited early: {tail.returncode} stderr={tail.stderr.read()}")
+                    continue
+                observed += chunk
+                if (
+                    "fanotify: controlled pid=" in chunk
+                    and f"path={self.rw_file}" in chunk
+                    and "decision=allow-rw" in chunk
+                ):
+                    break
+            else:
+                self.fail(f"tail never streamed expected decision, saw: {observed!r}")
+        finally:
+            tail.terminate()
+            tail.wait(timeout=5)
+            if tail.stdout is not None:
+                tail.stdout.close()
+            if tail.stderr is not None:
+                tail.stderr.close()
+
     def test_rw_and_deny_activity_is_logged(self) -> None:
         self.leash_run(
             "/bin/sh",
