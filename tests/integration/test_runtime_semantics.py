@@ -266,6 +266,21 @@ class LeashIntegrationTestCase(unittest.TestCase):
         self._dump_debug_logs(note=f"missing daemon log markers: {needles}")
         self.fail(f"daemon log never contained all of {needles!r}")
 
+    def wait_for_daemon_log_line(
+        self, fragments: list[str], *, timeout: float = 5.0
+    ) -> None:
+        deadline = time.time() + timeout
+        daemon_log_path = self.tmpdir / "daemon.log"
+        while time.time() < deadline:
+            if daemon_log_path.exists():
+                content = daemon_log_path.read_text(encoding="utf-8", errors="replace")
+                for line in content.splitlines():
+                    if all(fragment in line for fragment in fragments):
+                        return
+            time.sleep(0.05)
+        self._dump_debug_logs(note=f"missing daemon log line: {fragments}")
+        self.fail(f"daemon log never contained one line with all of {fragments!r}")
+
     def _dump_debug_logs(
         self,
         completed: subprocess.CompletedProcess[str] | None = None,
@@ -299,12 +314,12 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
         self.leash_run(
             "/bin/sh",
             "-lc",
-            'printf rw-after >"$1"',
+            'printf rw-after >"$1"; sleep 0.2',
             "sh",
             str(self.rw_file),
         )
         self.assertEqual(self.rw_file.read_text(), "rw-after")
-        self.wait_for_daemon_log_all(
+        self.wait_for_daemon_log_line(
             [
                 "fanotify: controlled pid=",
                 f"path={self.rw_file}",
@@ -316,15 +331,16 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
         accessed = self.leash_run(
             "/bin/sh",
             "-lc",
-            'cat "$1"',
+            'content=$(<"$1"); printf "%s\n" "$content"; sleep 0.2',
             "sh",
             str(self.deny_file),
             capture_stdout=True,
         )
         self.assertEqual(accessed.stdout, "deny\n")
         self.assertEqual(self.deny_file.read_text(), "deny\n")
-        self.wait_for_daemon_log_all(
+        self.wait_for_daemon_log_line(
             [
+                "fanotify: controlled pid=",
                 f"path={self.deny_file}",
                 "decision=deny",
             ]
@@ -352,7 +368,18 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
 
         config_text = (self.repo / ".git" / "config").read_text()
         self.assertIn("test = 1", config_text)
-        self.wait_for_daemon_log_all(
+
+        git_probe = self.leash_run(
+            "/bin/sh",
+            "-lc",
+            '(sleep 0.2; printf probe) | "$1" -C "$2" hash-object --stdin >/dev/null',
+            "sh",
+            self.system_git,
+            str(self.repo),
+        )
+        self.assertEqual(git_probe.returncode, 0)
+
+        self.wait_for_daemon_log_line(
             [
                 "fanotify: controlled pid=",
                 f"path={self.repo / '.git' / 'config'}",
