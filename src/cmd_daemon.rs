@@ -61,8 +61,14 @@ pub(crate) fn daemon_command(cmd: LowLevelDaemonCommand) -> Result<()> {
             .context("failed to accept daemon connection")?;
         let peer = peer_credentials(&stream)?;
         authorize_peer(&peer, state.host_pidns)?;
-        handle_client(&mut state, &mut stream, peer)?;
+        if handle_client(&mut state, &mut stream, peer)? {
+            crate::vlog!("daemon: shutting down");
+            break;
+        }
     }
+
+    cleanup_socket(&socket_path)?;
+    Ok(())
 }
 
 pub(crate) fn default_socket_path() -> PathBuf {
@@ -127,6 +133,15 @@ fn remove_stale_socket(socket_path: &Path) -> Result<()> {
             socket_path.display()
         )
     })
+}
+
+fn cleanup_socket(socket_path: &Path) -> Result<()> {
+    match fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("failed to remove daemon socket {}", socket_path.display())),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,7 +326,7 @@ fn handle_client(
     state: &mut DaemonState,
     stream: &mut UnixStream,
     peer: PeerCredentials,
-) -> Result<()> {
+) -> Result<bool> {
     let received = recv_request(stream)?;
     let request = received.request.trim();
     crate::vlog!(
@@ -322,21 +337,37 @@ fn handle_client(
     );
     let response = handle_request(state, request, peer);
     stream
-        .write_all(response.as_bytes())
-        .context("failed to write daemon response")
+        .write_all(response.body.as_bytes())
+        .context("failed to write daemon response")?;
+    stream.flush().context("failed to flush daemon response")?;
+    Ok(response.shutdown)
 }
 
-fn handle_request(state: &mut DaemonState, request: &str, _peer: PeerCredentials) -> String {
+struct RequestResponse {
+    body: String,
+    shutdown: bool,
+}
+
+fn handle_request(state: &mut DaemonState, request: &str, _peer: PeerCredentials) -> RequestResponse {
     let mut lines = request.lines();
     let Some(command) = lines.next().map(str::trim) else {
-        return "error empty-request\n".to_string();
+        return RequestResponse {
+            body: "error empty-request\n".to_string(),
+            shutdown: false,
+        };
     };
     match command {
-        "ping" => "pong\n".to_string(),
+        "ping" => RequestResponse {
+            body: "pong\n".to_string(),
+            shutdown: false,
+        },
         "set-profile" => {
             let profile_source = lines.collect::<Vec<_>>().join("\n");
             if profile_source.trim().is_empty() {
-                return "error missing-profile-source\n".to_string();
+                return RequestResponse {
+                    body: "error missing-profile-source\n".to_string(),
+                    shutdown: false,
+                };
             }
             match CompiledProfile::compile_normalized_source(&profile_source) {
                 Ok(compiled) => {
@@ -348,9 +379,15 @@ fn handle_request(state: &mut DaemonState, request: &str, _peer: PeerCredentials
                         source: profile_source,
                         compiled,
                     });
-                    "ok profile-updated\n".to_string()
+                    RequestResponse {
+                        body: "ok profile-updated\n".to_string(),
+                        shutdown: false,
+                    }
                 }
-                Err(err) => format!("error invalid-profile:{}\n", err),
+                Err(err) => RequestResponse {
+                    body: format!("error invalid-profile:{}\n", err),
+                    shutdown: false,
+                },
             }
         }
         "get-profile" => {
@@ -359,11 +396,24 @@ fn handle_request(state: &mut DaemonState, request: &str, _peer: PeerCredentials
                 .read()
                 .expect("active profile lock poisoned");
             match &*guard {
-                Some(profile) => format!("ok\n{}\n", profile.source),
-                None => "ok\n".to_string(),
+                Some(profile) => RequestResponse {
+                    body: format!("ok\n{}\n", profile.source),
+                    shutdown: false,
+                },
+                None => RequestResponse {
+                    body: "ok\n".to_string(),
+                    shutdown: false,
+                },
             }
         }
-        _ => "error unknown-command\n".to_string(),
+        "shutdown" => RequestResponse {
+            body: "ok shutting-down\n".to_string(),
+            shutdown: true,
+        },
+        _ => RequestResponse {
+            body: "error unknown-command\n".to_string(),
+            shutdown: false,
+        },
     }
 }
 
@@ -636,10 +686,12 @@ mod tests {
             gid: unsafe { libc::getgid() },
         };
         let update = handle_request(&mut state, "set-profile\n/work rw\n/etc ro", peer);
-        assert_eq!(update, "ok profile-updated\n");
+        assert_eq!(update.body, "ok profile-updated\n");
+        assert!(!update.shutdown);
 
         let query = handle_request(&mut state, "get-profile", peer);
-        assert_eq!(query, "ok\n/work rw\n/etc ro\n");
+        assert_eq!(query.body, "ok\n/work rw\n/etc ro\n");
+        assert!(!query.shutdown);
     }
 
     #[test]
@@ -650,7 +702,9 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        assert_eq!(handle_request(&mut state, "get-profile", peer), "ok\n");
+        let response = handle_request(&mut state, "get-profile", peer);
+        assert_eq!(response.body, "ok\n");
+        assert!(!response.shutdown);
     }
 
     #[test]
@@ -661,9 +715,21 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        assert_eq!(
-            handle_request(&mut state, "set-profile", peer),
-            "error missing-profile-source\n"
-        );
+        let response = handle_request(&mut state, "set-profile", peer);
+        assert_eq!(response.body, "error missing-profile-source\n");
+        assert!(!response.shutdown);
+    }
+
+    #[test]
+    fn shutdown_request_requests_daemon_exit() {
+        let mut state = DaemonState::default();
+        let peer = PeerCredentials {
+            pid: unsafe { libc::getpid() },
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let response = handle_request(&mut state, "shutdown", peer);
+        assert_eq!(response.body, "ok shutting-down\n");
+        assert!(response.shutdown);
     }
 }

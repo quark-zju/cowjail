@@ -35,6 +35,14 @@ pub(crate) fn set_profile(profile_source: &str) -> Result<()> {
     bail!("daemon refused profile update: {}", response.trim())
 }
 
+pub(crate) fn shutdown_daemon() -> Result<()> {
+    let response = send_request(&cmd_daemon::default_socket_path(), "shutdown")?;
+    if response.trim() == "ok shutting-down" {
+        return Ok(());
+    }
+    bail!("daemon refused shutdown request: {}", response.trim())
+}
+
 fn send_request(socket_path: &std::path::Path, request: &str) -> Result<String> {
     let mut stream = UnixStream::connect(socket_path).with_context(|| {
         format!(

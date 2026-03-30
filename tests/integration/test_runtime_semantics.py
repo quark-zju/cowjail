@@ -182,7 +182,15 @@ class LeashIntegrationTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         if hasattr(self, "daemon"):
-            self.daemon.terminate()
+            if self.daemon.poll() is None:
+                try:
+                    run_cmd(
+                        [str(self.leash_bin), "_shutdown-daemon"],
+                        env=self.env,
+                        capture_stdout=False,
+                    )
+                except AssertionError:
+                    self.daemon.terminate()
             try:
                 self.daemon.wait(timeout=5)
             except subprocess.TimeoutExpired:

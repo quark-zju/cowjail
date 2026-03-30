@@ -18,6 +18,7 @@ pub enum Command {
     LowLevelShow(ShowCommand),
     LowLevelRm(RmCommand),
     LowLevelSetProfile(LowLevelSetProfileCommand),
+    LowLevelShutdownDaemon,
     LowLevelSuid(LowLevelSuidCommand),
 }
 
@@ -32,6 +33,7 @@ pub enum HelpTopic {
     LowLevelShow,
     LowLevelRm,
     LowLevelSetProfile,
+    LowLevelShutdownDaemon,
     LowLevelSuid,
 }
 
@@ -120,6 +122,7 @@ where
         "_show" => parse_show(args)?,
         "_rm" => parse_rm(args)?,
         "_set-profile" => parse_low_level_set_profile(args)?,
+        "_shutdown-daemon" => parse_low_level_shutdown_daemon(args)?,
         "_suid" => parse_low_level_suid(args)?,
         other => bail!("unknown subcommand: {other}"),
     };
@@ -343,6 +346,14 @@ fn parse_low_level_set_profile(args: Arguments) -> Result<Command> {
     }))
 }
 
+fn parse_low_level_shutdown_daemon(args: Arguments) -> Result<Command> {
+    let extra = args.finish();
+    if !extra.is_empty() {
+        bail!("_shutdown-daemon got unexpected trailing arguments");
+    }
+    Ok(Command::LowLevelShutdownDaemon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +440,12 @@ mod tests {
                 verbose: true,
             })
         );
+    }
+
+    #[test]
+    fn parse_shutdown_daemon_accepts_no_args() {
+        let cmd = parse_from(os(&["_shutdown-daemon"])).expect("_shutdown-daemon should parse");
+        assert_eq!(cmd, Command::LowLevelShutdownDaemon);
     }
 
     #[test]

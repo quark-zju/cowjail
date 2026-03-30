@@ -96,6 +96,10 @@ fn try_main() -> Result<i32> {
             daemon_client::set_profile(&source).context("_set-profile subcommand failed")?;
             Ok(0)
         }
+        Command::LowLevelShutdownDaemon => {
+            daemon_client::shutdown_daemon().context("_shutdown-daemon subcommand failed")?;
+            Ok(0)
+        }
         Command::Run(run) => cmd_run::run_command(run).context("run subcommand failed"),
         Command::LowLevelSuid(suid) => {
             cmd_suid::suid_command(suid).context("_suid subcommand failed")?;
@@ -114,6 +118,7 @@ fn command_verbose(cmd: &Command) -> bool {
         Command::LowLevelShow(show) => show.verbose,
         Command::LowLevelRm(rm) => rm.verbose,
         Command::LowLevelSetProfile(_) => false,
+        Command::LowLevelShutdownDaemon => false,
         Command::LowLevelSuid(suid) => suid.verbose,
         Command::LowLevelList(_) => false,
     }
@@ -125,6 +130,7 @@ fn require_priviledge_reason(cmd: &Command) -> Option<&'static str> {
         Command::LowLevelDaemon(_) => Some("_daemon keeps root euid for fanotify control plane"),
         Command::LowLevelRm(_) => Some("_rm may need root to clean state/runtime artifacts"),
         Command::LowLevelSetProfile(_) => Some("_set-profile updates daemon policy state"),
+        Command::LowLevelShutdownDaemon => Some("_shutdown-daemon controls daemon lifecycle"),
         Command::LowLevelSuid(_) => Some("_suid updates binary ownership/mode"),
         Command::Help { .. }
         | Command::Completion(_)
