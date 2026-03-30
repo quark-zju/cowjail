@@ -122,8 +122,16 @@ fn enter_pid_namespace_worker_or_reap(daemon_pidfd: OwnedFd) -> Result<()> {
 
 fn run_pidns_init_reaper(worker_pid: libc::pid_t, daemon_pidfd: OwnedFd) -> ! {
     let mut worker_status: Option<libc::c_int> = None;
+    crate::vlog!(
+        "run: pidns init monitoring daemon liveness via pidfd={} for worker pid={}",
+        daemon_pidfd.as_raw_fd(),
+        worker_pid
+    );
     loop {
         if daemon_pidfd_ready(&daemon_pidfd) {
+            crate::vlog!(
+                "run: daemon liveness pidfd became ready; exiting pidns init to tear down namespace"
+            );
             unsafe { libc::_exit(1) }
         }
         let mut status: libc::c_int = 0;
@@ -138,6 +146,9 @@ fn run_pidns_init_reaper(worker_pid: libc::pid_t, daemon_pidfd: OwnedFd) -> ! {
         }
         if rc == 0 {
             if wait_for_worker_or_daemon(&daemon_pidfd) {
+                crate::vlog!(
+                    "run: daemon liveness pidfd became ready while pidns init was idle; exiting namespace"
+                );
                 unsafe { libc::_exit(1) }
             }
             continue;
