@@ -32,10 +32,17 @@ pub enum AccessDecision {
     Deny,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchDecision {
+    pub decision: AccessDecision,
+    pub rule_text: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
     action: RuleAction,
     conditions: Vec<CompiledCondition>,
+    rule_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +121,7 @@ impl CompiledProfile {
             rules.push(CompiledRule {
                 action: line.action,
                 conditions: compile_runtime_conditions(&line.normalized_conditions)?,
+                rule_text: render_normalized_rule_text(line),
             });
 
             for glob_pattern in glob_patterns_for_runtime_rule(&line.pattern) {
@@ -142,7 +150,7 @@ impl CompiledProfile {
         abs_path: &Path,
         exe_path: Option<&Path>,
         requested_access: RequestedAccess,
-    ) -> Option<AccessDecision> {
+    ) -> Option<MatchDecision> {
         let normalized = normalize_abs(abs_path).ok()?;
         let matched = self.globset.matches(&normalized);
 
@@ -157,8 +165,10 @@ impl CompiledProfile {
             }
         }
 
-        first_rule_idx
-            .map(|rule_idx| access_decision_for(self.rules[rule_idx].action, requested_access))
+        first_rule_idx.map(|rule_idx| MatchDecision {
+            decision: access_decision_for(self.rules[rule_idx].action, requested_access),
+            rule_text: self.rules[rule_idx].rule_text.clone(),
+        })
     }
 }
 
@@ -463,6 +473,15 @@ fn action_to_str(action: RuleAction) -> &'static str {
         RuleAction::Deny => "deny",
         RuleAction::Hide => "hide",
     }
+}
+
+fn render_normalized_rule_text(line: &ParsedRuleLine) -> String {
+    let mut rendered = format!("{} {}", line.pattern, action_to_str(line.action));
+    if !line.normalized_conditions.is_empty() {
+        rendered.push_str(" when ");
+        rendered.push_str(&line.normalized_conditions.join(","));
+    }
+    rendered
 }
 
 fn access_decision_for(action: RuleAction, requested_access: RequestedAccess) -> AccessDecision {
@@ -1241,19 +1260,31 @@ mod tests {
 
         assert_eq!(
             compiled.evaluate(Path::new("/work/file.txt"), None, RequestedAccess::Write),
-            Some(AccessDecision::AllowReadWrite)
+            Some(MatchDecision {
+                decision: AccessDecision::AllowReadWrite,
+                rule_text: "/work rw".to_string(),
+            })
         );
         assert_eq!(
             compiled.evaluate(Path::new("/etc/hosts"), None, RequestedAccess::Write),
-            Some(AccessDecision::Deny)
+            Some(MatchDecision {
+                decision: AccessDecision::Deny,
+                rule_text: "/etc ro".to_string(),
+            })
         );
         assert_eq!(
             compiled.evaluate(Path::new("/etc/hosts"), None, RequestedAccess::Read),
-            Some(AccessDecision::AllowReadOnly)
+            Some(MatchDecision {
+                decision: AccessDecision::AllowReadOnly,
+                rule_text: "/etc ro".to_string(),
+            })
         );
         assert_eq!(
             compiled.evaluate(Path::new("/etc/hosts"), None, RequestedAccess::Execute),
-            Some(AccessDecision::AllowReadOnly)
+            Some(MatchDecision {
+                decision: AccessDecision::AllowReadOnly,
+                rule_text: "/etc ro".to_string(),
+            })
         );
     }
 
@@ -1276,12 +1307,18 @@ mod tests {
                 Some(Path::new("/usr/bin/git")),
                 RequestedAccess::Write,
             ),
-            Some(AccessDecision::AllowReadWrite)
+            Some(MatchDecision {
+                decision: AccessDecision::AllowReadWrite,
+                rule_text: format!("{} rw when exe=/usr/bin/git", repo.display()),
+            })
         );
         std::fs::create_dir_all(repo.join("nested")).expect("mkdir nested");
         assert_eq!(
             compiled.evaluate(&repo.join("nested/file.txt"), None, RequestedAccess::Write,),
-            Some(AccessDecision::AllowReadWrite)
+            Some(MatchDecision {
+                decision: AccessDecision::AllowReadWrite,
+                rule_text: format!("{} rw when ancestor-has=.git", repo.display()),
+            })
         );
     }
 }

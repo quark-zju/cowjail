@@ -486,10 +486,16 @@ fn observe_events(
                                     .compiled
                                     .evaluate(target_path, exe_path.as_deref(), access)
                             })
-                            .map(format_access_decision)
-                            .unwrap_or("no-match"),
-                        (None, _) => "no-path",
-                        (_, Err(_)) => "profile-lock-error",
+                            .map(|matched| {
+                                format!(
+                                    "{} rule=\"{}\"",
+                                    format_access_decision(matched.decision),
+                                    matched.rule_text.replace('"', "\\\"")
+                                )
+                            })
+                            .unwrap_or_else(|| "no-match".to_string()),
+                        (None, _) => "no-path".to_string(),
+                        (_, Err(_)) => "profile-lock-error".to_string(),
                     };
                     crate::vlog!(
                         "fanotify: controlled pid={} pidns={}:{} mask={} access={} exe={} decision={} path={}",

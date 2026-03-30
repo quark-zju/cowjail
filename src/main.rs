@@ -88,7 +88,10 @@ fn try_main() -> Result<i32> {
         }
         Command::LowLevelSetProfile(set_profile) => {
             let source = fs::read_to_string(&set_profile.path).with_context(|| {
-                format!("failed to read profile source {}", set_profile.path.display())
+                format!(
+                    "failed to read profile source {}",
+                    set_profile.path.display()
+                )
             })?;
             daemon_client::set_profile(&source).context("_set-profile subcommand failed")?;
             Ok(0)

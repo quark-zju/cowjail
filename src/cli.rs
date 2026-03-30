@@ -333,7 +333,7 @@ fn parse_low_level_suid(mut args: Arguments) -> Result<Command> {
     Ok(Command::LowLevelSuid(LowLevelSuidCommand { verbose }))
 }
 
-fn parse_low_level_set_profile(mut args: Arguments) -> Result<Command> {
+fn parse_low_level_set_profile(args: Arguments) -> Result<Command> {
     let extra = args.finish();
     if extra.len() != 1 {
         bail!("_set-profile requires exactly one <path> argument");
