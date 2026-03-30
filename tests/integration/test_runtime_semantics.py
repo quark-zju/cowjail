@@ -223,12 +223,6 @@ class LeashIntegrationTestCase(unittest.TestCase):
             check=False,
             capture_stdout=capture_stdout,
         )
-        if (
-            completed.returncode != 0
-            and "fanotify_mark(FAN_MARK_MNTNS)-failed" in completed.stderr
-        ):
-            self._dump_debug_logs(completed, full_cmd, note="skipping because FAN_MARK_MNTNS failed")
-            raise unittest.SkipTest("kernel or privileges do not support FAN_MARK_MNTNS here")
         if check and completed.returncode != 0:
             self._dump_debug_logs(completed, full_cmd, note="command failed")
             raise AssertionError(
@@ -237,6 +231,18 @@ class LeashIntegrationTestCase(unittest.TestCase):
                 f"stderr:\n{completed.stderr}"
             )
         return completed
+
+    def wait_for_daemon_log(self, needle: str, *, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        daemon_log_path = self.tmpdir / "daemon.log"
+        while time.time() < deadline:
+            if daemon_log_path.exists():
+                content = daemon_log_path.read_text(encoding="utf-8", errors="replace")
+                if needle in content:
+                    return
+            time.sleep(0.05)
+        self._dump_debug_logs(note=f"missing daemon log marker: {needle}")
+        self.fail(f"daemon log never contained {needle!r}")
 
     def _dump_debug_logs(
         self,
@@ -267,7 +273,7 @@ class LeashIntegrationTestCase(unittest.TestCase):
 
 
 class RuntimeSemanticsTests(LeashIntegrationTestCase):
-    def test_rw_and_deny_semantics(self) -> None:
+    def test_rw_and_deny_activity_is_logged(self) -> None:
         self.leash_run(
             "/bin/sh",
             "-lc",
@@ -276,29 +282,29 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
             str(self.rw_file),
         )
         self.assertEqual(self.rw_file.read_text(), "rw-after")
+        self.wait_for_daemon_log("fanotify: controlled pid=")
+        self.wait_for_daemon_log("path=/usr/bin/bash")
 
-        denied = self.leash_run(
+        accessed = self.leash_run(
             "/bin/sh",
             "-lc",
             'cat "$1"',
             "sh",
             str(self.deny_file),
-            check=False,
             capture_stdout=True,
         )
-        self.assertNotEqual(denied.returncode, 0)
+        self.assertEqual(accessed.stdout, "deny\n")
         self.assertEqual(self.deny_file.read_text(), "deny\n")
 
-    def test_git_rw_allows_git_but_not_shell_metadata_writes(self) -> None:
-        shell_write = self.leash_run(
+    def test_git_activity_is_logged_from_controlled_pidns(self) -> None:
+        shell_read = self.leash_run(
             "/bin/sh",
             "-lc",
-            'printf hacked >"$1"',
+            'cat "$1" >/dev/null',
             "sh",
             str(self.repo / ".git" / "config"),
-            check=False,
         )
-        self.assertNotEqual(shell_write.returncode, 0)
+        self.assertEqual(shell_read.returncode, 0)
 
         git_write = self.leash_run(
             self.system_git,
@@ -311,7 +317,8 @@ class RuntimeSemanticsTests(LeashIntegrationTestCase):
         self.assertEqual(git_write.returncode, 0)
 
         config_text = (self.repo / ".git" / "config").read_text()
-        self.assertIn("leash.test = 1", config_text)
+        self.assertIn("test = 1", config_text)
+        self.wait_for_daemon_log("fanotify: controlled pid=")
 
 
 if __name__ == "__main__":
