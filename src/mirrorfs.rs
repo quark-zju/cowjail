@@ -411,7 +411,7 @@ impl<P: AccessController> MirrorFs<P> {
         let path = self
             .path_for_ino(ino)
             .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-        self.authorize(caller, path, Operation::Lock)?;
+        self.authorize(caller, path, lock_operation(typ))?;
         let handle = self
             .handles
             .get(&fh)
@@ -436,7 +436,7 @@ impl<P: AccessController> MirrorFs<P> {
         let path = self
             .path_for_ino(ino)
             .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-        self.authorize(caller, path, Operation::Lock)?;
+        self.authorize(caller, path, Operation::GetLock)?;
         let handle = self
             .handles
             .get(&fh)
@@ -1152,6 +1152,15 @@ fn to_timespec_or_omit(value: Option<TimeOrNow>) -> libc::timespec {
             tv_sec: 0,
             tv_nsec: libc::UTIME_OMIT,
         },
+    }
+}
+
+fn lock_operation(typ: i32) -> Operation {
+    match typ {
+        libc::F_RDLCK => Operation::SetReadLock,
+        libc::F_WRLCK => Operation::SetWriteLock,
+        libc::F_UNLCK => Operation::Unlock,
+        _ => Operation::SetWriteLock,
     }
 }
 

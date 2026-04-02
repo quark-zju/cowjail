@@ -36,6 +36,18 @@ impl AccessController for ProcessNamePolicy {
     }
 }
 
+#[derive(Debug, Default)]
+struct WriteLockOnlyPolicy;
+
+impl AccessController for WriteLockOnlyPolicy {
+    fn check(&self, request: &AccessRequest<'_>) -> AccessDecision {
+        match request.operation {
+            crate::access::Operation::SetWriteLock => AccessDecision::Deny(libc::EACCES),
+            _ => AccessDecision::Allow,
+        }
+    }
+}
+
 fn test_caller(name: &str) -> crate::access::Caller {
     MirrorFs::<AllowAll>::caller_for_test(name)
 }
@@ -127,6 +139,33 @@ fn lock_round_trip_succeeds() -> Result<()> {
         lock.2,
         libc::F_WRLCK | libc::F_UNLCK | libc::F_RDLCK
     ));
+    Ok(())
+}
+
+#[test]
+fn read_lock_and_getlk_are_not_treated_as_writes() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("locked.db");
+    fs::write(&path, b"123456")?;
+
+    let mut mirror = MirrorFs::new(dir.path().to_path_buf(), WriteLockOnlyPolicy);
+    let caller = test_caller("reader");
+    let fh = mirror.open_for_test(&caller, &path, libc::O_RDWR)?;
+
+    mirror.setlk_for_test(&caller, fh, 0, 3, libc::F_RDLCK, false)?;
+    let _ = mirror.getlk_for_test(&caller, fh, 0, u64::MAX, libc::F_RDLCK)?;
+
+    let denied = mirror
+        .setlk_for_test(&caller, fh, 0, 3, libc::F_WRLCK, false)
+        .unwrap_err();
+    assert_eq!(
+        denied
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error),
+        Some(libc::EACCES)
+    );
+
+    mirror.setlk_for_test(&caller, fh, 0, 3, libc::F_UNLCK, false)?;
     Ok(())
 }
 

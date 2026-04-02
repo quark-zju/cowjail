@@ -33,7 +33,10 @@ pub enum Operation {
     Fsync,
     FsyncDir,
     StatFs,
-    Lock,
+    GetLock,
+    SetReadLock,
+    SetWriteLock,
+    Unlock,
 }
 
 impl Operation {
@@ -49,7 +52,7 @@ impl Operation {
                 | Self::Symlink
                 | Self::Rename
                 | Self::SetAttr
-                | Self::Lock
+                | Self::SetWriteLock
                 | Self::Fsync
                 | Self::FsyncDir
         )
