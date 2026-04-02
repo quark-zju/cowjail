@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use fs_err as fs;
-use memmap2::MmapMut;
+use memmap2::{Mmap, MmapMut};
 use tempfile::tempdir;
 
 use crate::access::{AccessController, AccessDecision, AccessRequest, AllowAll};
@@ -117,6 +117,43 @@ fn mmap_observes_mirrored_writes() -> Result<()> {
     let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
     let mmap = unsafe { MmapMut::map_mut(&file)? };
     assert_eq!(&mmap[..], b"abZZef");
+    Ok(())
+}
+
+#[test]
+fn mmaps_survive_close_and_rename_and_stay_coherent() -> Result<()> {
+    let dir = tempdir()?;
+    let from = dir.path().join("mapped.bin");
+    let to = dir.path().join("renamed.bin");
+    fs::write(&from, b"abcdef")?;
+
+    let mut mirror = MirrorFs::new(dir.path().to_path_buf(), AllowAll);
+    let caller = test_caller("sqlite");
+    let read_fh = mirror.open_for_test(&caller, &from, libc::O_RDONLY)?;
+    let write_fh = mirror.open_for_test(&caller, &from, libc::O_RDWR)?;
+    let read_file = mirror.dup_handle_for_test(read_fh)?;
+    let write_file = mirror.dup_handle_for_test(write_fh)?;
+
+    let read_map = unsafe { Mmap::map(&read_file)? };
+    let mut write_map = unsafe { MmapMut::map_mut(&write_file)? };
+
+    mirror.release_for_test(read_fh);
+    mirror.release_for_test(write_fh);
+    drop(read_file);
+    drop(write_file);
+
+    mirror.rename_for_test(&caller, &from, &to)?;
+
+    write_map[1..5].copy_from_slice(b"WXYZ");
+    write_map.flush()?;
+
+    assert_eq!(&read_map[..], b"aWXYZf");
+
+    drop(write_map);
+    drop(read_map);
+
+    let reopened = fs::read(&to)?;
+    assert_eq!(reopened, b"aWXYZf");
     Ok(())
 }
 

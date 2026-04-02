@@ -301,6 +301,15 @@ impl<P: AccessController> MirrorFs<P> {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn dup_handle_for_test(&self, fh: u64) -> Result<fs::File> {
+        let handle = self
+            .handles
+            .get(&fh)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
+        Ok(handle.file.try_clone()?)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn write_for_test(
         &mut self,
         caller: &Caller,
