@@ -112,7 +112,7 @@ impl MountedSuite {
 impl Drop for MountedSuite {
     fn drop(&mut self) {
         if let Some(session) = self.session.take() {
-            session.join();
+            drop(session);
         }
     }
 }

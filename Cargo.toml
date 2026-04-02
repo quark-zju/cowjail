@@ -10,7 +10,7 @@ harness = false
 [dependencies]
 anyhow = "1"
 thiserror = "2"
-fuser = { version = "0.16.0", features = ["abi-7-40"] }
+fuser = { version = "0.17.0", features = ["abi-7-40"] }
 fs-err = "3"
 globset = "0.4"
 libc = "0.2"

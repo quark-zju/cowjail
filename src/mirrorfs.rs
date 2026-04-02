@@ -6,17 +6,19 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use fs_err as fs;
 use fs_err::os::unix::fs::OpenOptionsExt as FsOpenOptionsExt;
 use fuser::{
-    BackingId, FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request, TimeOrNow, consts,
+    AccessFlags, BackingId, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock,
+    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
-use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, c_int};
+use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use log::debug;
 
 use crate::access::{AccessController, AccessDecision, AccessRequest, Caller, Operation};
@@ -38,6 +40,18 @@ struct OpenHandle {
     ino: u64,
     file: fs::File,
     backing_id: Option<BackingId>,
+}
+
+struct FuseMirrorFs<P> {
+    inner: Mutex<MirrorFs<P>>,
+}
+
+impl<P> FuseMirrorFs<P> {
+    fn new(inner: MirrorFs<P>) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +90,9 @@ impl<P: AccessController> MirrorFs<P> {
 
     pub fn mount(self, mountpoint: &Path) -> Result<()> {
         let options = fuse_mount_options();
-        fuser::mount2(self, mountpoint, &options).with_context(|| {
+        let mut config = Config::default();
+        config.mount_options = options;
+        fuser::mount2(FuseMirrorFs::new(self), mountpoint, &config).with_context(|| {
             format!(
                 "failed to mount mirror filesystem at {}",
                 mountpoint.display()
@@ -86,7 +102,9 @@ impl<P: AccessController> MirrorFs<P> {
 
     pub unsafe fn mount_background(self, mountpoint: &Path) -> Result<fuser::BackgroundSession> {
         let options = fuse_mount_options();
-        fuser::spawn_mount2(self, mountpoint, &options).with_context(|| {
+        let mut config = Config::default();
+        config.mount_options = options;
+        fuser::spawn_mount2(FuseMirrorFs::new(self), mountpoint, &config).with_context(|| {
             format!(
                 "failed to mount mirror filesystem in background at {}",
                 mountpoint.display()
@@ -200,7 +218,7 @@ impl<P: AccessController> MirrorFs<P> {
 
     fn attr_for_path(&mut self, path: &Path, metadata: &Metadata) -> FileAttr {
         FileAttr {
-            ino: self.ensure_ino(path),
+            ino: INodeNo(self.ensure_ino(path)),
             size: metadata.len(),
             blocks: metadata.blocks(),
             atime: system_time_from_unix(metadata.atime(), metadata.atime_nsec()),
@@ -610,6 +628,7 @@ impl<P: AccessController> MirrorFs<P> {
     }
 }
 
+#[cfg(any())]
 impl<P: AccessController> Filesystem for MirrorFs<P> {
     fn init(
         &mut self,
@@ -1153,7 +1172,626 @@ fn fuse_mount_options() -> Vec<MountOption> {
     vec![MountOption::FSName("leash2-mirror".to_owned())]
 }
 
-fn caller_from_request(req: &Request<'_>) -> Caller {
+impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        config
+            .add_capabilities(InitFlags::FUSE_PASSTHROUGH)
+            .map_err(|unsupported| {
+                std::io::Error::other(format!("unsupported init flags: {unsupported:?}"))
+            })?;
+        config
+            .set_max_stack_depth(2)
+            .map_err(|limit| std::io::Error::other(format!("invalid max stack depth: {limit}")))?;
+        Ok(())
+    }
+
+    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        match fs.lookup_child(&caller, parent.0, name) {
+            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let result = match fh {
+            Some(fh) => fs.getattr_handle(&caller, ino.0, fh.0),
+            None => match fs.path_for_ino(ino.0).map(Path::to_path_buf) {
+                Some(path) => fs.getattr_path(&caller, &path),
+                None => Err(std::io::Error::from_raw_os_error(ENOENT).into()),
+            },
+        };
+        match result {
+            Ok(attr) => reply.attr(&TTL, &attr),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn readdir(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectory,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::ReadDir) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                reply.error(Errno::from(err));
+                return;
+            }
+        };
+        if !metadata.file_type().is_dir() {
+            reply.error(Errno::ENOTDIR);
+            return;
+        }
+
+        let mut entries = vec![
+            (ino.0, FileType::Directory, std::ffi::OsString::from(".")),
+            (
+                fs.ensure_ino(path.parent().unwrap_or(&path)),
+                FileType::Directory,
+                std::ffi::OsString::from(".."),
+            ),
+        ];
+        match fs.list_children(&path) {
+            Ok(mut children) => entries.append(&mut children),
+            Err(err) => {
+                reply.error(Errno::from_i32(io_errno(&err)));
+                return;
+            }
+        }
+
+        append_readdir_entries(
+            &entries,
+            offset as i64,
+            |child_ino, next_offset, kind, name| {
+                reply.add(INodeNo(child_ino), next_offset as u64, kind, name)
+            },
+        );
+        reply.ok();
+    }
+
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let result = (|| -> Result<(u64, bool)> {
+            let path = fs
+                .path_for_ino(ino.0)
+                .map(Path::to_path_buf)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
+            let raw_flags = flags.0;
+            let operation = if raw_flags & libc::O_ACCMODE == libc::O_RDONLY {
+                Operation::OpenRead
+            } else {
+                Operation::OpenWrite
+            };
+            fs.authorize(&caller, &path, operation)?;
+            ensure_openable_node(&path)?;
+            let file = open_passthrough_file(&path, raw_flags, false)?;
+            let backing_id = match reply.open_backing(&file) {
+                Ok(backing_id) => {
+                    debug!("passthrough open active for {}", path.display());
+                    Some(backing_id)
+                }
+                Err(err) => {
+                    debug!(
+                        "passthrough open unavailable for {}: {}",
+                        path.display(),
+                        err
+                    );
+                    None
+                }
+            };
+            let passthrough = backing_id.is_some();
+            let fh = fs.allocate_handle(ino.0, file, backing_id);
+            Ok((fh, passthrough))
+        })();
+        match result {
+            Ok((fh, true)) => {
+                let backing_id = fs
+                    .handles
+                    .get(&fh)
+                    .and_then(|handle| handle.backing_id.as_ref())
+                    .expect("passthrough open stores backing id");
+                reply.opened_passthrough(FileHandle(fh), FopenFlags::empty(), backing_id)
+            }
+            Ok((fh, false)) => reply.opened(FileHandle(fh), FopenFlags::empty()),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn read(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        size: u32,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        reply: ReplyData,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        match fs.read_handle(&caller, ino.0, fh.0, offset as i64, size) {
+            Ok(data) => reply.data(&data),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn readlink(&self, req: &Request, ino: INodeNo, reply: ReplyData) {
+        let caller = caller_from_request(req);
+        let fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::ReadLink) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        match fs::read_link(&path) {
+            Ok(target) => reply.data(target.as_os_str().as_bytes()),
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn create(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(parent_path) = fs.path_for_ino(parent.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let result = (|| -> Result<(FileAttr, u64, bool)> {
+            fs.authorize(&caller, &parent_path, Operation::Create)?;
+            let path = parent_path.join(name);
+            let file = open_passthrough_file(&path, flags | libc::O_CREAT, true)?;
+            let created_mode = normalize_create_mode(mode, umask) as u32;
+            file.set_permissions(std::fs::Permissions::from_mode(created_mode))?;
+            let backing_id = match reply.open_backing(&file) {
+                Ok(backing_id) => {
+                    debug!("passthrough create active for {}", path.display());
+                    Some(backing_id)
+                }
+                Err(err) => {
+                    debug!(
+                        "passthrough create unavailable for {}: {}",
+                        path.display(),
+                        err
+                    );
+                    None
+                }
+            };
+            let metadata = file.metadata()?;
+            let ino = fs.ensure_ino(&path);
+            let passthrough = backing_id.is_some();
+            let fh = fs.allocate_handle(ino, file, backing_id);
+            let attr = fs.attr_for_path(&path, &metadata);
+            Ok((attr, fh, passthrough))
+        })();
+        match result {
+            Ok((attr, fh, true)) => {
+                let backing_id = fs
+                    .handles
+                    .get(&fh)
+                    .and_then(|handle| handle.backing_id.as_ref())
+                    .expect("passthrough create stores backing id");
+                reply.created_passthrough(
+                    &TTL,
+                    &attr,
+                    Generation(0),
+                    FileHandle(fh),
+                    FopenFlags::empty(),
+                    backing_id,
+                )
+            }
+            Ok((attr, fh, false)) => reply.created(
+                &TTL,
+                &attr,
+                Generation(0),
+                FileHandle(fh),
+                FopenFlags::empty(),
+            ),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn write(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        data: &[u8],
+        _write_flags: WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        reply: ReplyWrite,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        match fs.write_handle(&caller, ino.0, fh.0, offset as i64, data) {
+            Ok(len) => reply.written(len),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn flush(
+        &self,
+        req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        match fs.flush_for_test(&caller, fh.0) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn release(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let mut fs = self.inner.lock().unwrap();
+        fs.release_for_test(fh.0);
+        reply.ok();
+    }
+
+    fn fsync(
+        &self,
+        req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let result = (|| -> std::io::Result<()> {
+            let ino = fs
+                .handles
+                .get(&fh.0)
+                .map(|handle| handle.ino)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
+            let path = fs.path_for_ino(ino).unwrap_or(fs.root()).to_path_buf();
+            if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::Fsync) {
+                return Err(std::io::Error::from_raw_os_error(errno));
+            }
+            let handle = fs
+                .handles
+                .get_mut(&fh.0)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
+            if datasync {
+                handle.file.sync_data()
+            } else {
+                handle.file.sync_all()
+            }
+        })();
+        match result {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn mkdir(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(parent_path) = fs.path_for_ino(parent.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &parent_path, Operation::Mkdir) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        let path = parent_path.join(name);
+        let result = create_dir_with_mode(&path, normalize_create_mode(mode, umask))
+            .and_then(|_| fs::symlink_metadata(&path));
+        match result {
+            Ok(metadata) => {
+                let attr = fs.attr_for_path(&path, &metadata);
+                reply.entry(&TTL, &attr, Generation(0));
+            }
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(path) = fs.resolve_child(parent.0, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::Unlink) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                fs.unregister_path(&path);
+                reply.ok();
+            }
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(path) = fs.resolve_child(parent.0, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::Rmdir) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        match fs::remove_dir(&path) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn symlink(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        link: &Path,
+        reply: ReplyEntry,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(path) = fs.resolve_child(parent.0, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::Symlink) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        match std::os::unix::fs::symlink(link, &path).and_then(|_| fs::symlink_metadata(&path)) {
+            Ok(metadata) => {
+                let attr = fs.attr_for_path(&path, &metadata);
+                reply.entry(&TTL, &attr, Generation(0));
+            }
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn link(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        newparent: INodeNo,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(newparent_path) = fs.path_for_ino(newparent.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match fs.link_for_test(&caller, ino.0, &newparent_path, newname) {
+            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn rename(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
+        _flags: RenameFlags,
+        reply: ReplyEmpty,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(from) = fs.resolve_child(parent.0, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let Some(to) = fs.resolve_child(newparent.0, newname) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match fs.rename_for_test(&caller, &from, &to) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn setattr(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<FileHandle>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<fuser::BsdFileFlags>,
+        reply: ReplyAttr,
+    ) {
+        if uid.is_some() || gid.is_some() {
+            reply.error(Errno::from_i32(libc::EOPNOTSUPP));
+            return;
+        }
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match fs.setattr_for_test(&caller, &path, size, mode, atime, mtime) {
+            Ok(attr) => reply.attr(&TTL, &attr),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn access(&self, req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
+        let caller = caller_from_request(req);
+        let fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match fs.authorize_errno(&caller, &path, Operation::Access) {
+            Some(errno) => reply.error(Errno::from_i32(errno)),
+            None => reply.ok(),
+        }
+    }
+
+    fn statfs(&self, req: &Request, ino: INodeNo, reply: ReplyStatfs) {
+        let caller = caller_from_request(req);
+        let fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match fs.statfs_for_test(&caller, &path) {
+            Ok(stats) => reply.statfs(
+                stats.blocks,
+                stats.bfree,
+                stats.bavail,
+                stats.files,
+                stats.ffree,
+                stats.bsize,
+                stats.namelen,
+                stats.frsize,
+            ),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn fsyncdir(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        let caller = caller_from_request(req);
+        let fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::FsyncDir) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+        let result = fs::File::open(&path).and_then(|file| {
+            if datasync {
+                file.sync_data()
+            } else {
+                file.sync_all()
+            }
+        });
+        match result {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(Errno::from(err)),
+        }
+    }
+
+    fn getlk(
+        &self,
+        req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _lock_owner: LockOwner,
+        start: u64,
+        end: u64,
+        typ: i32,
+        _pid: u32,
+        reply: ReplyLock,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        match fs.getlk_for_test(&caller, fh.0, start, end, typ) {
+            Ok((start, end, typ, pid)) => reply.locked(start, end, typ, pid),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+
+    fn setlk(
+        &self,
+        req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _lock_owner: LockOwner,
+        start: u64,
+        end: u64,
+        typ: i32,
+        _pid: u32,
+        sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        let caller = caller_from_request(req);
+        let mut fs = self.inner.lock().unwrap();
+        match fs.setlk_for_test(&caller, fh.0, start, end, typ, sleep) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
+        }
+    }
+}
+
+fn caller_from_request(req: &Request) -> Caller {
     let pid = req.pid();
     let process_name = read_process_name(pid);
     debug!("mirrorfs request pid={} comm={:?}", pid, process_name);
