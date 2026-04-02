@@ -309,7 +309,10 @@ pub enum ParseError {
 
 impl ParseError {
     fn syntax(line: usize, msg: impl Into<String>) -> Self {
-        Self::Syntax { line, msg: msg.into() }
+        Self::Syntax {
+            line,
+            msg: msg.into(),
+        }
     }
 }
 
@@ -343,7 +346,15 @@ pub fn parse(
 ) -> Result<Profile, ParseError> {
     let mut rules = Vec::new();
     let include_stack: Vec<String> = Vec::new();
-    parse_lines(source, home, cwd, include_resolver, exe_resolver, &include_stack, &mut rules)?;
+    parse_lines(
+        source,
+        home,
+        cwd,
+        include_resolver,
+        exe_resolver,
+        &include_stack,
+        &mut rules,
+    )?;
     Ok(Profile { rules })
 }
 
@@ -422,7 +433,10 @@ fn parse_directive(
             }
         }
         Some(other) => {
-            return Err(ParseError::syntax(lineno, format!("unknown directive '%{other}'")));
+            return Err(ParseError::syntax(
+                lineno,
+                format!("unknown directive '%{other}'"),
+            ));
         }
         None => {
             return Err(ParseError::syntax(lineno, "empty directive"));
@@ -441,8 +455,9 @@ fn parse_rule_line(
 ) -> Result<Rule, ParseError> {
     let mut tokens = line.split_whitespace();
 
-    let pattern_tok =
-        tokens.next().ok_or_else(|| ParseError::syntax(lineno, "empty line"))?;
+    let pattern_tok = tokens
+        .next()
+        .ok_or_else(|| ParseError::syntax(lineno, "empty line"))?;
     let action_tok = tokens
         .next()
         .ok_or_else(|| ParseError::syntax(lineno, "missing action"))?;
@@ -457,7 +472,10 @@ fn parse_rule_line(
                 ParseError::syntax(lineno, "'when' requires at least one condition")
             })?;
             if tokens.next().is_some() {
-                return Err(ParseError::syntax(lineno, "unexpected tokens after conditions"));
+                return Err(ParseError::syntax(
+                    lineno,
+                    "unexpected tokens after conditions",
+                ));
             }
             conds_str
                 .split(',')
@@ -478,10 +496,14 @@ fn parse_rule_line(
         .collect::<Result<_, _>>()?;
 
     let abs_pattern = expand_pattern(pattern_tok, home, cwd);
-    let glob =
-        build_glob(&abs_pattern).map_err(|e| ParseError::BadGlob(abs_pattern.clone(), e))?;
+    let glob = build_glob(&abs_pattern).map_err(|e| ParseError::BadGlob(abs_pattern.clone(), e))?;
 
-    Ok(Rule { pattern: abs_pattern, glob, action, conditions })
+    Ok(Rule {
+        pattern: abs_pattern,
+        glob,
+        action,
+        conditions,
+    })
 }
 
 // ── Pattern normalisation ─────────────────────────────────────────────────────
@@ -542,7 +564,12 @@ mod tests {
 
     impl MockExeResolver {
         fn new(pairs: &[(&str, &str)]) -> Self {
-            Self(pairs.iter().map(|(k, v)| (k.to_string(), PathBuf::from(v))).collect())
+            Self(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), PathBuf::from(v)))
+                    .collect(),
+            )
         }
         fn empty() -> Self {
             Self(HashMap::new())
@@ -591,9 +618,15 @@ mod tests {
         fs: &dyn FsCheck,
     ) -> Option<Action> {
         let exe_path = exe.map(Path::new);
-        let env_map: HashMap<String, String> =
-            env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let ctx = EvalContext { exe: exe_path, env: &env_map, fs };
+        let env_map: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let ctx = EvalContext {
+            exe: exe_path,
+            env: &env_map,
+            fs,
+        };
         profile.evaluate(Path::new(path), &ctx)
     }
 
@@ -618,7 +651,10 @@ mod tests {
     #[test]
     fn unconditional_deny() {
         let p = parse_simple("~/.ssh deny\n");
-        assert_eq!(eval(&p, "/home/user/.ssh/id_rsa", None, &[]), Some(Action::Deny));
+        assert_eq!(
+            eval(&p, "/home/user/.ssh/id_rsa", None, &[]),
+            Some(Action::Deny)
+        );
     }
 
     #[test]
@@ -639,11 +675,21 @@ mod tests {
     fn exe_absolute_pattern_match() {
         let p = parse_simple("~/.claude rw when exe=/usr/bin/claude\n~/.claude ro\n");
         assert_eq!(
-            eval(&p, "/home/user/.claude/settings.json", Some("/usr/bin/claude"), &[]),
+            eval(
+                &p,
+                "/home/user/.claude/settings.json",
+                Some("/usr/bin/claude"),
+                &[]
+            ),
             Some(Action::ReadWrite)
         );
         assert_eq!(
-            eval(&p, "/home/user/.claude/settings.json", Some("/usr/bin/vim"), &[]),
+            eval(
+                &p,
+                "/home/user/.claude/settings.json",
+                Some("/usr/bin/vim"),
+                &[]
+            ),
             Some(Action::ReadOnly)
         );
     }
@@ -722,7 +768,10 @@ mod tests {
     #[test]
     fn env_condition_set_and_unset() {
         let p = parse_simple("/debug rw when env=DEBUG\n/debug ro\n");
-        assert_eq!(eval(&p, "/debug/log", None, &[("DEBUG", "1")]), Some(Action::ReadWrite));
+        assert_eq!(
+            eval(&p, "/debug/log", None, &[("DEBUG", "1")]),
+            Some(Action::ReadWrite)
+        );
         assert_eq!(eval(&p, "/debug/log", None, &[]), Some(Action::ReadOnly));
     }
 
@@ -785,12 +834,16 @@ mod tests {
 
     #[test]
     fn multiple_conditions_all_must_match() {
-        let p =
-            parse_simple("/secret rw when exe=/usr/bin/vault,env=VAULT_TOKEN\n/secret deny\n");
+        let p = parse_simple("/secret rw when exe=/usr/bin/vault,env=VAULT_TOKEN\n/secret deny\n");
 
         // Both conditions met → rw
         assert_eq!(
-            eval(&p, "/secret/key", Some("/usr/bin/vault"), &[("VAULT_TOKEN", "x")]),
+            eval(
+                &p,
+                "/secret/key",
+                Some("/usr/bin/vault"),
+                &[("VAULT_TOKEN", "x")]
+            ),
             Some(Action::ReadWrite)
         );
         // Only exe → deny
@@ -800,11 +853,19 @@ mod tests {
         );
         // Only env → deny
         assert_eq!(
-            eval(&p, "/secret/key", Some("/usr/bin/vim"), &[("VAULT_TOKEN", "x")]),
+            eval(
+                &p,
+                "/secret/key",
+                Some("/usr/bin/vim"),
+                &[("VAULT_TOKEN", "x")]
+            ),
             Some(Action::Deny)
         );
         // Neither → deny
-        assert_eq!(eval(&p, "/secret/key", Some("/usr/bin/vim"), &[]), Some(Action::Deny));
+        assert_eq!(
+            eval(&p, "/secret/key", Some("/usr/bin/vim"), &[]),
+            Some(Action::Deny)
+        );
     }
 
     // ── %include ──────────────────────────────────────────────────────────────
@@ -833,7 +894,10 @@ mod tests {
 
         assert_eq!(eval(&p, "/usr/bin/ls", None, &[]), Some(Action::ReadOnly));
         assert_eq!(eval(&p, "/tmp/x", None, &[]), Some(Action::ReadWrite));
-        assert_eq!(eval(&p, "/home/user/.ssh/key", None, &[]), Some(Action::Deny));
+        assert_eq!(
+            eval(&p, "/home/user/.ssh/key", None, &[]),
+            Some(Action::Deny)
+        );
     }
 
     #[test]
@@ -866,7 +930,10 @@ mod tests {
     #[test]
     fn tilde_expansion() {
         let p = parse_simple("~ ro\n");
-        assert_eq!(eval(&p, "/home/user/docs/readme.md", None, &[]), Some(Action::ReadOnly));
+        assert_eq!(
+            eval(&p, "/home/user/docs/readme.md", None, &[]),
+            Some(Action::ReadOnly)
+        );
     }
 
     #[test]
