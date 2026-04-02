@@ -28,7 +28,7 @@ pub struct MirrorFs<P> {
     policy: P,
     next_ino: u64,
     next_fh: u64,
-    ino_to_path: HashMap<u64, PathBuf>,
+    ino_to_paths: HashMap<u64, Vec<PathBuf>>,
     path_to_ino: HashMap<PathBuf, u64>,
     handles: HashMap<u64, OpenHandle>,
 }
@@ -52,9 +52,9 @@ pub struct StatFs {
 
 impl<P: AccessController> MirrorFs<P> {
     pub fn new(root: PathBuf, policy: P) -> Self {
-        let mut ino_to_path = HashMap::new();
+        let mut ino_to_paths = HashMap::new();
         let mut path_to_ino = HashMap::new();
-        ino_to_path.insert(ROOT_INO, root.clone());
+        ino_to_paths.insert(ROOT_INO, vec![root.clone()]);
         path_to_ino.insert(root.clone(), ROOT_INO);
 
         Self {
@@ -62,7 +62,7 @@ impl<P: AccessController> MirrorFs<P> {
             policy,
             next_ino: ROOT_INO + 1,
             next_fh: 1,
-            ino_to_path,
+            ino_to_paths,
             path_to_ino,
             handles: HashMap::new(),
         }
@@ -103,14 +103,20 @@ impl<P: AccessController> MirrorFs<P> {
         }
         let ino = self.next_ino;
         self.next_ino += 1;
-        let owned = path.to_path_buf();
-        self.path_to_ino.insert(owned.clone(), ino);
-        self.ino_to_path.insert(ino, owned);
+        self.register_path(ino, path.to_path_buf());
         ino
     }
 
     fn path_for_ino(&self, ino: u64) -> Option<&Path> {
-        self.ino_to_path.get(&ino).map(PathBuf::as_path)
+        self.ino_to_paths
+            .get(&ino)
+            .and_then(|paths| {
+                paths
+                    .iter()
+                    .find(|path| self.path_to_ino.contains_key(*path))
+                    .or_else(|| paths.first())
+            })
+            .map(PathBuf::as_path)
     }
 
     #[allow(dead_code)]
@@ -118,8 +124,54 @@ impl<P: AccessController> MirrorFs<P> {
         self.path_for_ino(ino)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn link_for_test(
+        &mut self,
+        caller: &Caller,
+        ino: u64,
+        newparent: &Path,
+        newname: &OsStr,
+    ) -> Result<FileAttr> {
+        let source = self
+            .path_for_ino(ino)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?
+            .to_path_buf();
+        let target = newparent.join(newname);
+        self.authorize(caller, &source, Operation::Link)?;
+        self.authorize(caller, &target, Operation::Link)?;
+        fs::hard_link(&source, &target)?;
+        self.register_path(ino, target.clone());
+        let metadata = fs::symlink_metadata(&target)?;
+        Ok(self.attr_for_path(&target, &metadata))
+    }
+
     fn resolve_child(&self, parent: u64, name: &OsStr) -> Option<PathBuf> {
         self.path_for_ino(parent).map(|path| path.join(name))
+    }
+
+    fn register_path(&mut self, ino: u64, path: PathBuf) {
+        if self.path_to_ino.contains_key(&path) {
+            return;
+        }
+        self.path_to_ino.insert(path.clone(), ino);
+        self.ino_to_paths.entry(ino).or_default().push(path);
+    }
+
+    fn unregister_path(&mut self, path: &Path) {
+        let Some(ino) = self.path_to_ino.remove(path) else {
+            return;
+        };
+        if let Some(paths) = self.ino_to_paths.get_mut(&ino) {
+            paths.retain(|candidate| candidate != path);
+            if paths.is_empty() {
+                self.ino_to_paths.remove(&ino);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn unregister_path_for_test(&mut self, path: &Path) {
+        self.unregister_path(path);
     }
 
     fn authorize(&self, caller: &Caller, path: &Path, operation: Operation) -> Result<()> {
@@ -513,15 +565,13 @@ impl<P: AccessController> MirrorFs<P> {
             .cloned()
             .collect();
         for stale_path in stale_paths {
-            if let Some(ino) = self.path_to_ino.remove(&stale_path) {
-                self.ino_to_path.remove(&ino);
-            }
+            self.unregister_path(&stale_path);
         }
 
         let moved_paths: Vec<(u64, PathBuf)> = self
-            .ino_to_path
+            .path_to_ino
             .iter()
-            .filter_map(|(ino, path)| {
+            .filter_map(|(path, ino)| {
                 if path.as_path() == from || path.starts_with(from) {
                     Some((*ino, path.clone()))
                 } else {
@@ -539,9 +589,8 @@ impl<P: AccessController> MirrorFs<P> {
             } else {
                 to.join(suffix)
             };
-            self.path_to_ino.remove(&old_path);
-            self.path_to_ino.insert(new_path.clone(), ino);
-            self.ino_to_path.insert(ino, new_path);
+            self.unregister_path(&old_path);
+            self.register_path(ino, new_path);
         }
     }
 
@@ -808,7 +857,10 @@ impl<P: AccessController> Filesystem for MirrorFs<P> {
             return;
         }
         match fs::remove_file(&path) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                self.unregister_path(&path);
+                reply.ok()
+            }
             Err(err) => reply.error(io_errno(&err.into())),
         }
     }
@@ -852,6 +904,25 @@ impl<P: AccessController> Filesystem for MirrorFs<P> {
                 reply.entry(&TTL, &attr, 0);
             }
             Err(err) => reply.error(io_errno(&err.into())),
+        }
+    }
+
+    fn link(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let caller = caller_from_request(req);
+        let Some(newparent_path) = self.path_for_ino(newparent).map(Path::to_path_buf) else {
+            reply.error(ENOENT);
+            return;
+        };
+        match self.link_for_test(&caller, ino, &newparent_path, newname) {
+            Ok(attr) => reply.entry(&TTL, &attr, 0),
+            Err(err) => reply.error(io_errno(&err)),
         }
     }
 

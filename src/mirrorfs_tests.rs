@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -173,6 +173,59 @@ fn mmaps_survive_close_and_rename_and_stay_coherent() -> Result<()> {
 
     let reopened = fs::read(&to)?;
     assert_eq!(reopened, b"aWXYZf");
+    Ok(())
+}
+
+#[test]
+fn hardlink_shares_inode_and_content() -> Result<()> {
+    let dir = tempdir()?;
+    let original = dir.path().join("original.db");
+    fs::write(&original, b"abcdef")?;
+
+    let mut mirror = MirrorFs::new(dir.path().to_path_buf(), AllowAll);
+    let caller = test_caller("sqlite");
+    let ino = mirror.ensure_ino(&original);
+
+    let attr = mirror.link_for_test(&caller, ino, dir.path(), OsStr::new("alias.db"))?;
+    let alias = dir.path().join("alias.db");
+
+    assert_eq!(attr.ino, ino);
+    assert_eq!(fs::metadata(&original)?.ino(), fs::metadata(&alias)?.ino());
+
+    let fh = mirror.open_for_test(&caller, &alias, libc::O_RDWR)?;
+    mirror.write_for_test(&caller, fh, 2, b"ZZ")?;
+    mirror.release_for_test(fh);
+
+    assert_eq!(fs::read(&original)?, b"abZZef");
+    assert_eq!(fs::read(&alias)?, b"abZZef");
+    Ok(())
+}
+
+#[test]
+fn hardlink_alias_survives_original_unlink() -> Result<()> {
+    let dir = tempdir()?;
+    let original = dir.path().join("original.db");
+    let alias = dir.path().join("alias.db");
+    fs::write(&original, b"abcdef")?;
+
+    let mut mirror = MirrorFs::new(dir.path().to_path_buf(), AllowAll);
+    let caller = test_caller("sqlite");
+    let ino = mirror.ensure_ino(&original);
+    mirror.link_for_test(&caller, ino, dir.path(), OsStr::new("alias.db"))?;
+
+    fs::remove_file(&original)?;
+    mirror.unregister_path_for_test(&original);
+    let parent_ino = mirror.ensure_ino(dir.path());
+
+    let alias_attr = mirror.lookup_child(&caller, parent_ino, alias.file_name().unwrap())?;
+    let fh = mirror.open_for_test(&caller, &alias, libc::O_RDONLY)?;
+    let data = mirror.read_for_test(&caller, fh, 0, 16)?;
+
+    assert_eq!(alias_attr.ino, ino);
+    assert_eq!(mirror.host_path_for_ino(ino), Some(alias.as_path()));
+    assert_eq!(data, b"abcdef");
+    assert_eq!(fs::metadata(&alias)?.nlink(), 1);
+    assert!(fs::metadata(alias)?.ino() > 0);
     Ok(())
 }
 

@@ -27,6 +27,7 @@ pub enum Operation {
     Unlink,
     Rmdir,
     Symlink,
+    Link,
     Rename,
     SetAttr,
     Access,
@@ -50,6 +51,7 @@ impl Operation {
                 | Self::Unlink
                 | Self::Rmdir
                 | Self::Symlink
+                | Self::Link
                 | Self::Rename
                 | Self::SetAttr
                 | Self::SetWriteLock
