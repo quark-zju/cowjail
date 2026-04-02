@@ -307,6 +307,31 @@ fn flock_dup_is_noop_but_reopen_after_rename_conflicts() -> Result<()> {
 }
 
 #[test]
+fn flock_on_mirror_handle_conflicts_with_backing_path_open() -> Result<()> {
+    let dir = tempdir()?;
+    let path = dir.path().join("locked.db");
+    fs::write(&path, b"123456")?;
+
+    let mut mirror = MirrorFs::new(dir.path().to_path_buf(), AllowAll);
+    let caller = test_caller("sqlite");
+    let fh = mirror.open_for_test(&caller, &path, libc::O_RDWR)?;
+    let mirror_file = mirror.dup_handle_for_test(fh)?;
+    let backing_file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+
+    flock_exclusive_nonblocking(&mirror_file)?;
+    let err = flock_exclusive_nonblocking(&backing_file).unwrap_err();
+    assert!(
+        matches!(err.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+    );
+
+    flock_unlock(&mirror_file)?;
+    flock_exclusive_nonblocking(&backing_file)?;
+    flock_unlock(&backing_file)?;
+    mirror.release_for_test(fh);
+    Ok(())
+}
+
+#[test]
 fn read_lock_and_getlk_are_not_treated_as_writes() -> Result<()> {
     let dir = tempdir()?;
     let path = dir.path().join("locked.db");

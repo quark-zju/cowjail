@@ -12,15 +12,16 @@ use anyhow::{Context, Result};
 use fs_err as fs;
 use fs_err::os::unix::fs::OpenOptionsExt as FsOpenOptionsExt;
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
+    BackingId, FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs,
+    ReplyWrite, Request, TimeOrNow, consts,
 };
-use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
+use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR, c_int};
 use log::debug;
 
 use crate::access::{AccessController, AccessDecision, AccessRequest, Caller, Operation};
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::ZERO;
 const ROOT_INO: u64 = 1;
 
 pub struct MirrorFs<P> {
@@ -36,6 +37,7 @@ pub struct MirrorFs<P> {
 struct OpenHandle {
     ino: u64,
     file: fs::File,
+    backing_id: Option<BackingId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +309,7 @@ impl<P: AccessController> MirrorFs<P> {
         self.authorize(caller, path, operation)?;
         ensure_openable_node(path)?;
         let file = open_passthrough_file(path, flags, false)?;
-        Ok(self.allocate_handle(ino, file))
+        Ok(self.allocate_handle(ino, file, None))
     }
 
     #[allow(dead_code)]
@@ -417,7 +419,7 @@ impl<P: AccessController> MirrorFs<P> {
         file.set_permissions(std::fs::Permissions::from_mode(created_mode))?;
         let metadata = file.metadata()?;
         let ino = self.ensure_ino(&path);
-        let fh = self.allocate_handle(ino, file);
+        let fh = self.allocate_handle(ino, file, None);
         Ok((self.attr_for_path(&path, &metadata), fh))
     }
 
@@ -550,10 +552,17 @@ impl<P: AccessController> MirrorFs<P> {
         Ok(self.attr_for_path(path, &metadata))
     }
 
-    fn allocate_handle(&mut self, ino: u64, file: fs::File) -> u64 {
+    fn allocate_handle(&mut self, ino: u64, file: fs::File, backing_id: Option<BackingId>) -> u64 {
         let fh = self.next_fh;
         self.next_fh += 1;
-        self.handles.insert(fh, OpenHandle { ino, file });
+        self.handles.insert(
+            fh,
+            OpenHandle {
+                ino,
+                file,
+                backing_id,
+            },
+        );
         fh
     }
 
@@ -602,6 +611,20 @@ impl<P: AccessController> MirrorFs<P> {
 }
 
 impl<P: AccessController> Filesystem for MirrorFs<P> {
+    fn init(
+        &mut self,
+        _req: &Request<'_>,
+        config: &mut KernelConfig,
+    ) -> std::result::Result<(), c_int> {
+        config
+            .add_capabilities(consts::FUSE_PASSTHROUGH)
+            .map_err(|_| libc::EOPNOTSUPP)?;
+        config
+            .set_max_stack_depth(1)
+            .map_err(|_| libc::EOPNOTSUPP)?;
+        Ok(())
+    }
+
     fn lookup(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let caller = caller_from_request(req);
         match self.lookup_child(&caller, parent, name) {
@@ -679,8 +702,32 @@ impl<P: AccessController> Filesystem for MirrorFs<P> {
 
     fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         let caller = caller_from_request(req);
-        match self.open_path(&caller, ino, flags) {
-            Ok(fh) => reply.opened(fh, 0),
+        let result = (|| -> Result<u64> {
+            let path = self
+                .path_for_ino(ino)
+                .map(Path::to_path_buf)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
+            let operation = if flags & libc::O_ACCMODE == libc::O_RDONLY {
+                Operation::OpenRead
+            } else {
+                Operation::OpenWrite
+            };
+            self.authorize(&caller, &path, operation)?;
+            ensure_openable_node(&path)?;
+            let file = open_passthrough_file(&path, flags, false)?;
+            let backing_id = reply.open_backing(&file)?;
+            let fh = self.allocate_handle(ino, file, Some(backing_id));
+            Ok(fh)
+        })();
+        match result {
+            Ok(fh) => {
+                let backing_id = self
+                    .handles
+                    .get(&fh)
+                    .and_then(|handle| handle.backing_id.as_ref())
+                    .expect("passthrough open stores backing id");
+                reply.opened_passthrough(fh, 0, backing_id)
+            }
             Err(err) => reply.error(io_errno(&err)),
         }
     }
