@@ -13,10 +13,10 @@ use anyhow::{Context, Result};
 use fs_err as fs;
 use fs_err::os::unix::fs::OpenOptionsExt as FsOpenOptionsExt;
 use fuser::{
-    AccessFlags, BackingId, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock,
-    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    Generation, INodeNo, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen,
+    ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use log::debug;
@@ -39,7 +39,6 @@ pub struct MirrorFs<P> {
 struct OpenHandle {
     ino: u64,
     file: fs::File,
-    backing_id: Option<BackingId>,
 }
 
 struct FuseMirrorFs<P> {
@@ -326,8 +325,8 @@ impl<P: AccessController> MirrorFs<P> {
         };
         self.authorize(caller, path, operation)?;
         ensure_openable_node(path)?;
-        let file = open_passthrough_file(path, flags, false)?;
-        Ok(self.allocate_handle(ino, file, None))
+        let file = open_host_file(path, flags, false)?;
+        Ok(self.allocate_handle(ino, file))
     }
 
     #[allow(dead_code)]
@@ -432,12 +431,12 @@ impl<P: AccessController> MirrorFs<P> {
     ) -> Result<(FileAttr, u64)> {
         self.authorize(caller, parent, Operation::Create)?;
         let path = parent.join(name);
-        let file = open_passthrough_file(&path, flags | libc::O_CREAT, true)?;
+        let file = open_host_file(&path, flags | libc::O_CREAT, true)?;
         let created_mode = normalize_create_mode(mode, umask) as u32;
         file.set_permissions(std::fs::Permissions::from_mode(created_mode))?;
         let metadata = file.metadata()?;
         let ino = self.ensure_ino(&path);
-        let fh = self.allocate_handle(ino, file, None);
+        let fh = self.allocate_handle(ino, file);
         Ok((self.attr_for_path(&path, &metadata), fh))
     }
 
@@ -570,17 +569,10 @@ impl<P: AccessController> MirrorFs<P> {
         Ok(self.attr_for_path(path, &metadata))
     }
 
-    fn allocate_handle(&mut self, ino: u64, file: fs::File, backing_id: Option<BackingId>) -> u64 {
+    fn allocate_handle(&mut self, ino: u64, file: fs::File) -> u64 {
         let fh = self.next_fh;
         self.next_fh += 1;
-        self.handles.insert(
-            fh,
-            OpenHandle {
-                ino,
-                file,
-                backing_id,
-            },
-        );
+        self.handles.insert(fh, OpenHandle { ino, file });
         fh
     }
 
@@ -628,560 +620,13 @@ impl<P: AccessController> MirrorFs<P> {
     }
 }
 
-#[cfg(any())]
-impl<P: AccessController> Filesystem for MirrorFs<P> {
-    fn init(
-        &mut self,
-        _req: &Request<'_>,
-        config: &mut KernelConfig,
-    ) -> std::result::Result<(), c_int> {
-        config
-            .add_capabilities(consts::FUSE_PASSTHROUGH)
-            .map_err(|_| libc::EOPNOTSUPP)?;
-        config
-            .set_max_stack_depth(2)
-            .map_err(|_| libc::EOPNOTSUPP)?;
-        Ok(())
-    }
-
-    fn lookup(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let caller = caller_from_request(req);
-        match self.lookup_child(&caller, parent, name) {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn getattr(&mut self, req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
-        let caller = caller_from_request(req);
-        let result = match fh {
-            Some(fh) => self.getattr_handle(&caller, ino, fh),
-            None => match self.path_for_ino(ino).map(Path::to_path_buf) {
-                Some(path) => self.getattr_path(&caller, &path),
-                None => Err(std::io::Error::from_raw_os_error(ENOENT).into()),
-            },
-        };
-
-        match result {
-            Ok(attr) => reply.attr(&TTL, &attr),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn readdir(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.path_for_ino(ino).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &path, Operation::ReadDir) {
-            reply.error(errno);
-            return;
-        }
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                reply.error(io_errno(&err.into()));
-                return;
-            }
-        };
-        if !metadata.file_type().is_dir() {
-            reply.error(ENOTDIR);
-            return;
-        }
-
-        let mut entries = vec![
-            (ino, FileType::Directory, std::ffi::OsString::from(".")),
-            (
-                self.ensure_ino(path.parent().unwrap_or(&path)),
-                FileType::Directory,
-                std::ffi::OsString::from(".."),
-            ),
-        ];
-        match self.list_children(&path) {
-            Ok(mut children) => entries.append(&mut children),
-            Err(err) => {
-                reply.error(io_errno(&err));
-                return;
-            }
-        }
-
-        append_readdir_entries(&entries, offset, |child_ino, next_offset, kind, name| {
-            reply.add(child_ino, next_offset, kind, name)
-        });
-        reply.ok();
-    }
-
-    fn open(&mut self, req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        let caller = caller_from_request(req);
-        let result = (|| -> Result<(u64, bool)> {
-            let path = self
-                .path_for_ino(ino)
-                .map(Path::to_path_buf)
-                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-            let operation = if flags & libc::O_ACCMODE == libc::O_RDONLY {
-                Operation::OpenRead
-            } else {
-                Operation::OpenWrite
-            };
-            self.authorize(&caller, &path, operation)?;
-            ensure_openable_node(&path)?;
-            let file = open_passthrough_file(&path, flags, false)?;
-            let backing_id = match reply.open_backing(&file) {
-                Ok(backing_id) => {
-                    debug!("passthrough open active for {}", path.display());
-                    Some(backing_id)
-                }
-                Err(err) => {
-                    debug!(
-                        "passthrough open unavailable for {}: {}",
-                        path.display(),
-                        err
-                    );
-                    None
-                }
-            };
-            let passthrough = backing_id.is_some();
-            let fh = self.allocate_handle(ino, file, backing_id);
-            Ok((fh, passthrough))
-        })();
-        match result {
-            Ok((fh, true)) => {
-                let backing_id = self
-                    .handles
-                    .get(&fh)
-                    .and_then(|handle| handle.backing_id.as_ref())
-                    .expect("passthrough open stores backing id");
-                reply.opened_passthrough(fh, 0, backing_id)
-            }
-            Ok((fh, false)) => reply.opened(fh, 0),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn read(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyData,
-    ) {
-        let caller = caller_from_request(req);
-        match self.read_handle(&caller, ino, fh, offset, size) {
-            Ok(data) => reply.data(&data),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn readlink(&mut self, req: &Request<'_>, ino: u64, reply: ReplyData) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.path_for_ino(ino).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &path, Operation::ReadLink) {
-            reply.error(errno);
-            return;
-        }
-        match fs::read_link(&path) {
-            Ok(target) => reply.data(target.as_os_str().as_bytes()),
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn create(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        flags: i32,
-        reply: ReplyCreate,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(parent_path) = self.path_for_ino(parent).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        match self.create_for_test(&caller, &parent_path, name, mode, umask, flags) {
-            Ok((attr, fh)) => reply.created(&TTL, &attr, 0, fh, 0),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn write(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyWrite,
-    ) {
-        let caller = caller_from_request(req);
-        match self.write_handle(&caller, ino, fh, offset, data) {
-            Ok(len) => reply.written(len),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn flush(
-        &mut self,
-        req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        _lock_owner: u64,
-        reply: ReplyEmpty,
-    ) {
-        let caller = caller_from_request(req);
-        match self.flush_for_test(&caller, fh) {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn release(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        self.release_for_test(fh);
-        reply.ok();
-    }
-
-    fn fsync(&mut self, req: &Request<'_>, _ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
-        let caller = caller_from_request(req);
-        let result = (|| -> std::io::Result<()> {
-            let ino = self
-                .handles
-                .get(&fh)
-                .map(|handle| handle.ino)
-                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-            let path = self.path_for_ino(ino).unwrap_or(self.root()).to_path_buf();
-            if let Some(errno) = self.authorize_errno(&caller, &path, Operation::Fsync) {
-                return Err(std::io::Error::from_raw_os_error(errno));
-            }
-            let handle = self
-                .handles
-                .get_mut(&fh)
-                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-            if datasync {
-                handle.file.sync_data()
-            } else {
-                handle.file.sync_all()
-            }
-        })();
-        match result {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn mkdir(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        reply: ReplyEntry,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(parent_path) = self.path_for_ino(parent).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &parent_path, Operation::Mkdir) {
-            reply.error(errno);
-            return;
-        }
-        let path = parent_path.join(name);
-        let result = create_dir_with_mode(&path, normalize_create_mode(mode, umask))
-            .and_then(|_| fs::symlink_metadata(&path));
-        match result {
-            Ok(metadata) => {
-                let attr = self.attr_for_path(&path, &metadata);
-                reply.entry(&TTL, &attr, 0);
-            }
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn unlink(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.resolve_child(parent, name) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &path, Operation::Unlink) {
-            reply.error(errno);
-            return;
-        }
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                self.unregister_path(&path);
-                reply.ok()
-            }
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn rmdir(&mut self, req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.resolve_child(parent, name) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &path, Operation::Rmdir) {
-            reply.error(errno);
-            return;
-        }
-        match fs::remove_dir(&path) {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn symlink(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        link: &Path,
-        reply: ReplyEntry,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.resolve_child(parent, name) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &path, Operation::Symlink) {
-            reply.error(errno);
-            return;
-        }
-        match std::os::unix::fs::symlink(link, &path).and_then(|_| fs::symlink_metadata(&path)) {
-            Ok(metadata) => {
-                let attr = self.attr_for_path(&path, &metadata);
-                reply.entry(&TTL, &attr, 0);
-            }
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn link(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        newparent: u64,
-        newname: &OsStr,
-        reply: ReplyEntry,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(newparent_path) = self.path_for_ino(newparent).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        match self.link_for_test(&caller, ino, &newparent_path, newname) {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn rename(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        newparent: u64,
-        newname: &OsStr,
-        _flags: u32,
-        reply: ReplyEmpty,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(from) = self.resolve_child(parent, name) else {
-            reply.error(ENOENT);
-            return;
-        };
-        let Some(to) = self.resolve_child(newparent, newname) else {
-            reply.error(ENOENT);
-            return;
-        };
-        match self.rename_for_test(&caller, &from, &to) {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn setattr(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
-        size: Option<u64>,
-        atime: Option<TimeOrNow>,
-        mtime: Option<TimeOrNow>,
-        _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
-        reply: ReplyAttr,
-    ) {
-        if uid.is_some() || gid.is_some() {
-            reply.error(libc::EOPNOTSUPP);
-            return;
-        }
-        let caller = caller_from_request(req);
-        let Some(path) = self.path_for_ino(ino).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        match self.setattr_for_test(&caller, &path, size, mode, atime, mtime) {
-            Ok(attr) => reply.attr(&TTL, &attr),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn access(&mut self, req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.path_for_ino(ino).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        match self.authorize_errno(&caller, &path, Operation::Access) {
-            Some(errno) => reply.error(errno),
-            None => reply.ok(),
-        }
-    }
-
-    fn statfs(&mut self, req: &Request<'_>, ino: u64, reply: ReplyStatfs) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.path_for_ino(ino).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        match self.statfs_for_test(&caller, &path) {
-            Ok(stats) => reply.statfs(
-                stats.blocks,
-                stats.bfree,
-                stats.bavail,
-                stats.files,
-                stats.ffree,
-                stats.bsize,
-                stats.namelen,
-                stats.frsize,
-            ),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn fsyncdir(
-        &mut self,
-        req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        datasync: bool,
-        reply: ReplyEmpty,
-    ) {
-        let caller = caller_from_request(req);
-        let Some(path) = self.path_for_ino(ino).map(Path::to_path_buf) else {
-            reply.error(ENOENT);
-            return;
-        };
-        if let Some(errno) = self.authorize_errno(&caller, &path, Operation::FsyncDir) {
-            reply.error(errno);
-            return;
-        }
-        let result = fs::File::open(&path).and_then(|file| {
-            if datasync {
-                file.sync_data()
-            } else {
-                file.sync_all()
-            }
-        });
-        match result {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(io_errno(&err.into())),
-        }
-    }
-
-    fn getlk(
-        &mut self,
-        req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        _lock_owner: u64,
-        start: u64,
-        end: u64,
-        typ: i32,
-        _pid: u32,
-        reply: ReplyLock,
-    ) {
-        let caller = caller_from_request(req);
-        match self.getlk_for_test(&caller, fh, start, end, typ) {
-            Ok((start, end, typ, pid)) => reply.locked(start, end, typ, pid),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-
-    fn setlk(
-        &mut self,
-        req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        _lock_owner: u64,
-        start: u64,
-        end: u64,
-        typ: i32,
-        _pid: u32,
-        sleep: bool,
-        reply: ReplyEmpty,
-    ) {
-        let caller = caller_from_request(req);
-        match self.setlk_for_test(&caller, fh, start, end, typ, sleep) {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(io_errno(&err)),
-        }
-    }
-}
-
 fn fuse_mount_options() -> Vec<MountOption> {
     vec![MountOption::FSName("leash2-mirror".to_owned())]
 }
 
 impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
-        config
-            .add_capabilities(InitFlags::FUSE_PASSTHROUGH)
-            .map_err(|unsupported| {
-                std::io::Error::other(format!("unsupported init flags: {unsupported:?}"))
-            })?;
-        config
-            .set_max_stack_depth(2)
-            .map_err(|limit| std::io::Error::other(format!("invalid max stack depth: {limit}")))?;
+        let _ = config;
         Ok(())
     }
 
@@ -1269,7 +714,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let caller = caller_from_request(req);
         let mut fs = self.inner.lock().unwrap();
-        let result = (|| -> Result<(u64, bool)> {
+        let result = (|| -> Result<u64> {
             let path = fs
                 .path_for_ino(ino.0)
                 .map(Path::to_path_buf)
@@ -1282,35 +727,11 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             };
             fs.authorize(&caller, &path, operation)?;
             ensure_openable_node(&path)?;
-            let file = open_passthrough_file(&path, raw_flags, false)?;
-            let backing_id = match reply.open_backing(&file) {
-                Ok(backing_id) => {
-                    debug!("passthrough open active for {}", path.display());
-                    Some(backing_id)
-                }
-                Err(err) => {
-                    debug!(
-                        "passthrough open unavailable for {}: {}",
-                        path.display(),
-                        err
-                    );
-                    None
-                }
-            };
-            let passthrough = backing_id.is_some();
-            let fh = fs.allocate_handle(ino.0, file, backing_id);
-            Ok((fh, passthrough))
+            let file = open_host_file(&path, raw_flags, false)?;
+            Ok(fs.allocate_handle(ino.0, file))
         })();
         match result {
-            Ok((fh, true)) => {
-                let backing_id = fs
-                    .handles
-                    .get(&fh)
-                    .and_then(|handle| handle.backing_id.as_ref())
-                    .expect("passthrough open stores backing id");
-                reply.opened_passthrough(FileHandle(fh), FopenFlags::empty(), backing_id)
-            }
-            Ok((fh, false)) => reply.opened(FileHandle(fh), FopenFlags::empty()),
+            Ok(fh) => reply.opened(FileHandle(fh), FopenFlags::empty()),
             Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
         }
     }
@@ -1367,50 +788,20 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             reply.error(Errno::ENOENT);
             return;
         };
-        let result = (|| -> Result<(FileAttr, u64, bool)> {
+        let result = (|| -> Result<(FileAttr, u64)> {
             fs.authorize(&caller, &parent_path, Operation::Create)?;
             let path = parent_path.join(name);
-            let file = open_passthrough_file(&path, flags | libc::O_CREAT, true)?;
+            let file = open_host_file(&path, flags | libc::O_CREAT, true)?;
             let created_mode = normalize_create_mode(mode, umask) as u32;
             file.set_permissions(std::fs::Permissions::from_mode(created_mode))?;
-            let backing_id = match reply.open_backing(&file) {
-                Ok(backing_id) => {
-                    debug!("passthrough create active for {}", path.display());
-                    Some(backing_id)
-                }
-                Err(err) => {
-                    debug!(
-                        "passthrough create unavailable for {}: {}",
-                        path.display(),
-                        err
-                    );
-                    None
-                }
-            };
             let metadata = file.metadata()?;
             let ino = fs.ensure_ino(&path);
-            let passthrough = backing_id.is_some();
-            let fh = fs.allocate_handle(ino, file, backing_id);
+            let fh = fs.allocate_handle(ino, file);
             let attr = fs.attr_for_path(&path, &metadata);
-            Ok((attr, fh, passthrough))
+            Ok((attr, fh))
         })();
         match result {
-            Ok((attr, fh, true)) => {
-                let backing_id = fs
-                    .handles
-                    .get(&fh)
-                    .and_then(|handle| handle.backing_id.as_ref())
-                    .expect("passthrough create stores backing id");
-                reply.created_passthrough(
-                    &TTL,
-                    &attr,
-                    Generation(0),
-                    FileHandle(fh),
-                    FopenFlags::empty(),
-                    backing_id,
-                )
-            }
-            Ok((attr, fh, false)) => reply.created(
+            Ok((attr, fh)) => reply.created(
                 &TTL,
                 &attr,
                 Generation(0),
@@ -1841,7 +1232,7 @@ fn ensure_openable_node(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_passthrough_file(path: &Path, flags: i32, create_new: bool) -> Result<fs::File> {
+fn open_host_file(path: &Path, flags: i32, create_new: bool) -> Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     match flags & libc::O_ACCMODE {
         libc::O_RDONLY => {

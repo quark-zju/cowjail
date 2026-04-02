@@ -24,13 +24,11 @@ The intended direction is:
 - hardlink support
 - `mmap`-relevant file semantics coverage
 - POSIX byte-range locks (`fcntl`) and `flock` test coverage
-- FUSE passthrough attempts for `open` and `create`, with fallback to normal FUSE handles when `open_backing()` is unavailable
 - zero TTL for FUSE entry/attr replies to reduce stale kernel-side metadata caching
 
 ## Current Limitations
 
 - `src/main.rs` is still a stub; there is no real mount CLI yet
-- passthrough is wired up in code, but on the current test machine `open_backing()` returns `EPERM`, so mounted tests still exercise the fallback path for passthrough-sensitive cases
 - some lock behavior is still partly kernel-local when mounted, so a few integration checks intentionally downgrade to skip-style passes with an explanation
 - the codebase still has some `unused`/`dead_code` allowances while the binary entrypoint is unfinished
 
@@ -68,16 +66,7 @@ RUST_LOG=integration=debug,fuser=off cargo test --test integration -- --nocaptur
 RUST_LOG=debug cargo test --test integration -- --nocapture
 ```
 
-These are useful when investigating passthrough activation, lock behavior, and FUSE request flow.
-
-## Notes On Passthrough
-
-With `fuser 0.17`, both `open` and `create` attempt FUSE passthrough:
-
-- `ReplyOpen::open_backing()` / `opened_passthrough()`
-- `ReplyCreate::open_backing()` / `created_passthrough()`
-
-If the kernel or environment rejects backing registration, the filesystem falls back to normal FUSE replies and logs the reason at debug level.
+These are useful when investigating lock behavior and general FUSE request flow.
 
 ## Dependencies Used Intentionally
 
@@ -91,5 +80,4 @@ If the kernel or environment rejects backing registration, the filesystem falls 
 
 - replace the stub `main` with a real mount CLI
 - connect `profile` to `AccessController`
-- investigate why `open_backing()` currently fails with `EPERM` in the local environment
-- tighten mounted tests around true passthrough activation once the environment issue is resolved
+- investigate targeted approaches for lock semantics that currently depend on kernel-local behavior

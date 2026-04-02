@@ -492,7 +492,7 @@ fn flock_on_mirror_handle_conflicts_with_backing_path_open(ctx: &TestContext) ->
             flock_unlock(&backing_file)?;
             flock_unlock(&mirror_file)?;
             eprintln!(
-                "skipping backing flock conflict assertion because passthrough is not active"
+                "skipping backing flock conflict assertion because mirror handles do not share kernel lock state with a separate backing-path open"
             );
             return Ok(());
         }
