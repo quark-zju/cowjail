@@ -3,10 +3,12 @@
 mod access;
 #[path = "../src/mirrorfs.rs"]
 mod mirrorfs;
+#[path = "../src/profile.rs"]
+mod profile;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -22,6 +24,7 @@ use tempfile::TempDir;
 
 use access::{AccessController, AccessDecision, AccessRequest, Operation};
 use mirrorfs::MirrorFs;
+use profile::{NoIncludes, PathExeResolver, ProfileController};
 
 type TestFn = fn(&TestContext) -> Result<()>;
 
@@ -78,14 +81,27 @@ struct MountedSuite {
 
 impl MountedSuite {
     fn new() -> Result<Self> {
+        let process_name = current_process_name()?;
+        Self::with_policy(IntegrationPolicy::new(process_name))
+    }
+
+    fn with_policy<P: AccessController>(policy: P) -> Result<Self> {
+        Self::with_policy_factory(|_| Ok(policy))
+    }
+
+    fn with_policy_factory<P, F>(policy_factory: F) -> Result<Self>
+    where
+        P: AccessController,
+        F: FnOnce(&Path) -> Result<P>,
+    {
         let tempdir = tempfile::tempdir()?;
         let backing_root = tempdir.path().join("backing");
         let mount_root = tempdir.path().join("mount");
         fs::create_dir(&backing_root)?;
         fs::create_dir(&mount_root)?;
 
-        let process_name = current_process_name()?;
-        let mirror = MirrorFs::new(backing_root.clone(), IntegrationPolicy::new(process_name));
+        let policy = policy_factory(&backing_root)?;
+        let mirror = MirrorFs::new(backing_root.clone(), policy);
         let session = unsafe { mirror.mount_background(&mount_root)? };
         wait_for_directory(&mount_root)?;
 
@@ -158,7 +174,7 @@ fn run() -> Result<()> {
     }
 
     if failures.is_empty() {
-        Ok(())
+        run_profile_policy_tests()
     } else {
         bail!(
             "{} integration subtests failed: {}",
@@ -166,6 +182,13 @@ fn run() -> Result<()> {
             failures.join(", ")
         );
     }
+}
+
+fn run_profile_policy_tests() -> Result<()> {
+    eprintln!("test profile_policy_hide_and_implicit_ancestor_visibility ...");
+    profile_policy_hide_and_implicit_ancestor_visibility()?;
+    eprintln!("test profile_policy_hide_and_implicit_ancestor_visibility ... ok");
+    Ok(())
 }
 
 fn test_cases() -> Vec<TestCase> {
@@ -629,4 +652,87 @@ fn create_makes_real_file(ctx: &TestContext) -> Result<()> {
 
     assert_eq!(fs::read(ctx.backing_path.join("created.db"))?, b"db");
     Ok(())
+}
+
+fn profile_policy_hide_and_implicit_ancestor_visibility() -> Result<()> {
+    let suite = MountedSuite::with_policy_factory(|backing_root| {
+        let profile_src = format!(
+            r#"
+            {root}/visible.txt rw
+            {root}/foo/**/*.txt rw
+            {root}/foo hide
+            "#,
+            root = backing_root.display()
+        );
+        let profile = profile::parse(
+            &profile_src,
+            Path::new("/tmp"),
+            Path::new("/tmp"),
+            &NoIncludes,
+            &PathExeResolver,
+        )?;
+        Ok(ProfileController::new(profile))
+    })?;
+
+    fs::write(suite.backing_root.join("visible.txt"), b"visible")?;
+    fs::write(suite.backing_root.join("hidden.txt"), b"hidden")?;
+    fs::create_dir_all(suite.backing_root.join("foo/sub/deeper"))?;
+    fs::write(suite.backing_root.join("foo/sub/ok.txt"), b"ok")?;
+    fs::write(suite.backing_root.join("foo/sub/no.bin"), b"no")?;
+    fs::write(suite.backing_root.join("foo/sub/deeper/nested.txt"), b"nested")?;
+    fs::write(suite.backing_root.join("foo/sub/deeper/nested.bin"), b"nested-bin")?;
+
+    wait_for_path(&suite.mount_root.join("visible.txt"))?;
+    wait_for_path(&suite.mount_root.join("foo"))?;
+
+    let root_entries = read_dir_names(&suite.mount_root)?;
+    assert!(root_entries.contains(Path::new("visible.txt")));
+    assert!(root_entries.contains(Path::new("foo")));
+    assert!(!root_entries.contains(Path::new("hidden.txt")));
+    let hidden_stat_err = fs::symlink_metadata(suite.mount_root.join("hidden.txt")).unwrap_err();
+    assert_eq!(hidden_stat_err.kind(), ErrorKind::NotFound);
+
+    let create_hidden = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(suite.mount_root.join("hidden.txt"))
+        .unwrap_err();
+    assert_eq!(create_hidden.kind(), ErrorKind::PermissionDenied);
+
+    let foo_metadata = fs::symlink_metadata(suite.mount_root.join("foo"))?;
+    assert!(foo_metadata.is_dir());
+
+    let foo_entries = read_dir_names(&suite.mount_root.join("foo"))?;
+    assert!(foo_entries.contains(Path::new("sub")));
+
+    let sub_entries = read_dir_names(&suite.mount_root.join("foo/sub"))?;
+    assert!(sub_entries.contains(Path::new("ok.txt")));
+    assert!(sub_entries.contains(Path::new("deeper")));
+    assert!(!sub_entries.contains(Path::new("no.bin")));
+
+    let nested_entries = read_dir_names(&suite.mount_root.join("foo/sub/deeper"))?;
+    assert!(nested_entries.contains(Path::new("nested.txt")));
+    assert!(!nested_entries.contains(Path::new("nested.bin")));
+
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(suite.mount_root.join("foo/sub/new.txt"))?;
+    file.write_all(b"new")?;
+    file.sync_data()?;
+    assert_eq!(fs::read(suite.backing_root.join("foo/sub/new.txt"))?, b"new");
+
+    let create_bin = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(suite.mount_root.join("foo/sub/new.bin"))
+        .unwrap_err();
+    assert_eq!(create_bin.kind(), ErrorKind::PermissionDenied);
+    Ok(())
+}
+
+fn read_dir_names(path: &Path) -> Result<HashSet<PathBuf>> {
+    Ok(fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| Path::new(&entry.file_name()).to_path_buf()))
+        .collect::<std::io::Result<_>>()?)
 }

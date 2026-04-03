@@ -334,15 +334,22 @@ impl<P: AccessController> MirrorFs<P> {
         path: &Path,
     ) -> Result<Vec<(u64, FileType, std::ffi::OsString)>> {
         self.authorize(caller, path, Operation::ReadDir)?;
-        self.list_children(path)
+        self.list_children(caller, path)
     }
 
-    fn list_children(&mut self, parent: &Path) -> Result<Vec<(u64, FileType, std::ffi::OsString)>> {
+    fn list_children(
+        &mut self,
+        caller: &Caller,
+        parent: &Path,
+    ) -> Result<Vec<(u64, FileType, std::ffi::OsString)>> {
         let mut out = Vec::new();
         let entries = fs::read_dir(parent)?;
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
+            if self.authorize_errno(caller, &path, Operation::Lookup) == Some(ENOENT) {
+                continue;
+            }
             let metadata = entry.metadata()?;
             let ino = self.ensure_ino(&path);
             out.push((ino, filetype_from_metadata(&metadata), entry.file_name()));
@@ -476,8 +483,8 @@ impl<P: AccessController> MirrorFs<P> {
         umask: u32,
         flags: i32,
     ) -> Result<(FileAttr, u64)> {
-        self.authorize(caller, parent, Operation::Create)?;
         let path = parent.join(name);
+        self.authorize(caller, &path, Operation::Create)?;
         let file = open_host_file(&path, flags | libc::O_CREAT, true)?;
         let created_mode = normalize_create_mode(mode, umask) as u32;
         file.set_permissions(std::fs::Permissions::from_mode(created_mode))?;
@@ -1036,7 +1043,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
                 std::ffi::OsString::from(".."),
             ),
         ];
-        match fs.list_children(&path) {
+        match fs.list_children(&caller, &path) {
             Ok(mut children) => entries.append(&mut children),
             Err(err) => {
                 reply.error(Errno::from_i32(io_errno(&err)));
@@ -1132,8 +1139,8 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             return;
         };
         let result = (|| -> Result<(FileAttr, u64)> {
-            fs.authorize(&caller, &parent_path, Operation::Create)?;
             let path = parent_path.join(name);
+            fs.authorize(&caller, &path, Operation::Create)?;
             let file = open_host_file(&path, flags | libc::O_CREAT, true)?;
             let created_mode = normalize_create_mode(mode, umask) as u32;
             file.set_permissions(std::fs::Permissions::from_mode(created_mode))?;
@@ -1266,11 +1273,11 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             reply.error(Errno::ENOENT);
             return;
         };
-        if let Some(errno) = fs.authorize_errno(&caller, &parent_path, Operation::Mkdir) {
+        let path = parent_path.join(name);
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::Mkdir) {
             reply.error(Errno::from_i32(errno));
             return;
         }
-        let path = parent_path.join(name);
         let result = create_dir_with_mode(&path, normalize_create_mode(mode, umask))
             .and_then(|_| fs::symlink_metadata(&path));
         match result {
