@@ -1892,6 +1892,10 @@ impl LockBroker {
         }
         if pid == 0 {
             drop(parent);
+            if let Err(err) = arm_broker_parent_death_signal() {
+                eprintln!("lock broker failed to arm parent-death signal: {err}");
+                unsafe { libc::_exit(1) }
+            }
             let code = match broker_main_loop(child) {
                 Ok(()) => 0,
                 Err(err) => {
@@ -2007,6 +2011,17 @@ fn broker_main_loop(mut stream: UnixStream) -> Result<()> {
             }
         }
     }
+}
+
+fn arm_broker_parent_death_signal() -> std::io::Result<()> {
+    let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } == 1 {
+        unsafe { libc::_exit(0) }
+    }
+    Ok(())
 }
 
 fn broker_apply_projection(
