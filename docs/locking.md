@@ -119,7 +119,12 @@ To avoid that, `leash2` forks a broker process that only:
 - does not participate in normal file I/O
 
 The parent FUSE daemon sends synchronous projection updates to the broker over
-a Unix socket.
+an anonymous Unix-domain `socketpair` created before `fork()`. No socket path is
+created in the filesystem namespace, and closing the parent endpoint makes the
+broker observe EOF on the child endpoint.
+
+The broker child also arms `PR_SET_PDEATHSIG` so that it exits if the parent
+daemon dies before a clean protocol shutdown.
 
 ### Release Cleanup
 
@@ -199,4 +204,3 @@ The current non-goal is:
 
 - exact kernel-equivalent POSIX lock semantics for every possible application,
   especially blocking locks and whole-file POSIX locks.
-
