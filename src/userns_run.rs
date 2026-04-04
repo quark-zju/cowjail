@@ -455,6 +455,7 @@ fn run_pid_namespace_init_and_exec(
         return wait_for_specific_child(init_pid);
     }
 
+    set_process_name("leash2-init")?;
     apply_mount_plan_in_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan)?;
     pivot_root_into(&config.fuse_mount_root)?;
     drop_to_target_ids(uid, gid)?;
@@ -499,6 +500,24 @@ fn fork_process(label: &str) -> Result<libc::pid_t> {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("fork failed for {label}"));
     }
     Ok(pid)
+}
+
+fn set_process_name(name: &str) -> Result<()> {
+    let name_c = CString::new(name).context("process name contains interior NUL byte")?;
+    debug!("userns-run: syscall prctl(PR_SET_NAME, {name})");
+    let rc = unsafe {
+        libc::prctl(
+            libc::PR_SET_NAME,
+            name_c.as_ptr() as libc::c_ulong,
+            0,
+            0,
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NAME) failed");
+    }
+    Ok(())
 }
 
 fn wait_for_specific_child(pid: libc::pid_t) -> Result<i32> {
