@@ -17,7 +17,6 @@ pub fn build_mount_plan(profile: &Profile) -> Result<Vec<MountPlanEntry>> {
     let mut plan = Vec::new();
     let rules = profile.rules();
 
-    append_tmp_mount(rules, &mut plan)?;
     for rule in rules {
         let path = Path::new(&rule.pattern);
         if path.starts_with("/proc") {
@@ -28,6 +27,7 @@ pub fn build_mount_plan(profile: &Profile) -> Result<Vec<MountPlanEntry>> {
             append_dev_mount(rule, &mut plan)?;
         }
     }
+    append_tmp_mount(rules, &mut plan)?;
 
     retain_existing_bind_sources(&mut plan)?;
     validate_mount_conflicts(&plan, rules)?;
@@ -284,11 +284,29 @@ mod tests {
         assert_eq!(
             build_mount_plan(&profile).expect("plan"),
             vec![
+                MountPlanEntry::Proc { read_only: true },
                 MountPlanEntry::Bind {
                     path: PathBuf::from("/tmp"),
                     read_only: false,
                 },
-                MountPlanEntry::Proc { read_only: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn dev_mounts_are_planned_before_tmp_fast_path() {
+        let profile = profile_from("/tmp rw\n/dev/null rw\n");
+        assert_eq!(
+            build_mount_plan(&profile).expect("plan"),
+            vec![
+                MountPlanEntry::Bind {
+                    path: PathBuf::from("/dev/null"),
+                    read_only: false,
+                },
+                MountPlanEntry::Bind {
+                    path: PathBuf::from("/tmp"),
+                    read_only: false,
+                },
             ]
         );
     }
