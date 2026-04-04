@@ -17,6 +17,7 @@ pub fn build_mount_plan(profile: &Profile) -> Result<Vec<MountPlanEntry>> {
     let mut plan = Vec::new();
     let rules = profile.rules();
 
+    append_tmp_mount(rules, &mut plan)?;
     for rule in rules {
         let path = Path::new(&rule.pattern);
         if path.starts_with("/proc") {
@@ -31,6 +32,43 @@ pub fn build_mount_plan(profile: &Profile) -> Result<Vec<MountPlanEntry>> {
     retain_existing_bind_sources(&mut plan)?;
     validate_mount_conflicts(&plan, rules)?;
     Ok(plan)
+}
+
+fn append_tmp_mount(rules: &[Rule], plan: &mut Vec<MountPlanEntry>) -> Result<()> {
+    let Some(rule) = rules.iter().find(|rule| rule.pattern == "/tmp") else {
+        return Ok(());
+    };
+    if !rule.conditions.is_empty() {
+        return Ok(());
+    }
+    let read_only = match rule.action {
+        Action::ReadOnly => true,
+        Action::ReadWrite => false,
+        Action::Hide | Action::Deny => return Ok(()),
+    };
+    let tmp = Path::new("/tmp");
+    for rule in rules {
+        if rule.pattern == "/tmp" {
+            continue;
+        }
+        let path = Path::new(&rule.pattern);
+        if path.starts_with(tmp) {
+            bail!("{}: rule conflicts with /tmp bind fast path", rule.pattern);
+        }
+        if matches!(rule.action, Action::ReadOnly | Action::ReadWrite)
+            && rule.ancestor_glob.is_match(tmp)
+        {
+            bail!(
+                "{}: implicit ancestor visibility conflicts with /tmp bind fast path",
+                rule.pattern
+            );
+        }
+    }
+    plan.push(MountPlanEntry::Bind {
+        path: tmp.to_path_buf(),
+        read_only,
+    });
+    Ok(())
 }
 
 fn append_proc_mount(rule: &Rule, plan: &mut Vec<MountPlanEntry>) -> Result<()> {
@@ -135,10 +173,7 @@ fn retain_existing_bind_sources(plan: &mut Vec<MountPlanEntry>) -> Result<()> {
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                debug!(
-                    "mount-plan: skip missing /dev bind source {}",
-                    path.display()
-                );
+                debug!("mount-plan: skip missing bind source {}", path.display());
                 continue;
             }
             Err(err) => {
@@ -238,6 +273,45 @@ mod tests {
                 path: PathBuf::from("/dev/pts"),
                 read_only: false,
             }]
+        );
+    }
+
+    #[test]
+    fn tmp_rule_becomes_bind_mount_when_unconditional_and_conflict_free() {
+        let profile = profile_from("/tmp rw\n/proc ro\n");
+        assert_eq!(
+            build_mount_plan(&profile).expect("plan"),
+            vec![
+                MountPlanEntry::Bind {
+                    path: PathBuf::from("/tmp"),
+                    read_only: false,
+                },
+                MountPlanEntry::Proc { read_only: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn conditional_tmp_rule_stays_in_fuse() {
+        let profile = profile_from("/tmp rw when env=LEASH_TMP\n/proc ro\n");
+        assert_eq!(
+            build_mount_plan(&profile).expect("plan"),
+            vec![MountPlanEntry::Proc { read_only: true }]
+        );
+    }
+
+    #[test]
+    fn tmp_bind_fast_path_rejects_descendant_rules() {
+        let err = build_mount_plan(&profile_from("/tmp rw\n/tmp/cache ro\n")).unwrap_err();
+        assert!(err.to_string().contains("/tmp bind fast path"), "{err:#}");
+    }
+
+    #[test]
+    fn tmp_bind_fast_path_rejects_implicit_ancestor_rules() {
+        let err = build_mount_plan(&profile_from("/tmp rw\n/**/secret.txt ro\n")).unwrap_err();
+        assert!(
+            err.to_string().contains("implicit ancestor visibility"),
+            "{err:#}"
         );
     }
 

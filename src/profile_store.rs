@@ -250,7 +250,7 @@ mod tests {
 
         let profile = parse(
             &source,
-            &home,
+            Path::new("/home/tester"),
             Path::new("/tmp"),
             &store,
             &PathExeResolver,
@@ -303,7 +303,7 @@ mod tests {
             .expect("load default profile");
         let profile = parse(
             &source,
-            &home,
+            Path::new("/home/tester"),
             Path::new("/tmp"),
             &store,
             &PathExeResolver,
