@@ -50,6 +50,10 @@ leash2 run -v /path/to/command
 leash2 _fuse -v
 ```
 
+When `run -v` spawns `_fuse`, the daemon's stdout/stderr go to
+`${XDG_RUNTIME_DIR}/leash2/fuse.log` or `/run/user/<uid>/leash2/fuse.log`
+instead of the terminal.
+
 Mounted integration tests can also be run with:
 
 ```bash

@@ -27,6 +27,7 @@ be created, `leash2` sets that fallback runtime directory to mode `0700`.
 Under the shared runtime root:
 
 - `mount/`: global FUSE mountpoint
+- `fuse.log`: append-only stdout/stderr log for `_fuse` when started by `run -v`
 - `fuse.pid`: PID file for the background `_fuse` daemon
 
 The current design intentionally uses one shared per-user FUSE mount, not one
