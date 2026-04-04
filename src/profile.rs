@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::RwLock;
 
 use libc::{EACCES, ENOENT, EPERM};
 
@@ -788,7 +789,7 @@ impl CallerDataSource for ProcCallerDataSource {
 }
 
 pub struct ProfileController<F = RealFsCheck, C = ProcCallerDataSource> {
-    profile: Profile,
+    profile: RwLock<Profile>,
     fs: F,
     caller_data: C,
 }
@@ -796,7 +797,7 @@ pub struct ProfileController<F = RealFsCheck, C = ProcCallerDataSource> {
 impl ProfileController<RealFsCheck, ProcCallerDataSource> {
     pub fn new(profile: Profile) -> Self {
         Self {
-            profile,
+            profile: RwLock::new(profile),
             fs: RealFsCheck,
             caller_data: ProcCallerDataSource,
         }
@@ -807,7 +808,7 @@ impl<F: FsCheck> ProfileController<F, ProcCallerDataSource> {
     #[allow(dead_code)]
     pub(crate) fn with_fs(profile: Profile, fs: F) -> Self {
         Self {
-            profile,
+            profile: RwLock::new(profile),
             fs,
             caller_data: ProcCallerDataSource,
         }
@@ -818,10 +819,14 @@ impl<F: FsCheck, C: CallerDataSource> ProfileController<F, C> {
     #[allow(dead_code)]
     pub(crate) fn with_sources(profile: Profile, fs: F, caller_data: C) -> Self {
         Self {
-            profile,
+            profile: RwLock::new(profile),
             fs,
             caller_data,
         }
+    }
+
+    pub fn replace_profile(&self, profile: Profile) {
+        *self.profile.write().expect("profile lock poisoned") = profile;
     }
 }
 
@@ -838,14 +843,15 @@ impl<F: FsCheck + Send + Sync + 'static, C: CallerDataSource + Send + Sync + 'st
             env_loaded: false,
             env: HashMap::new(),
         };
+        let profile = self.profile.read().expect("profile lock poisoned");
         let errno = if request.operation.is_write() {
-            match self.profile.visibility_with_runtime(request.path, &mut ctx) {
+            match profile.visibility_with_runtime(request.path, &mut ctx) {
                 Visibility::Action(action) => action.mutation_errno(),
                 Visibility::ImplicitAncestor if ctx.fs().is_dir(request.path) => None,
                 Visibility::ImplicitAncestor | Visibility::Hidden => Some(EPERM),
             }
         } else {
-            match self.profile.visibility_with_runtime(request.path, &mut ctx) {
+            match profile.visibility_with_runtime(request.path, &mut ctx) {
                 Visibility::Action(action) => action.access_errno(),
                 Visibility::ImplicitAncestor if ctx.fs().is_dir(request.path) => None,
                 Visibility::ImplicitAncestor | Visibility::Hidden => Some(ENOENT),
@@ -1125,6 +1131,36 @@ mod tests {
         );
         assert_eq!(controller.caller_data.exe_reads.load(Ordering::Relaxed), 0);
         assert_eq!(controller.caller_data.env_reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn profile_controller_replace_profile_updates_access_decisions() {
+        let controller = ProfileController::with_sources(
+            parse_simple("/workspace/project ro\n"),
+            MockFsCheck::empty(),
+            MockCallerDataSource::default(),
+        );
+        let caller = Caller::new(Some(123), Some("test".to_owned()));
+
+        assert_eq!(
+            controller.check(&AccessRequest {
+                caller: &caller,
+                path: Path::new("/workspace/project/file.txt"),
+                operation: Operation::Create,
+            }),
+            AccessDecision::Deny(EACCES)
+        );
+
+        controller.replace_profile(parse_simple("/workspace/project rw\n"));
+
+        assert_eq!(
+            controller.check(&AccessRequest {
+                caller: &caller,
+                path: Path::new("/workspace/project/file.txt"),
+                operation: Operation::Create,
+            }),
+            AccessDecision::Allow
+        );
     }
 
     #[test]
