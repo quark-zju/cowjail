@@ -3,6 +3,7 @@ mod access;
 mod cli;
 mod cmd_fuse;
 mod cmd_help;
+mod cmd_kill;
 mod cmd_profile;
 mod cmd_run;
 mod fuse_runtime;
@@ -45,6 +46,10 @@ fn try_main() -> Result<i32> {
             cmd_profile::profile_command(profile).context("profile subcommand failed")?;
             Ok(0)
         }
+        Command::LowLevelKill => {
+            cmd_kill::kill_command().context("_kill subcommand failed")?;
+            Ok(0)
+        }
     }
 }
 
@@ -53,6 +58,7 @@ fn command_verbose(command: &Command) -> bool {
         Command::Help { verbose, .. } => *verbose,
         Command::Run(run) => run.verbose,
         Command::LowLevelFuse(fuse) => fuse.verbose,
+        Command::LowLevelKill => false,
         Command::Profile(_) => false,
     }
 }

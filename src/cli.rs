@@ -9,6 +9,7 @@ pub enum Command {
     Run(RunCommand),
     Profile(ProfileCommand),
     LowLevelFuse(LowLevelFuseCommand),
+    LowLevelKill,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub enum HelpTopic {
     Run,
     Profile,
     LowLevelFuse,
+    LowLevelKill,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +63,7 @@ where
 
     let mut args = Arguments::from_vec(raw);
     let Some(subcmd) = args.subcommand()? else {
-        bail!("missing subcommand (expected: help, profile, run, _fuse)");
+        bail!("missing subcommand (expected: help, profile, run, _fuse, _kill)");
     };
 
     match subcmd.as_str() {
@@ -69,6 +71,7 @@ where
         "run" => parse_run(args),
         "profile" => parse_profile(args),
         "_fuse" => parse_low_level_fuse(args),
+        "_kill" => parse_low_level_kill(args),
         other => bail!("unknown subcommand: {other}"),
     }
 }
@@ -141,6 +144,17 @@ fn parse_low_level_fuse(mut args: Arguments) -> Result<Command> {
         bail!("_fuse got unexpected trailing arguments");
     }
     Ok(Command::LowLevelFuse(LowLevelFuseCommand { verbose }))
+}
+
+fn parse_low_level_kill(mut args: Arguments) -> Result<Command> {
+    if args.contains(["-h", "--help"]) {
+        return Ok(help_command(HelpTopic::LowLevelKill, true));
+    }
+    let extra = args.finish();
+    if !extra.is_empty() {
+        bail!("_kill got unexpected trailing arguments");
+    }
+    Ok(Command::LowLevelKill)
 }
 
 fn help_command(topic: HelpTopic, verbose: bool) -> Command {
@@ -217,6 +231,11 @@ mod tests {
             parse_from(os(&["_fuse", "--verbose"])).expect("parse"),
             Command::LowLevelFuse(LowLevelFuseCommand { verbose: true })
         );
+    }
+
+    #[test]
+    fn parse_low_level_kill() {
+        assert_eq!(parse_from(os(&["_kill"])).expect("parse"), Command::LowLevelKill);
     }
 
     #[test]

@@ -4,6 +4,7 @@ const HELP_TOPIC_NAMES: &[(&str, HelpTopic)] = &[
     ("run", HelpTopic::Run),
     ("profile", HelpTopic::Profile),
     ("_fuse", HelpTopic::LowLevelFuse),
+    ("_kill", HelpTopic::LowLevelKill),
 ];
 
 pub(crate) fn topic_from_name(name: &str) -> Option<HelpTopic> {
@@ -43,6 +44,14 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
             "  This command is primarily a low-level debug entrypoint; leash run starts it on demand.\n",
         )
         .to_string(),
+        HelpTopic::LowLevelKill => concat!(
+            "leash _kill\n\n",
+            "USAGE:\n",
+            "  leash _kill\n\n",
+            "DESCRIPTION:\n",
+            "  Stop the per-user mirror FUSE daemon and lazy-unmount the shared mountpoint.\n",
+        )
+        .to_string(),
     }
 }
 
@@ -62,6 +71,7 @@ fn root_help_text(verbose: bool) -> String {
             "\n",
             "LOW-LEVEL (DEBUG):\n",
             "  leash _fuse [-v|--verbose]\n",
+            "  leash _kill\n",
         ));
     }
     out.push('\n');

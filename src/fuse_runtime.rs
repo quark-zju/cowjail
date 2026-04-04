@@ -78,6 +78,14 @@ pub fn signal_global_daemon(signal: libc::c_int) -> Result<bool> {
     signal_global_daemon_under(&runtime_dir.path, signal)
 }
 
+pub fn kill_global_daemon() -> Result<bool> {
+    let _ = signal_global_daemon(libc::SIGTERM)?;
+    let mountpoint = ensure_global_mountpoint()?;
+    let did_unmount = lazy_unmount_fuse_mount_if_present(&mountpoint)?;
+    clear_global_daemon_pid()?;
+    Ok(did_unmount)
+}
+
 fn signal_global_daemon_under(runtime_dir: &Path, signal: libc::c_int) -> Result<bool> {
     let path = global_daemon_pid_path_under(runtime_dir)?;
     let raw = match fs::read_to_string(&path) {
@@ -218,6 +226,16 @@ fn lazy_unmount_stale_fuse_mount(path: &Path) -> Result<()> {
         "failed to lazy-unmount stale FUSE mount {}: fusermount3/fusermount not found",
         path.display()
     );
+}
+
+fn lazy_unmount_fuse_mount_if_present(path: &Path) -> Result<bool> {
+    match read_mount_state_from(path, Path::new(MOUNTINFO_PATH))? {
+        MountState::Fuse { .. } => {
+            lazy_unmount_stale_fuse_mount(path)?;
+            Ok(true)
+        }
+        MountState::Unmounted | MountState::Other { .. } => Ok(false),
+    }
 }
 
 fn parse_mountinfo_line(line: &str) -> Result<Option<(PathBuf, String)>> {
