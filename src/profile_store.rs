@@ -87,9 +87,28 @@ pub fn load_default_profile_source() -> Result<String> {
 pub fn render_default_profile_source_for_show() -> Result<String> {
     let home = home_dir()?;
     let store = ProfileStore::new(config_dir(&home));
-    let source = store.load_default_profile_source()?;
+    render_default_profile_source_for_show_from_store(&store)
+}
+
+fn render_default_profile_source_for_show_from_store(store: &ProfileStore) -> Result<String> {
+    let loaded = store.load_default_profile_source_with_origin()?;
     let mut include_stack = Vec::new();
-    render_source_for_show(&store, &source, &mut include_stack, 0)
+    let mut rendered = String::new();
+    match &loaded.origin {
+        DefaultProfileOrigin::Filesystem(path) => {
+            rendered.push_str(&format!("# source: filesystem {}\n", path.display()));
+        }
+        DefaultProfileOrigin::Builtin(name) => {
+            rendered.push_str(&format!("# source: builtin {name}\n"));
+        }
+    }
+    rendered.push_str(&render_source_for_show(
+        &store,
+        &loaded.source,
+        &mut include_stack,
+        0,
+    )?);
+    Ok(rendered)
 }
 
 pub fn save_default_profile_source(source: &str) -> Result<()> {
@@ -106,6 +125,18 @@ struct ProfileStore {
     dir: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadedDefaultProfileSource {
+    source: String,
+    origin: DefaultProfileOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefaultProfileOrigin {
+    Filesystem(PathBuf),
+    Builtin(&'static str),
+}
+
 impl ProfileStore {
     fn new(dir: PathBuf) -> Self {
         Self { dir }
@@ -116,8 +147,21 @@ impl ProfileStore {
     }
 
     fn load_default_profile_source(&self) -> Result<String> {
-        self.load_profile_source(DEFAULT_PROFILE_NAME)
-            .map(|source| source.unwrap_or_else(|| DEFAULT_PROFILE_SOURCE.to_owned()))
+        Ok(self.load_default_profile_source_with_origin()?.source)
+    }
+
+    fn load_default_profile_source_with_origin(&self) -> Result<LoadedDefaultProfileSource> {
+        let path = self.default_profile_path();
+        let Some(source) = self.load_profile_source(DEFAULT_PROFILE_NAME)? else {
+            return Ok(LoadedDefaultProfileSource {
+                source: DEFAULT_PROFILE_SOURCE.to_owned(),
+                origin: DefaultProfileOrigin::Builtin("builtin:default"),
+            });
+        };
+        Ok(LoadedDefaultProfileSource {
+            source,
+            origin: DefaultProfileOrigin::Filesystem(path),
+        })
     }
 
     fn save_default_profile_source(&self, source: &str) -> Result<()> {
@@ -327,6 +371,40 @@ mod tests {
         assert!(text.contains("%include builtin:basic\n"));
         assert!(text.contains("  # /bin ro\n"));
         assert!(text.ends_with("/tmp rw\n"));
+    }
+
+    #[test]
+    fn load_default_profile_source_with_origin_reports_builtin_fallback() {
+        let tempdir = tempdir().expect("tempdir");
+        let store = ProfileStore::new(tempdir.path().join("config/leash2"));
+
+        let loaded = store
+            .load_default_profile_source_with_origin()
+            .expect("load profile");
+
+        assert_eq!(loaded.origin, DefaultProfileOrigin::Builtin("builtin:default"));
+        assert_eq!(loaded.source, DEFAULT_PROFILE_SOURCE);
+    }
+
+    #[test]
+    fn render_default_profile_source_for_show_includes_source_comment() {
+        let tempdir = tempdir().expect("tempdir");
+        let store = ProfileStore::new(tempdir.path().join("config/leash2"));
+
+        let builtin_text = render_default_profile_source_for_show_from_store(&store)
+            .expect("render builtin profile");
+        assert!(builtin_text.starts_with("# source: builtin builtin:default\n"));
+
+        store
+            .save_default_profile_source("/tmp rw\n")
+            .expect("save profile");
+
+        let text = render_default_profile_source_for_show_from_store(&store)
+            .expect("render filesystem profile");
+        assert!(text.starts_with(&format!(
+            "# source: filesystem {}\n",
+            store.default_profile_path().display()
+        )));
     }
 
     #[test]
