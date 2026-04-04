@@ -39,7 +39,12 @@ fn edit_profile_via_temp_file(temp_path: &Path) -> Result<()> {
     run_editor(temp_path)?;
     let edited = fs::read_to_string(temp_path)
         .with_context(|| format!("failed to read edited profile {}", temp_path.display()))?;
-    profile_store::save_default_profile_source(&edited)?;
+    if edited.trim().is_empty() {
+        profile_store::remove_default_profile_source()?;
+        eprintln!("removed default profile file; builtin default profile is now active");
+    } else {
+        profile_store::save_default_profile_source(&edited)?;
+    }
     if fuse_runtime::signal_global_daemon(libc::SIGHUP)? {
         eprintln!("reloaded running _fuse daemon");
     }

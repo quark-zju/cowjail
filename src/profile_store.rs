@@ -120,6 +120,11 @@ pub fn save_default_profile_source(source: &str) -> Result<()> {
     store.save_default_profile_source(source)
 }
 
+pub fn remove_default_profile_source() -> Result<()> {
+    let home = home_dir()?;
+    ProfileStore::new(config_dir(&home)).remove_default_profile_source()
+}
+
 #[derive(Debug, Clone)]
 struct ProfileStore {
     dir: PathBuf,
@@ -170,6 +175,17 @@ impl ProfileStore {
         let path = self.default_profile_path();
         fs::write(&path, source.as_bytes())
             .with_context(|| format!("failed to write profile {}", path.display()))
+    }
+
+    fn remove_default_profile_source(&self) -> Result<()> {
+        let path = self.default_profile_path();
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => {
+                Err(err).with_context(|| format!("failed to remove profile {}", path.display()))
+            }
+        }
     }
 
     fn load_profile_source(&self, name: &str) -> Result<Option<String>> {
@@ -433,5 +449,23 @@ mod tests {
             err.to_string().contains("relative pattern '.' is not supported"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn remove_default_profile_source_restores_builtin_fallback() {
+        let tempdir = tempdir().expect("tempdir");
+        let store = ProfileStore::new(tempdir.path().join("config/leash2"));
+        store
+            .save_default_profile_source("/tmp rw\n")
+            .expect("save profile");
+
+        store
+            .remove_default_profile_source()
+            .expect("remove profile");
+
+        let loaded = store
+            .load_default_profile_source_with_origin()
+            .expect("load profile");
+        assert_eq!(loaded.origin, DefaultProfileOrigin::Builtin("builtin:default"));
     }
 }
