@@ -48,6 +48,12 @@ mount per profile.
 - serves the shared mirror filesystem in the foreground
 - removes `fuse.pid` on shutdown
 
+`_kill`:
+
+- sends `SIGTERM` to the daemon recorded in `fuse.pid`
+- lazy-unmounts the shared FUSE mountpoint
+- removes stale pid files so the next `run` can start a fresh daemon
+
 `profile edit`:
 
 - writes the validated profile back to the default profile file

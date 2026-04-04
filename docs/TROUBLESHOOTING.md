@@ -11,6 +11,12 @@ crash.
 fails, manually inspect the shared mountpoint under
 `${XDG_RUNTIME_DIR}/leash2/mount` or `/run/user/<uid>/leash2/mount`.
 
+For manual cleanup and daemon restart during testing, use:
+
+```bash
+leash2 _kill
+```
+
 ### `pivot_root('.', '.') failed: Invalid argument`
 
 `pivot_root` requires the new root to be a mountpoint in the current mount

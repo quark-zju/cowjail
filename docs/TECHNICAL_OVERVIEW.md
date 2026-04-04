@@ -76,6 +76,18 @@ layout, such as some `bwrap` setups, remain usable.
 `/sys` is not mounted specially anymore; access goes through the FUSE mirror
 and is controlled by the profile.
 
+`/tmp` has a bind-mount fast path when the first exact `/tmp` rule is an
+unconditional `ro` or `rw` rule and no other rule conflicts with that mount.
+
+Conflicts include:
+
+- descendant rules such as `/tmp/cache ro`
+- glob rules that make `/tmp` an implicit visible ancestor, such as
+  `/**/secret.txt ro`
+
+If those conflicts exist, mount-plan construction fails explicitly instead of
+silently changing `/tmp` policy semantics.
+
 ## Symlink and Create Semantics
 
 For open-like operations and setattr, policy checks are applied to both the
