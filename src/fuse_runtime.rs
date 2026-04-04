@@ -19,16 +19,23 @@ pub enum MountState {
 }
 
 pub fn ensure_global_mountpoint() -> Result<PathBuf> {
-    let runtime_dir = xdg_runtime_dir_from_env()?;
-    ensure_global_mountpoint_under(&runtime_dir)
+    let runtime_dir = global_runtime_dir();
+    ensure_global_mountpoint_in(&runtime_dir.path, runtime_dir.chmod_runtime_dir_on_create)
 }
 
 pub fn ensure_global_mountpoint_under(runtime_dir: &Path) -> Result<PathBuf> {
-    ensure_private_dir(runtime_dir)?;
+    ensure_global_mountpoint_in(runtime_dir, false)
+}
+
+fn ensure_global_mountpoint_in(
+    runtime_dir: &Path,
+    chmod_runtime_dir_on_create: bool,
+) -> Result<PathBuf> {
+    ensure_runtime_dir(runtime_dir, chmod_runtime_dir_on_create)?;
     let leash_dir = runtime_dir.join(RUNTIME_DIR_NAME);
-    ensure_private_dir(&leash_dir)?;
+    ensure_dir(&leash_dir)?;
     let mount_dir = leash_dir.join(MOUNT_DIR_NAME);
-    ensure_private_dir(&mount_dir)?;
+    ensure_dir(&mount_dir)?;
     Ok(mount_dir)
 }
 
@@ -37,8 +44,8 @@ pub fn read_global_mount_state(mountpoint: &Path) -> Result<MountState> {
 }
 
 pub fn write_global_daemon_pid() -> Result<()> {
-    let runtime_dir = xdg_runtime_dir_from_env()?;
-    write_global_daemon_pid_under(&runtime_dir)
+    let runtime_dir = global_runtime_dir();
+    write_global_daemon_pid_under(&runtime_dir.path)
 }
 
 fn write_global_daemon_pid_under(runtime_dir: &Path) -> Result<()> {
@@ -48,8 +55,8 @@ fn write_global_daemon_pid_under(runtime_dir: &Path) -> Result<()> {
 }
 
 pub fn clear_global_daemon_pid() -> Result<()> {
-    let runtime_dir = xdg_runtime_dir_from_env()?;
-    clear_global_daemon_pid_under(&runtime_dir)
+    let runtime_dir = global_runtime_dir();
+    clear_global_daemon_pid_under(&runtime_dir.path)
 }
 
 fn clear_global_daemon_pid_under(runtime_dir: &Path) -> Result<()> {
@@ -62,8 +69,8 @@ fn clear_global_daemon_pid_under(runtime_dir: &Path) -> Result<()> {
 }
 
 pub fn signal_global_daemon(signal: libc::c_int) -> Result<bool> {
-    let runtime_dir = xdg_runtime_dir_from_env()?;
-    signal_global_daemon_under(&runtime_dir, signal)
+    let runtime_dir = global_runtime_dir();
+    signal_global_daemon_under(&runtime_dir.path, signal)
 }
 
 fn signal_global_daemon_under(runtime_dir: &Path, signal: libc::c_int) -> Result<bool> {
@@ -107,43 +114,62 @@ fn read_mount_state_from(mountpoint: &Path, mountinfo: &Path) -> Result<MountSta
     Ok(MountState::Unmounted)
 }
 
-fn xdg_runtime_dir_from_env() -> Result<PathBuf> {
-    let Some(path) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        bail!("XDG_RUNTIME_DIR is not set");
-    };
-    Ok(PathBuf::from(path))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeDir {
+    path: PathBuf,
+    chmod_runtime_dir_on_create: bool,
+}
+
+fn global_runtime_dir() -> RuntimeDir {
+    if let Some(path) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return RuntimeDir {
+            path: PathBuf::from(path),
+            chmod_runtime_dir_on_create: false,
+        };
+    }
+    RuntimeDir {
+        path: PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })),
+        chmod_runtime_dir_on_create: true,
+    }
 }
 
 fn global_daemon_pid_path_under(runtime_dir: &Path) -> Result<PathBuf> {
-    ensure_private_dir(runtime_dir)?;
+    ensure_dir(runtime_dir)?;
     let leash_dir = runtime_dir.join(RUNTIME_DIR_NAME);
-    ensure_private_dir(&leash_dir)?;
+    ensure_dir(&leash_dir)?;
     Ok(leash_dir.join(PID_FILE_NAME))
 }
 
-fn ensure_private_dir(path: &Path) -> Result<()> {
+fn ensure_runtime_dir(path: &Path, chmod_on_create: bool) -> Result<()> {
+    let created = ensure_dir(path)?;
+    if created && chmod_on_create {
+        fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to chmod 0700 {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_dir(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if !metadata.is_dir() {
                 bail!("{} exists but is not a directory", path.display());
             }
+            Ok(false)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(path)
                 .with_context(|| format!("failed to create {}", path.display()))?;
+            Ok(true)
         }
         Err(err) if err.raw_os_error() == Some(libc::ENOTCONN) => {
             lazy_unmount_stale_fuse_mount(path)?;
-            ensure_private_dir(path)?;
-            return Ok(());
+            ensure_dir(path)
         }
         Err(err) => {
-            return Err(err).with_context(|| format!("failed to inspect {}", path.display()));
+            Err(err).with_context(|| format!("failed to inspect {}", path.display()))
         }
     }
-    fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("failed to chmod 0700 {}", path.display()))?;
-    Ok(())
 }
 
 fn lazy_unmount_stale_fuse_mount(path: &Path) -> Result<()> {
@@ -231,24 +257,24 @@ mod tests {
     fn ensure_global_mountpoint_under_creates_private_directories() {
         let tempdir = tempdir().expect("tempdir");
         let runtime_dir = tempdir.path().join("xdg-runtime");
+        fs::create_dir(&runtime_dir).expect("create runtime dir");
 
         let mount_dir = ensure_global_mountpoint_under(&runtime_dir).expect("mountpoint");
 
         assert_eq!(mount_dir, runtime_dir.join("leash2/mount"));
         assert!(mount_dir.is_dir());
+    }
+
+    #[test]
+    fn ensure_global_mountpoint_in_chmods_only_new_fallback_runtime_dir() {
+        let tempdir = tempdir().expect("tempdir");
+        let runtime_dir = tempdir.path().join("fallback-runtime");
+
+        let mount_dir = ensure_global_mountpoint_in(&runtime_dir, true).expect("mountpoint");
+
+        assert_eq!(mount_dir, runtime_dir.join("leash2/mount"));
         assert_eq!(
             fs::metadata(&runtime_dir).expect("runtime metadata").mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(runtime_dir.join("leash2"))
-                .expect("leash2 metadata")
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(&mount_dir).expect("mount metadata").mode() & 0o777,
             0o700
         );
     }
