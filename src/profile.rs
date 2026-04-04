@@ -25,8 +25,9 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use libc::{EACCES, ENOENT, EPERM};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -789,7 +790,7 @@ impl CallerDataSource for ProcCallerDataSource {
 }
 
 pub struct ProfileController<F = RealFsCheck, C = ProcCallerDataSource> {
-    profile: RwLock<Profile>,
+    profile: ArcSwap<Profile>,
     fs: F,
     caller_data: C,
 }
@@ -797,7 +798,7 @@ pub struct ProfileController<F = RealFsCheck, C = ProcCallerDataSource> {
 impl ProfileController<RealFsCheck, ProcCallerDataSource> {
     pub fn new(profile: Profile) -> Self {
         Self {
-            profile: RwLock::new(profile),
+            profile: ArcSwap::from_pointee(profile),
             fs: RealFsCheck,
             caller_data: ProcCallerDataSource,
         }
@@ -808,7 +809,7 @@ impl<F: FsCheck> ProfileController<F, ProcCallerDataSource> {
     #[allow(dead_code)]
     pub(crate) fn with_fs(profile: Profile, fs: F) -> Self {
         Self {
-            profile: RwLock::new(profile),
+            profile: ArcSwap::from_pointee(profile),
             fs,
             caller_data: ProcCallerDataSource,
         }
@@ -819,14 +820,14 @@ impl<F: FsCheck, C: CallerDataSource> ProfileController<F, C> {
     #[allow(dead_code)]
     pub(crate) fn with_sources(profile: Profile, fs: F, caller_data: C) -> Self {
         Self {
-            profile: RwLock::new(profile),
+            profile: ArcSwap::from_pointee(profile),
             fs,
             caller_data,
         }
     }
 
     pub fn replace_profile(&self, profile: Profile) {
-        *self.profile.write().expect("profile lock poisoned") = profile;
+        self.profile.store(Arc::new(profile));
     }
 }
 
@@ -843,7 +844,7 @@ impl<F: FsCheck + Send + Sync + 'static, C: CallerDataSource + Send + Sync + 'st
             env_loaded: false,
             env: HashMap::new(),
         };
-        let profile = self.profile.read().expect("profile lock poisoned");
+        let profile = self.profile.load();
         let errno = if request.operation.is_write() {
             match profile.visibility_with_runtime(request.path, &mut ctx) {
                 Visibility::Action(action) => action.mutation_errno(),

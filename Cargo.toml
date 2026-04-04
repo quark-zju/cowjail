@@ -9,6 +9,7 @@ harness = false
 
 [dependencies]
 anyhow = "1"
+arc-swap = "1"
 thiserror = "2"
 fuser = { version = "0.17.0", features = ["abi-7-40"] }
 fs-err = "3"
