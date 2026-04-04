@@ -1,0 +1,99 @@
+use crate::cli::HelpTopic;
+
+const HELP_TOPIC_NAMES: &[(&str, HelpTopic)] = &[
+    ("run", HelpTopic::Run),
+    ("profile", HelpTopic::Profile),
+    ("_fuse", HelpTopic::LowLevelFuse),
+];
+
+pub(crate) fn topic_from_name(name: &str) -> Option<HelpTopic> {
+    HELP_TOPIC_NAMES
+        .iter()
+        .find_map(|(topic_name, topic)| (*topic_name == name).then_some(topic.clone()))
+}
+
+pub(crate) fn print_help(topic: HelpTopic, verbose: bool) {
+    println!("{}", help_text(topic, verbose));
+}
+
+pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
+    match topic {
+        HelpTopic::Root => root_help_text(verbose),
+        HelpTopic::Run => concat!(
+            "leash run\n\n",
+            "USAGE:\n",
+            "  leash run [-v|--verbose] command ...\n\n",
+            "OPTIONS:\n",
+            "  -v, --verbose         Print debug logs from run setup and spawned FUSE daemon\n",
+        )
+        .to_string(),
+        HelpTopic::Profile => concat!(
+            "leash profile\n\n",
+            "USAGE:\n",
+            "  leash profile edit\n",
+            "  leash profile show\n",
+        )
+        .to_string(),
+        HelpTopic::LowLevelFuse => concat!(
+            "leash _fuse\n\n",
+            "USAGE:\n",
+            "  leash _fuse [-v|--verbose]\n\n",
+            "DESCRIPTION:\n",
+            "  Run the per-user mirror FUSE daemon in the foreground.\n",
+            "  This command is primarily a low-level debug entrypoint; leash run starts it on demand.\n",
+        )
+        .to_string(),
+    }
+}
+
+fn root_help_text(verbose: bool) -> String {
+    let mut out = String::from(concat!(
+        "leash\n\n",
+        "USAGE:\n",
+        "  leash <subcommand> [options]\n\n",
+        "COMMON:\n",
+        "  leash run [-v|--verbose] command ...\n\n",
+        "PROFILE:\n",
+        "  leash profile edit\n",
+        "  leash profile show\n",
+    ));
+    if verbose {
+        out.push_str(concat!(
+            "\n",
+            "LOW-LEVEL (DEBUG):\n",
+            "  leash _fuse [-v|--verbose]\n",
+        ));
+    }
+    out.push('\n');
+    out.push_str(if verbose {
+        "Run leash help <subcommand> for details."
+    } else {
+        "Run leash --help -v to list low-level debugging commands.\nRun leash help <subcommand> for details."
+    });
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_help_hides_low_level_commands_by_default() {
+        let text = help_text(HelpTopic::Root, false);
+        assert!(text.contains("leash run"));
+        assert!(!text.contains("leash _fuse"));
+    }
+
+    #[test]
+    fn verbose_root_help_lists_low_level_commands() {
+        let text = help_text(HelpTopic::Root, true);
+        assert!(text.contains("leash _fuse"));
+    }
+
+    #[test]
+    fn topic_lookup_supports_registered_commands() {
+        assert_eq!(topic_from_name("run"), Some(HelpTopic::Run));
+        assert_eq!(topic_from_name("_fuse"), Some(HelpTopic::LowLevelFuse));
+        assert_eq!(topic_from_name("_unknown"), None);
+    }
+}
