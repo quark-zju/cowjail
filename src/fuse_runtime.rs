@@ -1,8 +1,10 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 use fs_err as fs;
+use log::debug;
 
 const RUNTIME_DIR_NAME: &str = "leash2";
 const MOUNT_DIR_NAME: &str = "mount";
@@ -120,17 +122,63 @@ fn global_daemon_pid_path_under(runtime_dir: &Path) -> Result<PathBuf> {
 }
 
 fn ensure_private_dir(path: &Path) -> Result<()> {
-    if path.exists() {
-        if !path.is_dir() {
-            bail!("{} exists but is not a directory", path.display());
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                bail!("{} exists but is not a directory", path.display());
+            }
         }
-    } else {
-        fs::create_dir_all(path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+        }
+        Err(err) if err.raw_os_error() == Some(libc::ENOTCONN) => {
+            lazy_unmount_stale_fuse_mount(path)?;
+            ensure_private_dir(path)?;
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to inspect {}", path.display()));
+        }
     }
     fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("failed to chmod 0700 {}", path.display()))?;
     Ok(())
+}
+
+fn lazy_unmount_stale_fuse_mount(path: &Path) -> Result<()> {
+    for command in ["fusermount3", "fusermount"] {
+        debug!(
+            "fuse-runtime: execute {} -u -z {}",
+            command,
+            path.display()
+        );
+        let status = match ProcessCommand::new(command)
+            .arg("-u")
+            .arg("-z")
+            .arg(path)
+            .status()
+        {
+            Ok(status) => status,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to run {command} -u -z {}", path.display())
+                });
+            }
+        };
+        if !status.success() {
+            bail!(
+                "{command} -u -z {} exited with status {status}",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    bail!(
+        "failed to lazy-unmount stale FUSE mount {}: fusermount3/fusermount not found",
+        path.display()
+    );
 }
 
 fn parse_mountinfo_line(line: &str) -> Result<Option<(PathBuf, String)>> {
