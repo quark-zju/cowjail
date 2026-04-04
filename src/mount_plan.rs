@@ -2,6 +2,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use log::debug;
 
 use crate::profile::{Action, Condition, Profile, Rule};
 
@@ -27,8 +28,8 @@ pub fn build_mount_plan(profile: &Profile) -> Result<Vec<MountPlanEntry>> {
         }
     }
 
+    retain_existing_bind_sources(&mut plan)?;
     validate_mount_conflicts(&plan, rules)?;
-    validate_bind_sources(&plan)?;
     Ok(plan)
 }
 
@@ -125,13 +126,27 @@ fn validate_mount_conflicts(plan: &[MountPlanEntry], rules: &[Rule]) -> Result<(
     Ok(())
 }
 
-fn validate_bind_sources(plan: &[MountPlanEntry]) -> Result<()> {
-    for entry in plan {
-        let MountPlanEntry::Bind { path, .. } = entry else {
+fn retain_existing_bind_sources(plan: &mut Vec<MountPlanEntry>) -> Result<()> {
+    let mut retained = Vec::with_capacity(plan.len());
+    for entry in plan.drain(..) {
+        let MountPlanEntry::Bind { path, read_only } = entry else {
+            retained.push(entry);
             continue;
         };
-        let metadata = std::fs::symlink_metadata(path)
-            .with_context(|| format!("{}: /dev bind source is not accessible", path.display()))?;
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                debug!(
+                    "mount-plan: skip missing /dev bind source {}",
+                    path.display()
+                );
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("{}: /dev bind source is not accessible", path.display()));
+            }
+        };
         let kind = metadata.file_type();
         if !kind.is_char_device() && !kind.is_dir() {
             bail!(
@@ -139,7 +154,9 @@ fn validate_bind_sources(plan: &[MountPlanEntry]) -> Result<()> {
                 path.display()
             );
         }
+        retained.push(MountPlanEntry::Bind { path, read_only });
     }
+    *plan = retained;
     Ok(())
 }
 
@@ -225,6 +242,15 @@ mod tests {
                 path: PathBuf::from("/dev/pts"),
                 read_only: false,
             }]
+        );
+    }
+
+    #[test]
+    fn missing_dev_bind_source_is_skipped() {
+        let profile = profile_from("/dev/leash2-definitely-missing-node rw\n/proc ro\n");
+        assert_eq!(
+            build_mount_plan(&profile).expect("plan"),
+            vec![MountPlanEntry::Proc { read_only: true }]
         );
     }
 
