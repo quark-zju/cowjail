@@ -1,59 +1,68 @@
 # Runtime Layout
 
-This document explains where jail data lives after the runtime-only simplification.
+This document explains where `leash` keeps config and runtime artifacts.
 
-## Directory Roots
+## Config Root
 
-- Config root: `~/.config/leash`
-- Runtime root: `${XDG_RUNTIME_DIR}/leash`
-- Fallback runtime root: `/run/user/<uid>/leash`
+Default profile path:
 
-`leash` no longer keeps persistent jail state under `~/.local/state`. All per-jail state lives under the runtime root and is expected to disappear across reboot or runtime directory cleanup.
+- `$XDG_CONFIG_HOME/leash/profile` when `XDG_CONFIG_HOME` is set
+- fallback: `~/.config/leash/profile`
 
-## Per-Jail Layout
+If the profile file does not exist, `profile show` and `_fuse` use the built-in
+default profile source.
 
-`.../leash/<name>/`:
+## Runtime Root
 
-- `profile`: normalized resolved profile source
-- `profile.sources`: optional CBOR source map for `%include` expansion
-- `lock`: runtime lock file for synchronization
-- `mount/`: FUSE mountpoint
-- `fuse.pid`: PID of background `_fuse` server
-- `fuse.log`: background `_fuse` stdout/stderr log
-- `ipcns` / `mntns`: reserved runtime artifacts; not used by the current `run` flow
+Shared runtime root:
 
-Unknown files in runtime directories are treated conservatively during `rm`.
+- `${XDG_RUNTIME_DIR}/leash` when `XDG_RUNTIME_DIR` is set
+- fallback: `/run/user/<uid>/leash`
 
-## Lifecycle by Command
+If `XDG_RUNTIME_DIR` is unset and the fallback `/run/user/<uid>` directory must
+be created, `leash` sets that fallback runtime directory to mode `0700`.
 
-`add`:
+## Runtime Files
 
-- resolves jail identity
-- writes normalized `profile` and optional `profile.sources` under the runtime root
+Under the shared runtime root:
+
+- `mount/`: global FUSE mountpoint
+- `fuse.log`: append-only stdout/stderr log for `_fuse` when started by `run -v`
+- `fuse.pid`: PID file for the background `_fuse` daemon
+
+The current design intentionally uses one shared per-user FUSE mount, not one
+mount per profile.
+
+## Lifecycle
 
 `run`:
 
-- resolves jail identity
-- ensures runtime directory and lock
-- reuses or starts `_fuse`
-- executes command inside jail mount
+- ensures the shared mountpoint exists
+- checks whether the mountpoint is already a live `leash` FUSE mount
+- lazily unmounts stale disconnected FUSE mounts with `fusermount -u -z`
+- starts `_fuse` if the mount is absent
+- executes the command in a fresh namespace setup rooted at the shared mount
 
-`rm`:
+`_fuse`:
 
-- unmounts runtime mountpoint (`umount2(MNT_DETACH)` path)
-- removes known runtime artifacts
-- removes runtime dir when clean
+- writes `fuse.pid` on startup
+- serves the shared mirror filesystem in the foreground
+- removes `fuse.pid` on shutdown
 
-## Runtime Reuse Rules
+`_kill`:
 
-`run` reuses an existing `_fuse` server when:
+- sends `SIGTERM` to the daemon recorded in `fuse.pid`
+- lazy-unmounts the shared FUSE mountpoint
+- removes stale pid files so the next `run` can start a fresh daemon
 
-- `fuse.pid` exists
-- the process is alive
-- the process is still mounted on the expected mountpoint
+`profile edit`:
 
-Otherwise, it starts a new `_fuse` server.
+- writes the validated profile back to the default profile file
+- sends `SIGHUP` to the PID recorded in `fuse.pid` when a daemon is running
 
-## Why No Recursive Delete
+## Common Failure Modes
 
-`rm` intentionally removes only recognized files and directories. This reduces blast radius and avoids deleting unrelated files accidentally placed under a jail runtime directory.
+- `Transport endpoint is not connected`: stale FUSE mountpoint after a daemon
+  crash; `run` is expected to clean this up before spawning a new daemon.
+- stale `fuse.pid`: the recorded process no longer exists; signaling code drops
+  the stale pid file.

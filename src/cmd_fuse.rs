@@ -1,93 +1,153 @@
-use anyhow::{Result, bail};
-use fs_err as fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
+use anyhow::{Context, Result, bail};
+use log::{info, warn};
+
 use crate::cli::LowLevelFuseCommand;
-use crate::leashfs;
-use crate::privileges;
-use crate::profile_loader::load_profile;
-use crate::run_with_log;
+use crate::fuse_runtime::{self, MountState};
+use crate::mirrorfs::MirrorFs;
+use crate::profile::ProfileController;
+use crate::profile_store;
 
-pub(crate) fn fuse_command(cmd: LowLevelFuseCommand) -> Result<()> {
-    let euid = unsafe { libc::geteuid() };
-    if euid != 0 {
-        bail!("_fuse requires root euid (current euid={euid})");
-    }
+const PROFILE_RELOAD_POLL: Duration = Duration::from_millis(100);
 
-    run_with_log(
-        || Ok(fs::create_dir_all(&cmd.mountpoint)?),
-        || format!("create mountpoint directory {}", cmd.mountpoint.display()),
-    )?;
-    if let Some(parent) = cmd.pid_path.parent() {
-        run_with_log(
-            || Ok(fs::create_dir_all(parent)?),
-            || format!("create pid file directory {}", parent.display()),
-        )?;
-    }
+static PROFILE_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-    let loaded = run_with_log(
-        || load_profile(std::path::Path::new(&cmd.profile)),
-        || format!("load fuse profile '{}'", cmd.profile),
-    )?;
-    let fs = leashfs::LeashFs::new(loaded.profile).with_mount_root(cmd.mountpoint.clone());
-    crate::vlog!("_fuse: mounting fuse at {}", cmd.mountpoint.display());
-    let needs_real_root_for_allow_other =
-        !leashfs::allow_other_enabled_in_fuse_conf() && unsafe { libc::getuid() } != 0;
-    if needs_real_root_for_allow_other {
-        crate::vlog!(
-            "{}",
-            "_fuse: user_allow_other not set; temporarily switching real uid/gid to root for allow_other mount"
-        );
-    }
-    // Keep the background session alive in this process, then drop privileges.
-    // On Linux/NPTL credential changes are process-wide, so worker threads
-    // spawned by mount_background also lose root credentials after the drop.
-    // If that kernel/userspace assumption changes, this ordering must be
-    // revisited because the mount thread is created before drop_to_real_user().
-    let session = if needs_real_root_for_allow_other {
-        run_with_log(
-            || {
-                privileges::with_temporary_real_root(|| unsafe {
-                    fs.mount_background(&cmd.mountpoint, true)
-                })
-            },
-            || format!("mount fuse at {}", cmd.mountpoint.display()),
-        )?
-    } else {
-        run_with_log(
-            || unsafe { fs.mount_background(&cmd.mountpoint, true) },
-            || format!("mount fuse at {}", cmd.mountpoint.display()),
-        )?
-    };
-
-    let pid = std::process::id();
-    run_with_log(
-        || Ok(fs::write(&cmd.pid_path, format!("{pid}\n"))?),
-        || format!("write fuse pid file {}", cmd.pid_path.display()),
-    )?;
-
-    run_with_log(privileges::drop_to_real_user, || {
-        "drop to real user".to_string()
-    })?;
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
-    crate::vlog!("_fuse: running as uid={} gid={}", uid, gid);
-
-    loop {
-        std::thread::sleep(Duration::from_millis(400));
-        let session_alive = !session.guard.is_finished();
-        let host_has_mount = crate::ns_runtime::process_has_mount(1, &cmd.mountpoint)?;
-        let self_has_mount = crate::ns_runtime::process_has_mount(pid, &cmd.mountpoint)?;
-        if !session_alive || !host_has_mount || !self_has_mount {
-            crate::vlog!(
-                "_fuse: exiting because mount liveness failed (session_alive={} host_pid1_has_mount={} self_has_mount={}) for {}",
-                session_alive,
-                host_has_mount,
-                self_has_mount,
-                cmd.mountpoint.display(),
+pub(crate) fn fuse_command(_command: LowLevelFuseCommand) -> Result<()> {
+    let mountpoint = fuse_runtime::ensure_global_mountpoint()?;
+    let state = fuse_runtime::read_global_mount_state(&mountpoint)?;
+    match state {
+        MountState::Unmounted => {}
+        MountState::Fuse { fs_type } => {
+            bail!(
+                "shared FUSE mountpoint {} is already mounted as {}",
+                mountpoint.display(),
+                fs_type
             );
-            break;
+        }
+        MountState::Other { fs_type } => {
+            bail!(
+                "shared mountpoint {} is occupied by non-FUSE filesystem {}",
+                mountpoint.display(),
+                fs_type
+            );
         }
     }
+
+    let profile = profile_store::load_default_profile(Path::new("/"))?;
+    let controller = Arc::new(ProfileController::new(profile));
+    let _reload_thread = spawn_profile_reload_thread(Arc::clone(&controller))?;
+    let fs = MirrorFs::new(PathBuf::from("/"), controller);
+    let _pid_file = DaemonPidFile::write()?;
+
+    info!("mounting shared mirrorfs at {}", mountpoint.display());
+    fs.mount(Path::new(&mountpoint))
+}
+
+fn spawn_profile_reload_thread(
+    controller: Arc<ProfileController>,
+) -> Result<thread::JoinHandle<()>> {
+    install_sighup_reload_handler()?;
+    thread::Builder::new()
+        .name("leash-profile-reload".to_owned())
+        .spawn(move || {
+            loop {
+                if PROFILE_RELOAD_REQUESTED.swap(false, Ordering::Relaxed) {
+                    reload_default_profile(&controller);
+                }
+                thread::sleep(PROFILE_RELOAD_POLL);
+            }
+        })
+        .context("failed to spawn profile reload thread")
+}
+
+fn install_sighup_reload_handler() -> Result<()> {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_flags = 0;
+    action.sa_sigaction = handle_sighup_reload as *const () as libc::sighandler_t;
+    let rc = unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut())
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to install SIGHUP handler");
+    }
     Ok(())
+}
+
+extern "C" fn handle_sighup_reload(_signal: libc::c_int) {
+    PROFILE_RELOAD_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+fn reload_default_profile(controller: &ProfileController) {
+    reload_profile_with(controller, || {
+        profile_store::load_default_profile(Path::new("/"))
+    });
+}
+
+fn reload_profile_with(
+    controller: &ProfileController,
+    load_profile: impl FnOnce() -> Result<crate::profile::Profile>,
+) {
+    match load_profile() {
+        Ok(profile) => {
+            controller.replace_profile(profile);
+            info!("reloaded default profile after SIGHUP");
+        }
+        Err(err) => {
+            warn!("ignoring failed SIGHUP profile reload: {err:#}");
+        }
+    }
+}
+
+struct DaemonPidFile;
+
+impl DaemonPidFile {
+    fn write() -> Result<Self> {
+        fuse_runtime::write_global_daemon_pid()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for DaemonPidFile {
+    fn drop(&mut self) {
+        if let Err(err) = fuse_runtime::clear_global_daemon_pid() {
+            warn!("failed to clear daemon pid file: {err:#}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access::{AccessController, AccessRequest, Caller, Operation};
+    use crate::profile::{NoIncludes, PathExeResolver, parse};
+
+    #[test]
+    fn reload_default_profile_helper_keeps_serving_old_policy_on_parse_error() {
+        let controller = ProfileController::new(
+            parse(
+                "/tmp ro\n",
+                Path::new("/home/user"),
+                Path::new("/"),
+                &NoIncludes,
+                &PathExeResolver,
+            )
+            .expect("parse profile"),
+        );
+        reload_profile_with(&controller, || bail!("bad profile syntax"));
+
+        assert_eq!(
+            controller.check(&AccessRequest {
+                caller: &Caller::new(None, None),
+                path: Path::new("/tmp/file.txt"),
+                operation: Operation::Lookup,
+            }),
+            crate::access::AccessDecision::Allow
+        );
+    }
 }

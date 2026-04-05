@@ -1,105 +1,79 @@
 # Privilege Model
 
-This document describes how `leash` handles privilege transitions and why.
+This document describes the current privilege and namespace transitions in
+`leash`.
 
 ## Goals
 
-- Keep high-risk operations gated behind root euid checks.
-- Drop privileges before running untrusted user commands.
-- Make transitions observable in verbose mode.
+- Keep the long-lived FUSE daemon as an ordinary user process.
+- Use rootless namespaces for `run` instead of a setuid helper.
+- Drop back to the invoking uid/gid before executing the target command.
+- Keep important namespace and mount syscalls visible in verbose logs.
 
-## Entry Points Requiring Root EUID
+## Command Roles
 
-- `leash run`
-- `leash _rm`
-- low-level `_fuse`
+`leash _fuse`:
 
-These commands fail fast when `euid != 0`.
+- runs as the invoking user
+- mounts the shared global FUSE mirror under the per-user runtime directory
+- reloads the default profile on `SIGHUP`
 
-## Entry Points That Auto-Drop Elevated EUID
+`leash run`:
 
-When running as a setuid-root binary (`ruid != 0`, `euid == 0`), these commands
-drop to the real user before doing any work:
+- starts `_fuse` on demand if the shared mount is not alive
+- creates new user, mount, IPC, and PID namespaces
+- applies bind/proc mounts derived from the current profile
+- pivots into the shared FUSE mount
+- executes the user command in a worker process while PID 1 remains a child
+  reaper
 
-- `leash help`
-- `leash profile ...`
-- `leash _list`
-- `leash _show`
-- low-level `_mount`
+`leash profile show|edit`:
 
-This keeps read/metadata/update workflows from accidentally executing with root
-effective privileges.
+- operates on the default profile file as the invoking user
+- `edit` validates the profile before writing it back and signals `_fuse` with
+  `SIGHUP`
 
-## `_suid` Bootstrap
+## User Namespace Mapping
 
-`leash _suid` ensures the current binary is setuid-root:
+`run` currently writes a single uid/gid map entry:
 
-1. If binary is already `root` + `u+s`, it exits.
-2. If caller is not root euid, it reinvokes itself with `sudo`.
-3. As root, it runs `chown root:root` and sets the setuid bit.
-4. It verifies final metadata before success.
+```text
+<uid> <uid> 1
+<gid> <gid> 1
+```
 
-This avoids requiring users to manually run separate `chown`/`chmod` commands.
+That keeps the namespace process mapped to the invoking host user instead of
+introducing a mapped namespace root uid 0.
 
-## Runtime Privilege Flow (`run`)
+Before writing `gid_map`, `run` writes `deny` to `/proc/self/setgroups`.
 
-For `leash run`, the child setup path is:
+## Runtime Setup Flow
 
-1. unshare IPC namespace (`unshare(CLONE_NEWIPC)`)
-2. adjust fs credentials (`setfsuid/setfsgid`) for FUSE access checks
-3. `pivot_root(".", ".")` into jail mount, detach old root, and `chdir`
-4. drop to real user via `privileges::drop_to_real_user()`
+The supervisor process created by `run` does:
 
-After step 4, the command executes as the invoking real user.
+1. `unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWPID)`
+2. write `/proc/self/setgroups`, `uid_map`, and `gid_map`
+3. make `/` recursively private in the new mount namespace
+4. apply non-`/proc` bind mounts under the shared FUSE root
+5. fork the PID namespace init process
 
-## Drop Logic (`drop_to_real_user`)
+The PID namespace init process does:
 
-`drop_to_real_user` is intentionally strict:
+1. mount `/proc` inside the new PID namespace
+2. `pivot_root` into the shared FUSE mount
+3. switch to the mapped uid/gid with `setresuid` / `setresgid`
+4. `chdir` to the original working directory, or `/` as a fallback
+5. set its process name to `leash-init`
+6. fork the worker command
+7. reap all children and exit with the worker's status
 
-- It requires current `euid == 0`.
-- It requires target real uid to be non-root (`uid != 0`).
-- It rejects non-root uid transitions (for example `euid=1000 -> uid=1001`).
-
-Actual syscall sequence:
-
-1. `setgroups([])`
-2. `setresgid(gid, gid, gid)`
-3. `setresuid(uid, uid, uid)`
-4. `prctl(PR_SET_NO_NEW_PRIVS, 1)`
-
-This sets real/effective/saved IDs explicitly and closes obvious privilege-regain paths.
-
-This same drop path is used for `run`: the outer waiter process, pidns reaper, and final worker all set `PR_SET_NO_NEW_PRIVS` before continuing as the invoking real user.
-
-## Temporary Real-Root Escalation
-
-`privileges::with_temporary_real_root` exists for narrow internal cases (currently `_fuse` mount path with `allow_other` handling).
-
-`allow_other` is primarily a root-switch compatibility requirement: the jail root transition is performed while still root, and without `allow_other` a FUSE mount is generally only accessible to the mounting user, which can block root-side path traversal into the jail mount during `run` setup.
-
-Exposure is constrained by runtime path placement and ownership checks: mounts live under `${XDG_RUNTIME_DIR}/leash` (or `/run/user/<uid>/leash` fallback), so other users are blocked by the per-user runtime directory boundary rather than by omitting `allow_other`.
-
-It:
-
-1. captures current uid/gid triplets
-2. switches triplets to root
-3. runs a closure
-4. restores original triplets
-
-If restoration fails, it returns an error.
-
-## Verbose Observability
-
-When `--verbose` is enabled, privilege transitions are logged via `vlog!`, including:
-
-- temporary escalation start/restore points
-- drop-to-real-user target IDs
-- key credential syscalls
+The worker process closes inherited file descriptors `>= 3` before `exec()`.
 
 ## Non-Goals
 
-`leash` is not a full process sandbox. It does not currently provide:
+`leash` is not a full process sandbox yet. It currently does not provide:
 
-- seccomp policy isolation
-- capability-minimization beyond current uid/gid handling
-- network namespace isolation
+- a network namespace
+- seccomp filtering
+- a capability-minimized non-root namespace profile beyond the current uid/gid
+  mapping and mount setup

@@ -1,102 +1,120 @@
 # Technical Overview
 
-This document keeps implementation-level details that are intentionally minimized in `README.md`.
+This document keeps implementation-level details that are intentionally kept
+short in `README.md`.
 
-## Scope and Boundary
+## Scope
 
-`leash` focuses on filesystem-risk reduction:
+`leash` currently focuses on a single shared mirror-style FUSE filesystem plus
+profile-based access control.
 
-- path visibility filtering via profile rules
-- direct host writes for allowed paths
-- git-aware write gating via `git-rw`
-- IPC namespace isolation to reduce IPC-based bypass paths
+Implemented areas:
 
-Out of scope:
+- host-backed mirror filesystem operations
+- `hide` / `ro` / `rw` / `deny` profile semantics
+- path-conditional rules with `exe` and `env` predicates
+- implicit ancestor visibility for hidden directories that contain allowed
+  descendants
+- host-visible `flock`
+- broker-backed POSIX byte-range `fcntl` locks
+- rootless `run` namespace setup with bind mounts and `pivot_root`
+- profile reload on `SIGHUP`
 
-- network namespace isolation
-- complete process sandboxing
-- non-Linux platforms
+Out of scope or incomplete:
 
-## High-Level Architecture
+- profile-specific per-run FUSE mounts
+- full POSIX lock equivalence, especially blocking `F_SETLKW`
+- network isolation
+- seccomp
 
-Main components:
+## Main Modules
 
-- `run`: resolve or select jail, ensure per-jail runtime plus FUSE server, create a fresh IPC namespace for the jailed child, execute command in jail
-- `_fuse`: internal long-lived FUSE server entrypoint for a jail runtime
-- `profile ...`: edit and inspect reusable profile sources
-- `_rm` / `_list` / `_show`: low-level runtime inspection and cleanup
-- `_suid`: ensure current binary is setuid-root
+- `src/mirrorfs.rs`: FUSE mirror filesystem, inode/path bookkeeping, host file
+  operations, and lock forwarding/projection
+- `src/profile.rs`: profile parser and rule evaluator
+- `src/access.rs`: policy trait and request model used by FUSE
+- `src/mount_plan.rs`: compile a profile into bind/proc mount actions for `run`
+- `src/fuse_runtime.rs`: shared runtime directory, mountpoint liveness checks,
+  and daemon pid signaling
+- `src/userns_run.rs`: rootless namespace setup, mount application, pivot-root,
+  PID 1 reaper, and command exec
+- `src/cmd_*.rs` + `src/cli.rs`: CLI entrypoints
 
-Runtime state:
+## Profile Semantics
 
-- runtime-only jail state under `${XDG_RUNTIME_DIR}/leash/<name>/...` or `/run/user/<uid>/leash/<name>/...`
-- normalized `profile` file and optional `profile.sources` map live beside other runtime artifacts
+Rules are evaluated in source order with first-match-wins after conditions are
+checked.
 
-## Filesystem Model
+Supported actions:
 
-The FUSE layer is now passthrough-first:
+- `rw`
+- `ro`
+- `deny`
+- `hide`
 
-- `ro`: host reads allowed, host writes rejected
-- `rw`: host reads and writes allowed
-- `git-rw`: host writes allowed only for paths inside a detected git working tree
-- `deny`: path remains visible but returns `EACCES`
-- `hide`: path behaves as absent
+Important details:
 
-There is no copy-on-write overlay and no deferred replay stage.
+- `hide` removes entries from `readdir`, returns `ENOENT` on lookup/stat, and
+  rejects same-name creation with a mutation error.
+- If a hidden directory has allowed descendants because of a deeper glob rule,
+  ancestor directories are implicitly visible so the path remains traversable.
+- `.` and relative path patterns are intentionally rejected because the shared
+  daemon can reload the profile without a per-command CWD context.
+- `exe` and `env` conditions are loaded lazily from `/proc/<pid>` only when a
+  path-matching rule actually needs them.
 
-## Git-Aware Filtering
+## Mount Plan Rules
 
-`git-rw` relies on a dedicated filter module:
+Profile rules under `/dev` are converted to bind mounts for exact non-glob
+paths when the source exists and is a character device or directory.
 
-- repo detection walks parent directories looking for a plain `.git/config` layout
-- ordinary worktree paths inside a detected repo are writable
-- non-repo paths remain read-only
-- `.git` metadata paths are read-only by default and writable only for trusted `git` invocations
+Missing `/dev` bind sources are skipped so environments with a reduced `/dev`
+layout, such as some `bwrap` setups, remain usable.
 
-Trusted `git` checks currently inspect `/proc/<pid>/exe` and allow `.git` metadata access only when that executable resolves to the trusted system `git`.
+`/proc` is mounted inside the child PID namespace after the PID namespace fork.
 
-## Runtime Execution Notes
+`/sys` is not mounted specially anymore; access goes through the FUSE mirror
+and is controlled by the profile.
 
-- `run` does not persist a separate mount namespace handle for jail reuse
-- `_fuse` mounts a per-jail FUSE view under the runtime directory
-- `run` unshares IPC, mount, and PID namespaces before spawn, then child `pre_exec` applies mount plan plus `pivot_root(".", ".")` into the jail mount
-- `_rm` unmounts runtime FUSE mountpoints and removes known runtime artifacts conservatively
+`/tmp` has a bind-mount fast path when the first exact `/tmp` rule is an
+unconditional `ro` or `rw` rule and no other rule conflicts with that mount.
 
-## Explicit Trade-Offs and Assumptions
+Conflicts include:
 
-- FUSE privilege transition ordering:
-  - `_fuse` mounts, starts background request handling, then drops to the real user
-  - this relies on current Linux threading credential semantics
-- `pivot_root` root switch without a separate container runtime:
-  - `run` uses `pivot_root(".", ".")` followed by `umount2(".", MNT_DETACH)` to make the jail mount the real mount-namespace root
-  - this reduces compatibility issues with tools that later create their own namespaces
-- Userspace policy enforcement instead of kernel-only mounts:
-  - `deny`, `hide`, and `git-rw` all stay in one userspace path
-  - this simplifies policy behavior at the cost of some fidelity and performance
-- Simple long-lived caches over tighter reclamation:
-  - the FUSE inode/path maps and git repo-root cache are kept intentionally simple
-  - entries may accumulate or become stale during a long-lived mount, especially across heavy temp-file churn or `git init` after an earlier negative repo lookup
-  - the current operational assumption is that these mounts are session-scoped; if they stop behaving well, tear them down and rebuild with `leash _rm '*'`
-- `readdir` favors simple whole-directory collection:
-  - directory entries are collected into memory before they are streamed back through FUSE
-  - this keeps the implementation straightforward, and the current assumption is that extremely large directories are uncommon in the intended agent workloads
-- Known filesystem compatibility gaps:
-  - hardlinks are not supported by the current FUSE layer
-  - mmap-heavy workloads may degrade or fail depending on access pattern
-  - metadata fidelity is partial compared with a full kernel filesystem stack
-  - `/proc` is not fully virtualized; current behavior includes a targeted compatibility shim for `/proc/self` and a hard block on `/proc/thread-self`
-  - mount-plan validation errors use normalized line numbers by default and upgrade to `source:line` when `profile.sources` is available
+- descendant rules such as `/tmp/cache ro`
+- glob rules that make `/tmp` an implicit visible ancestor, such as
+  `/**/secret.txt ro`
 
-## Lock Files
+If those conflicts exist, mount-plan construction fails explicitly instead of
+silently changing `/tmp` policy semantics.
 
-`leash` uses two lock domains:
+## Symlink and Create Semantics
 
-1. Runtime root lock on `${runtime_root}/.lock`
-2. Per-jail runtime lock on `.../<name>/lock`
+For open-like operations and setattr, policy checks are applied to both the
+literal path and the canonicalized host target when the target resolves to a
+different path. This prevents an allowed symlink from bypassing a denied
+target.
 
-These protect concurrent runtime creation, `_fuse` reuse-or-start logic, and runtime cleanup.
+For `mkdir` and file create, an already existing visible target returns
+`EEXIST` before mutation denial so host-visible "already exists" behavior is
+preserved without exposing hidden entries.
+
+## Locking
+
+The dedicated lock design is documented separately in
+[`docs/LOCKING.md`](LOCKING.md).
+
+## Known Trade-Offs
+
+- inode/path maps in `MirrorFs` are long-lived and not aggressively compacted
+- `readdir` currently collects child entries before replying
+- whole-file lock kind is ambiguous because `fuser` does not expose the lock
+  source flag
 
 ## See Also
 
-- Runtime paths and lifecycle details: [`docs/RUNTIME_LAYOUT.md`](RUNTIME_LAYOUT.md)
-- Privilege transition model: [`docs/PRIVILEGE_MODEL.md`](PRIVILEGE_MODEL.md)
+- [`docs/PROFILE.md`](PROFILE.md)
+- [`docs/RUNTIME_LAYOUT.md`](RUNTIME_LAYOUT.md)
+- [`docs/PRIVILEGE_MODEL.md`](PRIVILEGE_MODEL.md)
+- [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md)
+- [`docs/LOCKING.md`](LOCKING.md)

@@ -1,120 +1,162 @@
 # Profile Guide
 
-This document is the source of truth for profile syntax and default profile behavior used by `leash`.
+This document is the source of truth for profile syntax and default profile
+behavior used by `leash`.
 
-## Managing Profiles
+## Managing The Default Profile
 
-- `leash profile list`: list profile files under `~/.config/leash/profiles`
-- `leash profile show [name]`: print profile source
-  - `name` is optional; default is `default`
-  - `name` may also be a readonly builtin such as `builtin:basic`
-- `leash profile edit [name]`: open profile in `$EDITOR`
-  - `name` is optional; default is `default`
-  - short names (no `/`) are resolved under `~/.config/leash/profiles`
-  - names follow the same validation rules as jail names
-  - builtin profiles are readonly and cannot be edited
-- `leash profile rm [name]`: remove profile file
-  - `name` is optional; default is `default`
-  - short names (no `/`) are resolved under `~/.config/leash/profiles`
-  - names follow the same validation rules as jail names
-  - builtin profiles are readonly and cannot be removed
-- `leash profile rm default` removes the user override file and falls back to the built-in default profile
+`leash` currently manages one default per-user profile file:
 
-The built-in `default` profile source includes:
+- path: `$XDG_CONFIG_HOME/leash/profile`
+- fallback: `~/.config/leash/profile`
+
+Commands:
+
+- `leash profile show`
+  - prints the current default profile source
+  - shows a leading comment describing whether the source came from the
+    filesystem or the built-in default
+  - expands `%include` content as indented comment lines for easier inspection
+- `leash profile edit`
+  - edits a temporary copy in `$EDITOR`
+  - validates syntax before writing back
+  - sends `SIGHUP` to a running `_fuse` daemon so the policy reloads
+  - if the edited content is blank after trimming whitespace, removes the user
+    profile file and falls back to the built-in default
+
+There is no profile-name selection yet. Built-in fragments exist for inclusion
+and inspection through `profile show`, but not as separate named user-facing
+profile commands.
+
+## Default Profile
+
+The built-in default profile source is:
 
 ```text
 %include builtin:deny-sensitive
 %include builtin:basic
 %include builtin:agents
-~ git-rw
+%include builtin:home-hide
+%include builtin:home-git-rw
 ```
 
-That means the normal way to extend the shipped default policy is to edit `default` itself when you want a user override:
+That means the shipped policy is assembled from a few focused fragments:
+
+- `builtin:deny-sensitive`
+- `builtin:basic`
+- `builtin:agents`
+- `builtin:home-hide`
+- `builtin:home-git-rw`
+
+The normal way to customize the default policy is:
 
 ```bash
-leash profile edit default
+leash profile edit
 ```
-
-You can inspect the shipped fragments with `leash profile show builtin:deny-sensitive`, `builtin:basic`, and `builtin:agents`.
 
 ## Syntax
 
-Profile is line-based and evaluated with first-match-wins.
+Profile files are line-based and evaluated top to bottom with first-match-wins.
 
 - Rule format: `pattern action`
+- Conditional rule format: `pattern action when cond[,cond...]`
 - Directive format: `%directive ...`
-- `%include <name>`: inline another profile by short name or `builtin:name`; missing file is ignored
 - Comment: lines starting with `#`
-- Glob pattern is supported in paths
+
+Supported directives:
+
+- `%include <name>`
+  - includes another source by short name or builtin name
+  - missing include files are ignored
+
+Pattern rules:
+
+- absolute paths are supported
+- `~` and `~/...` resolve relative to `$HOME`
+- glob syntax is supported
   - `*` does not match `/`
-  - for arbitrary depth (including 0 levels), use `**`
-  - example: use `foo/**/.git` instead of `foo/*/.git`
-- Match order: top to bottom, first matched rule wins
-- Relative rules:
-  - `.` resolves to the current working directory at profile load time
-  - relative paths like `foo` and `./foo` resolve under the current working directory at profile load time
-- Home rule:
-  - `~` and `~/...` resolve under `$HOME`
+  - `**` matches arbitrary directory depth
+- relative path syntax such as `.`, `./foo`, or `foo/bar` is intentionally not
+  supported
 
 Example:
 
 ```text
-/bin ro
-/usr ro
 /tmp rw
-. git-rw
+/dev/urandom ro
+~/.codex rw
+~ rw when ancestor-has=.git
+~ ro
 ```
 
 ## Actions
 
-- `ro`: read-only
-- `rw`: writable passthrough; writes apply to the host immediately
-- `git-rw`: writable only inside detected git working trees; non-repo paths remain read-only
-- `deny`: path remains visible, access returns `EACCES`
-- `hide`: path behaves as non-existent (`ENOENT`)
+- `ro`: readable but not writable
+- `rw`: readable and writable
+- `deny`: visible, but access fails with `EACCES`
+- `hide`: behaves as non-existent for lookups/stat (`ENOENT`) and rejects
+  same-name creation with a mutation error
 
-`git-rw` also applies special `.git` protection. Normal processes can read `.git` metadata but cannot modify it. Writes are only granted to trusted `git` commands recognized by the FUSE-side filter.
+Important behavior:
 
-## Automatic Mount Handling
+- hidden entries disappear from `readdir`
+- if a deeper visible rule requires traversal through a hidden directory, the
+  hidden ancestors become implicitly visible directories
+- if no rule matches a path, it is hidden by default
 
-`leash` keeps profile syntax simple and applies special mount behavior internally during `run`:
+## Conditions
 
-- `/proc`:
-  - only exact `/proc` is supported
-  - action must be `ro` or `rw`
-  - implemented as `procfs` mount in the child mount namespace
-- `/sys`:
-  - only exact `/sys` is supported
-  - action must be `ro` or `rw`
-  - implemented as `sysfs` mount in the child mount namespace
-- `/dev`:
-  - glob is not allowed; use explicit paths
-  - for `ro` or `rw` rules that point to a host character device or directory, `leash` automatically plans bind mounts in the child mount namespace
-  - once a path is auto-promoted to a bind mount root, descendant profile rules under that root are rejected as conflicts
-- `/tmp`:
-  - exact `/tmp ro` or `/tmp rw` may be planned as a bind mount in the child mount namespace when no other rule mentions `/tmp` and no other glob rule matches it
+Supported conditions:
 
-## Default Profile Resolution
+- `exe=name`
+  - bare names are resolved through `$PATH` at parse time
+  - absolute paths are accepted as-is
+  - relative values and globs are rejected
+- `env=VAR`
+  - matches when the caller environment contains `VAR`
+- `ancestor-has=name`
+  - matches when some ancestor directory of the accessed path contains an entry
+    named `name`
 
-When a command resolves the profile name `default` (for example, `leash run` without `--profile`, or an explicit `--profile default`), `leash` loads the source in this order:
+Condition evaluation details:
 
-1. `~/.config/leash/profiles/default` when the file exists
-2. built-in fallback source when the file is missing
+- all conditions on a rule must match
+- conditions are only evaluated after the path glob matches
+- caller `exe` and `env` data are loaded lazily from `/proc/<pid>` only when a
+  path-matching rule actually needs them
 
-The fallback is the built-in `builtin:default` profile. If you want a user override, create or edit `~/.config/leash/profiles/default`:
+## Special Mount-Related Rules
 
-```bash
-leash profile edit default
-```
+Some profile rules are compiled into namespace mounts during `leash run`.
 
-To inspect the currently effective default profile source, use:
+### `/proc`
 
-```bash
-leash profile show
-```
+- only exact `/proc` is allowed
+- action must be `ro`, `rw`, or `hide`
+- conditional rules are rejected
+- `ro` and `rw` become a procfs mount inside the child PID namespace
+- `hide` means no special mount
 
-If `~/.config/leash/profiles/default` is absent, `leash profile show` displays the built-in fallback source. To remove a user override and return to the built-in default, run:
+### `/sys`
 
-```bash
-leash profile rm default
-```
+- only exact `/sys` is allowed
+- action must be `ro`, `rw`, or `hide`
+- conditional rules are rejected
+- `/sys` is not mounted specially right now; access remains FUSE-controlled
+
+### `/dev`
+
+- rules must use exact paths; no glob syntax
+- rules must be unconditional
+- `ancestor-has`, `exe`, and `env` conditions are rejected
+- actions must be `ro` or `rw`
+- existing character-device and directory sources become bind mounts
+- missing, symlink, and other non-bindable sources are skipped
+
+### `/tmp`
+
+- an exact unconditional `/tmp ro` or `/tmp rw` rule may become a bind mount
+- this fast path is only allowed when no descendant rule conflicts with `/tmp`
+- rules that make `/tmp` an implicit visible ancestor also block the fast path
+- if the `/tmp` bind mount later fails at runtime, `leash` logs a warning and
+  falls back to normal FUSE enforcement for `/tmp`
