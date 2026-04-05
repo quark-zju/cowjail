@@ -1,93 +1,89 @@
 # leash
 
-Experimental rewrite of `leash` focused on a single global FUSE mirror filesystem with pluggable access control.
+`leash` is a Linux filesystem safety layer for coding agents.
 
-## Current Scope
+- blocks reads of sensitive files such as `~/.ssh` and browser profiles
+- controls what can be written, such as `/tmp`, agent state, and git working
+  copies
+- protects `.git` metadata so normal writes do not silently corrupt a repo
 
-- `src/mirrorfs.rs`: mirror-style FUSE filesystem backed by the real host filesystem via `fs_err`
-- `src/access.rs`: standalone access-control trait and operation model; FUSE does not depend directly on `profile`
-- `src/profile.rs`: conditional profile rule engine for future policy integration
-- `tests/integration.rs`: custom integration harness that mounts one FUSE instance and runs filesystem-facing tests against the real mount
+`leash` 主要面向 Codex、OpenCode、Claude Code 这类 AI 编码工具。
 
-The intended direction is:
+- 阻止读取敏感文件，如 `~/.ssh`、浏览器配置、部分系统机密
+- 控制哪些路径可写，如 `/tmp`、agent 状态目录、git 工作区
+- 保护 `.git` 元数据，避免普通写入破坏仓库
 
-- one global FUSE mount
-- one global policy/profile in the future
-- per-process-name access decisions instead of multiple mounts with separate profiles
-
-## Implemented In MirrorFs
-
-- mirror read/write behavior on top of a backing directory
-- per-request access checks through `AccessController`
-- process-name lookup from `/proc/<pid>/comm`
-- stable handle behavior across rename
-- hardlink support
-- `mmap`-relevant file semantics coverage
-- host-visible `flock` forwarding
-- internal POSIX range-lock table with host `fcntl` projection through a dedicated broker process
-- zero TTL for FUSE entry/attr replies to reduce stale kernel-side metadata caching
-
-## Current Limitations
-
-- `src/main.rs` is still a stub; there is no real mount CLI yet
-- `F_SETLKW` is intentionally rejected with `EINVAL` to avoid daemon-side blocking and deadlock
-- whole-file lock requests are treated as `flock`-compatible because `fuser` does not currently expose the FUSE lock-kind flag
-- the codebase still has some `unused`/`dead_code` allowances while the binary entrypoint is unfinished
-
-## Testing
-
-Run everything:
+## Quick Start
 
 ```bash
-cargo test -q
+cargo install --path .
+leash run bash
 ```
 
-Run the mounted integration harness only:
+`leash run ...` 会按需启动一个共享 FUSE daemon，加载默认 profile，然后在
+新的 user/mount/pid/ipc namespace 里运行命令。
+
+常用例子：
 
 ```bash
-cargo test --test integration -- --nocapture
+leash run bash
+leash run codex
+leash run opencode
 ```
 
-The integration harness:
+## Profiles
 
-- creates one top-level temp directory
-- creates `backing/` and `mount/` under it
-- mounts one background FUSE instance on `mount/`
-- creates one subdirectory per logical subtest under both trees
-- runs subtests sequentially
-
-## Integration Logging
-
-The integration harness uses `env_logger` and reads `RUST_LOG`.
-
-Common settings:
+查看当前默认 profile：
 
 ```bash
-RUST_LOG=integration=debug cargo test --test integration -- --nocapture
-RUST_LOG=integration=debug,fuser=off cargo test --test integration -- --nocapture
-RUST_LOG=debug cargo test --test integration -- --nocapture
+leash profile show
 ```
 
-These are useful when investigating broker projection, lock behavior, and general FUSE request flow.
+修改默认 profile：
 
-## Docs
+```bash
+leash profile edit
+```
 
-- [docs/TECHNICAL_OVERVIEW.md](docs/TECHNICAL_OVERVIEW.md)
-- [docs/PRIVILEGE_MODEL.md](docs/PRIVILEGE_MODEL.md)
-- [docs/RUNTIME_LAYOUT.md](docs/RUNTIME_LAYOUT.md)
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-- [docs/LOCKING.md](docs/LOCKING.md)
+`profile show` 会标明当前使用的是文件系统里的 profile，还是 builtin 默认
+profile；`profile edit` 保存空白内容时会删除用户 profile 文件并回退到
+builtin 默认配置。
 
-## Dependencies Used Intentionally
+Profile 语法和默认规则说明见
+[`docs/PROFILE.md`](docs/PROFILE.md)。
 
-- `fs_err` for host filesystem access
-- `fuser` for FUSE
-- `anyhow` and `thiserror` for errors
-- `log` and `env_logger` for logging
-- `tempfile` and `memmap2` for tests
+## Low-Level Commands
 
-## Near-Term Next Steps
+这些命令主要用于调试：
 
-- replace the stub `main` with a real mount CLI
-- connect `profile` to `AccessController`
-- validate the broker-backed range-lock model against a real SQLite workload
+- `leash _fuse`
+  - 前台运行共享 FUSE daemon
+- `leash _kill`
+  - 停掉共享 FUSE daemon，并清理共享 mount
+
+调试 `run -v` 时，`_fuse` 的日志会写到：
+
+- `${XDG_RUNTIME_DIR}/leash/fuse.log`
+- 或 fallback 的 `/run/user/<uid>/leash/fuse.log`
+
+## More Docs
+
+- Profile guide: [`docs/PROFILE.md`](docs/PROFILE.md)
+- Locking design: [`docs/LOCKING.md`](docs/LOCKING.md)
+- Technical overview: [`docs/TECHNICAL_OVERVIEW.md`](docs/TECHNICAL_OVERVIEW.md)
+- Runtime layout: [`docs/RUNTIME_LAYOUT.md`](docs/RUNTIME_LAYOUT.md)
+- Privilege model: [`docs/PRIVILEGE_MODEL.md`](docs/PRIVILEGE_MODEL.md)
+- Troubleshooting: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+
+## Status
+
+The current codebase already supports:
+
+- one shared per-user FUSE mirror mount
+- profile-driven access control
+- rootless `run` based on Linux namespaces
+- host-visible `flock` and broker-backed POSIX range locks
+- profile reload through `SIGHUP`
+
+It is still Linux-only, and compatibility is being tuned against real coding
+agent workloads.
