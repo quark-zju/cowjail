@@ -44,20 +44,13 @@ impl UsernsRunConfig {
 pub fn run_in_user_namespace(config: &UsernsRunConfig) -> Result<i32> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-
-    let supervisor_pid = fork_process("userns-supervisor")?;
-    if supervisor_pid == 0 {
-        let status = match run_namespace_supervisor(config, uid, gid) {
-            Ok(status) => status,
-            Err(err) => {
-                eprintln!("leash userns run failed: {err:#}");
-                125
-            }
-        };
-        unsafe { libc::_exit(status) }
+    match run_namespace_supervisor(config, uid, gid) {
+        Ok(status) => Ok(status),
+        Err(err) => {
+            eprintln!("leash userns run failed: {err:#}");
+            Ok(125)
+        }
     }
-
-    wait_for_specific_child(supervisor_pid)
 }
 
 fn run_namespace_supervisor(
