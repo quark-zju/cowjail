@@ -215,6 +215,7 @@ fn test_cases() -> Vec<TestCase> {
         test_case!(posix_lock_reopen_after_rename_is_same_process_noop),
         test_case!(posix_partial_unlock_updates_backing_range_conflicts),
         test_case!(posix_range_lock_conflicts_with_backing_path_open),
+        test_case!(posix_getlk_reports_backing_path_conflict),
         test_case!(blocking_posix_lock_requests_are_rejected),
         test_case!(flock_dup_is_noop_but_reopen_after_rename_conflicts),
         test_case!(flock_on_mirror_handle_conflicts_with_backing_path_open),
@@ -560,6 +561,94 @@ fn posix_range_lock_conflicts_with_backing_path_open(ctx: &TestContext) -> Resul
     setlk(&mirror_file, 0x40000001, 0x40000001, libc::F_UNLCK, false)?;
     setlk(&backing_file, 0x40000001, 0x40000001, libc::F_WRLCK, false)?;
     setlk(&backing_file, 0x40000001, 0x40000001, libc::F_UNLCK, false)?;
+    Ok(())
+}
+
+fn posix_getlk_reports_backing_path_conflict(ctx: &TestContext) -> Result<()> {
+    let fuse_path = ctx.fuse_path.join("locked.db");
+    let backing_path = ctx.backing_path.join("locked.db");
+    fs::write(&fuse_path, b"123456")?;
+
+    let mut ready_pipe = [0; 2];
+    let mut done_pipe = [0; 2];
+    if unsafe { libc::pipe(ready_pipe.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { libc::pipe(done_pipe.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if pid == 0 {
+        unsafe {
+            libc::close(ready_pipe[0]);
+            libc::close(done_pipe[1]);
+        }
+        let result = (|| -> std::io::Result<()> {
+            let backing_file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&backing_path)?;
+            setlk(&backing_file, 0x40000001, 0x40000001, libc::F_WRLCK, false)?;
+            let signal = [1u8];
+            if unsafe { libc::write(ready_pipe[1], signal.as_ptr().cast(), 1) } != 1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut wait = [0u8; 1];
+            if unsafe { libc::read(done_pipe[0], wait.as_mut_ptr().cast(), 1) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            setlk(&backing_file, 0x40000001, 0x40000001, libc::F_UNLCK, false)?;
+            Ok(())
+        })();
+        unsafe {
+            libc::close(ready_pipe[1]);
+            libc::close(done_pipe[0]);
+            libc::_exit(if result.is_ok() { 0 } else { 1 });
+        }
+    }
+
+    unsafe {
+        libc::close(ready_pipe[1]);
+        libc::close(done_pipe[0]);
+    }
+    let mut ready = [0u8; 1];
+    if unsafe { libc::read(ready_pipe[0], ready.as_mut_ptr().cast(), 1) } != 1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let mirror_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fuse_path)?;
+    let (_start, _end, typ) = getlk(&mirror_file, 0x40000001, 0x40000001, libc::F_WRLCK)?;
+    assert_ne!(
+        typ,
+        libc::F_UNLCK,
+        "expected getlk to report external conflict"
+    );
+
+    let done = [1u8];
+    if unsafe { libc::write(done_pipe[1], done.as_ptr().cast(), 1) } != 1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut status = 0;
+    if unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+        bail!("child lock holder exited abnormally: status={status}");
+    }
+
+    let (_start, _end, typ) = getlk(&mirror_file, 0x40000001, 0x40000001, libc::F_WRLCK)?;
+    assert_eq!(
+        typ,
+        libc::F_UNLCK,
+        "expected getlk to clear after child unlock"
+    );
     Ok(())
 }
 

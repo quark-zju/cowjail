@@ -696,24 +696,28 @@ impl<P: AccessController> MirrorFs<P> {
             return Err(std::io::Error::from_raw_os_error(ENOENT).into());
         };
         self.authorize(caller, &path, Operation::GetLock)?;
+        let handle = self
+            .handles
+            .get(&fh)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
         let end = normalize_lock_end(end)?;
         if is_whole_file_lock(start, end) {
             // Match the whole-file flock-compatible path used by setlk().
-            let _handle = self
-                .handles
-                .get(&fh)
-                .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
             return getlk_via_flock_probe(&path, typ);
         }
 
         let mode = lock_mode_from_fcntl(typ)?;
         let owner = lock_owner.0;
-        Ok(self
+        let local_conflict = self
             .lock_states
             .get(&ino)
             .and_then(|state| state.find_conflict(owner, start, end, mode))
-            .map(|conflict| conflict.as_reply())
-            .unwrap_or((start, end, libc::F_UNLCK, 0)))
+            .map(|conflict| conflict.as_reply());
+        if let Some(conflict) = local_conflict {
+            return Ok(conflict);
+        }
+
+        getlk(&handle.file, start, end, typ)
     }
 
     fn release_lock_owner_for_fuse(&mut self, ino: u64, lock_owner: LockOwner) -> Result<()> {
