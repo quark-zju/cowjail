@@ -12,6 +12,7 @@ use crate::fuse_runtime::{self, MountState};
 use crate::mirrorfs::MirrorFs;
 use crate::profile::ProfileController;
 use crate::profile_store;
+use crate::tail_ipc;
 
 const PROFILE_RELOAD_POLL: Duration = Duration::from_millis(100);
 
@@ -41,7 +42,8 @@ pub(crate) fn fuse_command(_command: LowLevelFuseCommand) -> Result<()> {
     let profile = profile_store::load_default_profile(Path::new("/"))?;
     let controller = Arc::new(ProfileController::new(profile));
     let _reload_thread = spawn_profile_reload_thread(Arc::clone(&controller))?;
-    let fs = MirrorFs::new(PathBuf::from("/"), controller);
+    let (tail_sink, _tail_server_guard) = tail_ipc::start_global_server()?;
+    let fs = MirrorFs::new_with_tail(PathBuf::from("/"), controller, Some(tail_sink));
     let _pid_file = DaemonPidFile::write()?;
 
     info!("mounting shared mirrorfs at {}", mountpoint.display());

@@ -6,11 +6,13 @@ mod cmd_help;
 mod cmd_kill;
 mod cmd_profile;
 mod cmd_run;
+mod cmd_tail;
 mod fuse_runtime;
 mod mirrorfs;
 mod mount_plan;
 mod profile;
 mod profile_store;
+mod tail_ipc;
 mod userns_run;
 
 use anyhow::{Context, Result, bail};
@@ -38,6 +40,10 @@ fn try_main() -> Result<i32> {
             Ok(0)
         }
         Command::Run(run) => cmd_run::run_command(run).context("run subcommand failed"),
+        Command::Tail(tail) => {
+            cmd_tail::tail_command(tail).context("tail subcommand failed")?;
+            Ok(0)
+        }
         Command::LowLevelFuse(fuse) => {
             cmd_fuse::fuse_command(fuse).context("_fuse subcommand failed")?;
             Ok(0)
@@ -57,6 +63,7 @@ fn command_verbose(command: &Command) -> bool {
     match command {
         Command::Help { verbose, .. } => *verbose,
         Command::Run(run) => run.verbose,
+        Command::Tail(_) => false,
         Command::LowLevelFuse(fuse) => fuse.verbose,
         Command::LowLevelKill => false,
         Command::Profile(_) => false,

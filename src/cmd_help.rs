@@ -2,6 +2,7 @@ use crate::cli::HelpTopic;
 
 const HELP_TOPIC_NAMES: &[(&str, HelpTopic)] = &[
     ("run", HelpTopic::Run),
+    ("tail", HelpTopic::Tail),
     ("profile", HelpTopic::Profile),
     ("_fuse", HelpTopic::LowLevelFuse),
     ("_kill", HelpTopic::LowLevelKill),
@@ -26,6 +27,14 @@ pub(crate) fn help_text(topic: HelpTopic, verbose: bool) -> String {
             "  leash run [-v|--verbose] command ...\n\n",
             "OPTIONS:\n",
             "  -v, --verbose         Print debug logs from run setup and spawned FUSE daemon\n",
+        )
+        .to_string(),
+        HelpTopic::Tail => concat!(
+            "leash tail\n\n",
+            "USAGE:\n",
+            "  leash tail [--kinds <list>]\n\n",
+            "OPTIONS:\n",
+            "  --kinds <list>        Comma-separated event kinds: lookup-miss,open-denied,lock\n",
         )
         .to_string(),
         HelpTopic::Profile => concat!(
@@ -62,6 +71,8 @@ fn root_help_text(verbose: bool) -> String {
         "  leash <subcommand> [options]\n\n",
         "COMMON:\n",
         "  leash run [-v|--verbose] command ...\n\n",
+        "TAIL:\n",
+        "  leash tail [--kinds <list>]\n\n",
         "PROFILE:\n",
         "  leash profile edit\n",
         "  leash profile show\n",
@@ -103,6 +114,7 @@ mod tests {
     #[test]
     fn topic_lookup_supports_registered_commands() {
         assert_eq!(topic_from_name("run"), Some(HelpTopic::Run));
+        assert_eq!(topic_from_name("tail"), Some(HelpTopic::Tail));
         assert_eq!(topic_from_name("_fuse"), Some(HelpTopic::LowLevelFuse));
         assert_eq!(topic_from_name("_unknown"), None);
     }

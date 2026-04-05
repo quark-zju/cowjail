@@ -1,10 +1,14 @@
 #![allow(unused)]
 #[path = "../src/access.rs"]
 mod access;
+#[path = "../src/fuse_runtime.rs"]
+mod fuse_runtime;
 #[path = "../src/mirrorfs.rs"]
 mod mirrorfs;
 #[path = "../src/profile.rs"]
 mod profile;
+#[path = "../src/tail_ipc.rs"]
+mod tail_ipc;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;

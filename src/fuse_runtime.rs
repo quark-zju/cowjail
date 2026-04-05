@@ -9,6 +9,7 @@ use log::debug;
 const RUNTIME_DIR_NAME: &str = "leash";
 const MOUNT_DIR_NAME: &str = "mount";
 const FUSE_LOG_FILE_NAME: &str = "fuse.log";
+const TAIL_SOCKET_FILE_NAME: &str = "tail.sock";
 const PID_FILE_NAME: &str = "fuse.pid";
 const MOUNTINFO_PATH: &str = "/proc/self/mountinfo";
 
@@ -31,6 +32,11 @@ pub fn ensure_global_mountpoint_under(runtime_dir: &Path) -> Result<PathBuf> {
 pub fn global_fuse_log_path() -> Result<PathBuf> {
     let runtime_dir = global_runtime_dir();
     global_fuse_log_path_under(&runtime_dir.path)
+}
+
+pub fn global_tail_socket_path() -> Result<PathBuf> {
+    let runtime_dir = global_runtime_dir();
+    global_tail_socket_path_under(&runtime_dir.path)
 }
 
 fn ensure_global_mountpoint_in(
@@ -164,6 +170,13 @@ fn global_fuse_log_path_under(runtime_dir: &Path) -> Result<PathBuf> {
     let leash_dir = runtime_dir.join(RUNTIME_DIR_NAME);
     ensure_dir(&leash_dir)?;
     Ok(leash_dir.join(FUSE_LOG_FILE_NAME))
+}
+
+fn global_tail_socket_path_under(runtime_dir: &Path) -> Result<PathBuf> {
+    ensure_dir(runtime_dir)?;
+    let leash_dir = runtime_dir.join(RUNTIME_DIR_NAME);
+    ensure_dir(&leash_dir)?;
+    Ok(leash_dir.join(TAIL_SOCKET_FILE_NAME))
 }
 
 fn ensure_runtime_dir(path: &Path, chmod_on_create: bool) -> Result<()> {

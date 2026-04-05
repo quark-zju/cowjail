@@ -3,10 +3,13 @@ use std::ffi::OsString;
 use anyhow::{Result, bail};
 use pico_args::Arguments;
 
+use crate::tail_ipc::EventKind;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help { topic: HelpTopic, verbose: bool },
     Run(RunCommand),
+    Tail(TailCommand),
     Profile(ProfileCommand),
     LowLevelFuse(LowLevelFuseCommand),
     LowLevelKill,
@@ -16,6 +19,7 @@ pub enum Command {
 pub enum HelpTopic {
     Root,
     Run,
+    Tail,
     Profile,
     LowLevelFuse,
     LowLevelKill,
@@ -31,6 +35,11 @@ pub struct RunCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileCommand {
     pub action: ProfileAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailCommand {
+    pub kinds: Vec<EventKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +72,13 @@ where
 
     let mut args = Arguments::from_vec(raw);
     let Some(subcmd) = args.subcommand()? else {
-        bail!("missing subcommand (expected: help, profile, run, _fuse, _kill)");
+        bail!("missing subcommand (expected: help, profile, run, tail, _fuse, _kill)");
     };
 
     match subcmd.as_str() {
         "help" => parse_help(args),
         "run" => parse_run(args),
+        "tail" => parse_tail(args),
         "profile" => parse_profile(args),
         "_fuse" => parse_low_level_fuse(args),
         "_kill" => parse_low_level_kill(args),
@@ -134,6 +144,19 @@ fn parse_profile(mut args: Arguments) -> Result<Command> {
     Ok(Command::Profile(ProfileCommand { action }))
 }
 
+fn parse_tail(mut args: Arguments) -> Result<Command> {
+    if args.contains(["-h", "--help"]) {
+        return Ok(help_command(HelpTopic::Tail, false));
+    }
+    let kinds_raw: Option<String> = args.opt_value_from_str("--kinds")?;
+    let extra = args.finish();
+    if !extra.is_empty() {
+        bail!("tail got unexpected trailing arguments");
+    }
+    let kinds = parse_tail_kinds(kinds_raw.as_deref())?;
+    Ok(Command::Tail(TailCommand { kinds }))
+}
+
 fn parse_low_level_fuse(mut args: Arguments) -> Result<Command> {
     if args.contains(["-h", "--help"]) {
         return Ok(help_command(HelpTopic::LowLevelFuse, true));
@@ -155,6 +178,25 @@ fn parse_low_level_kill(mut args: Arguments) -> Result<Command> {
         bail!("_kill got unexpected trailing arguments");
     }
     Ok(Command::LowLevelKill)
+}
+
+fn parse_tail_kinds(raw: Option<&str>) -> Result<Vec<EventKind>> {
+    let Some(raw) = raw else {
+        return Ok(vec![]);
+    };
+    let mut kinds = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let kind = EventKind::parse_token(token)
+            .ok_or_else(|| anyhow::anyhow!("unknown tail event kind: {token}"))?;
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    Ok(kinds)
 }
 
 fn help_command(topic: HelpTopic, verbose: bool) -> Command {
@@ -221,6 +263,16 @@ mod tests {
             parse_from(os(&["profile", "edit"])).expect("parse"),
             Command::Profile(ProfileCommand {
                 action: ProfileAction::Edit,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_tail_with_kinds() {
+        assert_eq!(
+            parse_from(os(&["tail", "--kinds", "lookup-miss,lock"])).expect("parse"),
+            Command::Tail(TailCommand {
+                kinds: vec![EventKind::LookupMiss, EventKind::Lock],
             })
         );
     }
