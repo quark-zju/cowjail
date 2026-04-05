@@ -492,6 +492,7 @@ fn run_pid_namespace_init_and_exec(
     }
 
     set_process_name("leash-init")?;
+    set_no_new_privs("pidns init")?;
     apply_mount_plan_in_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan)?;
     pivot_root_into(&config.fuse_mount_root)?;
     drop_to_target_ids(uid, gid)?;
@@ -499,6 +500,7 @@ fn run_pid_namespace_init_and_exec(
 
     let worker_pid = fork_process("pidns-worker")?;
     if worker_pid == 0 {
+        set_no_new_privs("pidns worker")?;
         close_fds_best_effort_from(3);
         let err = ProcessCommand::new(&config.program)
             .args(&config.args)
@@ -558,6 +560,16 @@ fn set_process_name(name: &str) -> Result<()> {
     let rc = unsafe { libc::prctl(libc::PR_SET_NAME, name_c.as_ptr() as libc::c_ulong, 0, 0, 0) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NAME) failed");
+    }
+    Ok(())
+}
+
+fn set_no_new_privs(label: &str) -> Result<()> {
+    debug!("userns-run: syscall prctl(PR_SET_NO_NEW_PRIVS, 1) for {label}");
+    let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("prctl(PR_SET_NO_NEW_PRIVS) failed for {label}"));
     }
     Ok(())
 }
