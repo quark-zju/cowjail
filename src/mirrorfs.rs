@@ -37,6 +37,7 @@ pub struct MirrorFs<P> {
     next_fh: u64,
     ino_to_paths: HashMap<u64, Vec<PathBuf>>,
     path_to_ino: HashMap<PathBuf, u64>,
+    lookup_counts: HashMap<u64, u64>,
     handles: HashMap<u64, OpenHandle>,
     lock_states: HashMap<u64, InodeLockState>,
 }
@@ -133,6 +134,7 @@ impl<P: AccessController> MirrorFs<P> {
             next_fh: 1,
             ino_to_paths,
             path_to_ino,
+            lookup_counts: HashMap::new(),
             handles: HashMap::new(),
             lock_states: HashMap::new(),
         }
@@ -256,6 +258,60 @@ impl<P: AccessController> MirrorFs<P> {
             paths.retain(|candidate| candidate != path);
             if paths.is_empty() {
                 self.ino_to_paths.remove(&ino);
+            }
+        }
+    }
+
+    fn note_lookup(&mut self, ino: u64, nlookup: u64) {
+        if ino == ROOT_INO || nlookup == 0 {
+            return;
+        }
+        self.lookup_counts
+            .entry(ino)
+            .and_modify(|count| *count = count.saturating_add(nlookup))
+            .or_insert(nlookup);
+    }
+
+    fn forget_ino(&mut self, ino: u64, nlookup: u64) {
+        if ino == ROOT_INO || nlookup == 0 {
+            return;
+        }
+        if let Some(count) = self.lookup_counts.get_mut(&ino) {
+            *count = count.saturating_sub(nlookup);
+            if *count == 0 {
+                self.lookup_counts.remove(&ino);
+            }
+        }
+        self.cleanup_inode_if_forgettable(ino);
+    }
+
+    fn cleanup_inode_if_forgettable(&mut self, ino: u64) {
+        if ino == ROOT_INO {
+            return;
+        }
+        if self.lookup_counts.contains_key(&ino) {
+            return;
+        }
+        if self.handles.values().any(|handle| handle.ino == ino) {
+            return;
+        }
+        if self.lock_states.contains_key(&ino) {
+            match self.broker.drop_inode(ino) {
+                Ok(()) => {
+                    self.lock_states.remove(&ino);
+                }
+                Err(err) => {
+                    debug!("mirrorfs forget cleanup skipped lock drop for ino={ino}: {err}");
+                    return;
+                }
+            }
+        }
+        let Some(paths) = self.ino_to_paths.remove(&ino) else {
+            return;
+        };
+        for path in paths {
+            if self.path_to_ino.get(&path) == Some(&ino) {
+                self.path_to_ino.remove(&path);
             }
         }
     }
@@ -581,7 +637,10 @@ impl<P: AccessController> MirrorFs<P> {
 
     #[allow(dead_code)]
     pub(crate) fn release_for_test(&mut self, fh: u64) {
-        self.handles.remove(&fh);
+        let Some(handle) = self.handles.remove(&fh) else {
+            return;
+        };
+        self.cleanup_inode_if_forgettable(handle.ino);
     }
 
     pub(crate) fn setlk_for_test(
@@ -1052,7 +1111,10 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             .map(Path::to_path_buf)
             .map(|parent_path| parent_path.join(name));
         match fs.lookup_child(&caller, parent.0, name) {
-            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Ok(attr) => {
+                fs.note_lookup(attr.ino.0, 1);
+                reply.entry(&TTL, &attr, Generation(0));
+            }
             Err(err) => {
                 let errno = io_errno(&err);
                 if errno == ENOENT {
@@ -1061,6 +1123,11 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
                 reply.error(Errno::from_i32(errno));
             }
         }
+    }
+
+    fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
+        let mut fs = self.inner.lock().unwrap();
+        fs.forget_ino(ino.0, nlookup);
     }
 
     fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
@@ -1249,13 +1316,16 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Ok((attr, fh))
         })();
         match result {
-            Ok((attr, fh)) => reply.created(
-                &TTL,
-                &attr,
-                Generation(0),
-                FileHandle(fh),
-                FopenFlags::empty(),
-            ),
+            Ok((attr, fh)) => {
+                fs.note_lookup(attr.ino.0, 1);
+                reply.created(
+                    &TTL,
+                    &attr,
+                    Generation(0),
+                    FileHandle(fh),
+                    FopenFlags::empty(),
+                );
+            }
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
@@ -1412,6 +1482,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         match result {
             Ok(metadata) => {
                 let attr = fs.attr_for_path(&path, &metadata);
+                fs.note_lookup(attr.ino.0, 1);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             Err(err) => reply.error(Errno::from(err)),
@@ -1500,6 +1571,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         match std::os::unix::fs::symlink(link, &path).and_then(|_| fs::symlink_metadata(&path)) {
             Ok(metadata) => {
                 let attr = fs.attr_for_path(&path, &metadata);
+                fs.note_lookup(attr.ino.0, 1);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             Err(err) => reply.error(Errno::from(err)),
@@ -1522,7 +1594,10 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         };
         let target = newparent_path.join(newname);
         match fs.link_for_test(&caller, ino.0, &newparent_path, newname) {
-            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Ok(attr) => {
+                fs.note_lookup(attr.ino.0, 1);
+                reply.entry(&TTL, &attr, Generation(0));
+            }
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
@@ -2469,4 +2544,47 @@ fn io_errno(err: &anyhow::Error) -> i32 {
 
 fn is_access_denied_errno(errno: i32) -> bool {
     matches!(errno, libc::EACCES | libc::EPERM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access::AllowAll;
+
+    #[test]
+    fn forget_drops_inode_path_mapping_when_no_longer_referenced() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("a.txt");
+        fs::write(&path, b"data").expect("seed file");
+
+        let mut mirror = MirrorFs::new(root.path().to_path_buf(), AllowAll);
+        let ino = mirror.ensure_ino(&path);
+        mirror.note_lookup(ino, 1);
+
+        assert_eq!(mirror.path_for_ino(ino), Some(path.as_path()));
+        mirror.forget_ino(ino, 1);
+        assert!(mirror.path_for_ino(ino).is_none());
+        assert!(!mirror.path_to_ino.contains_key(&path));
+    }
+
+    #[test]
+    fn forget_keeps_mapping_until_open_handle_is_released() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("b.txt");
+        fs::write(&path, b"data").expect("seed file");
+
+        let mut mirror = MirrorFs::new(root.path().to_path_buf(), AllowAll);
+        let ino = mirror.ensure_ino(&path);
+        mirror.note_lookup(ino, 1);
+        let caller = MirrorFs::<AllowAll>::caller_for_test("test");
+        let fh = mirror
+            .open_for_test(&caller, &path, libc::O_RDONLY)
+            .expect("open");
+
+        mirror.forget_ino(ino, 1);
+        assert_eq!(mirror.path_for_ino(ino), Some(path.as_path()));
+
+        mirror.release_for_test(fh);
+        assert!(mirror.path_for_ino(ino).is_none());
+    }
 }
