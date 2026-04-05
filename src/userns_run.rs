@@ -609,20 +609,23 @@ fn c_path(path: &Path) -> Result<CString, std::ffi::NulError> {
 }
 
 fn log_stat_dev_urandom(stage: &str) {
-    match fs::symlink_metadata("dev/urandom") {
-        Ok(metadata) => {
-            debug!(
-                "userns-run: stat('dev/urandom') at {stage}: dev={:#x} rdev={:#x} ino={} mode={:#o} uid={} gid={}",
-                metadata.dev(),
-                metadata.rdev(),
-                metadata.ino(),
-                metadata.mode(),
-                metadata.uid(),
-                metadata.gid()
-            );
-        }
-        Err(err) => {
-            debug!("userns-run: stat('dev/urandom') at {stage} failed: {err}");
+    for path in ["dev/urandom", "/dev/urandom"] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                debug!(
+                    "userns-run: stat('{}') at {stage}: dev={:#x} rdev={:#x} ino={} mode={:#o} uid={} gid={}",
+                    path,
+                    metadata.dev(),
+                    metadata.rdev(),
+                    metadata.ino(),
+                    metadata.mode(),
+                    metadata.uid(),
+                    metadata.gid()
+                );
+            }
+            Err(err) => {
+                debug!("userns-run: stat('{}') at {stage} failed: {err}", path);
+            }
         }
     }
 }
