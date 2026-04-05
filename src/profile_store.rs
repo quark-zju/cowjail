@@ -56,19 +56,33 @@ const AGENTS_PROFILE_SOURCE: &str = "\
 ~/.claude.* rw
 ~/.codex rw
 ~/.copilot rw
+
+# opencode
 ~/.cache/opencode rw
 ~/.config/opencode rw
 ~/.local/share/opencode rw
 ~/.local/state/opencode rw
+
+# programming language package, environment management
 ~/.bun rw
 ~/.cargo ro
-~/.gitconfig* ro
-~/.gitignore* ro
-~/.local/bin ro
 ~/.npm ro
 ~/.pyenv ro
 ~/.rustup ro
 
+# bin
+~/.local/bin ro
+
+# git
+~/.gitconfig* ro
+~/.gitignore* ro
+~/.config/git-hooks ro
+
+# nvim
+~/.cache/nvim rw
+~/.config/nvim ro
+~/.local/share/nvim ro
+~/.local/state/nvim rw
 ";
 
 const HOME_HIDE: &str = "\
