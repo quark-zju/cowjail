@@ -65,14 +65,15 @@ fn command_verbose(command: &Command) -> bool {
 
 fn init_logging(verbose: bool) {
     let mut builder = env_logger::Builder::from_default_env();
-    builder
-        .filter_level(if verbose {
-            LevelFilter::Debug
-        } else {
-            LevelFilter::Warn
-        })
-        .format_timestamp(None)
-        .init();
+    builder.filter_level(if verbose {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Warn
+    });
+    if verbose {
+        builder.filter_module("globset", LevelFilter::Info);
+    }
+    builder.format_timestamp(None).init();
 }
 
 #[cfg(test)]
