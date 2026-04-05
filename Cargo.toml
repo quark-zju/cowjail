@@ -16,7 +16,6 @@ fs-err = "3"
 globset = "0.4"
 libc = "0.2"
 pico-args = "0.5"
-twox-hash = "2"
 env_logger = { version = "0.11.10", default-features = false }
 log = "0.4.29"
 
