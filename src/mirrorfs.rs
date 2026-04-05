@@ -17,7 +17,7 @@ use fuser::{
     AccessFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
     INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen,
-    ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use libc::{EACCES, EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use log::debug;
@@ -1504,6 +1504,47 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             ),
             Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
         }
+    }
+
+    fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let caller = caller_from_request(req);
+        let fs = self.inner.lock().unwrap();
+        let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        if let Some(errno) = fs.authorize_errno(&caller, &path, Operation::GetAttr) {
+            reply.error(Errno::from_i32(errno));
+            return;
+        }
+
+        let path_c = match CString::new(path.as_os_str().as_bytes()) {
+            Ok(path_c) => path_c,
+            Err(_) => {
+                reply.error(Errno::EINVAL);
+                return;
+            }
+        };
+
+        if size == 0 {
+            let required = unsafe { libc::llistxattr(path_c.as_ptr(), std::ptr::null_mut(), 0) };
+            if required < 0 {
+                let err = std::io::Error::last_os_error();
+                reply.error(Errno::from(err));
+                return;
+            }
+            reply.size(required as u32);
+            return;
+        }
+
+        let mut buf = vec![0u8; size as usize];
+        let len = unsafe { libc::llistxattr(path_c.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if len < 0 {
+            let err = std::io::Error::last_os_error();
+            reply.error(Errno::from(err));
+            return;
+        }
+        reply.data(&buf[..len as usize]);
     }
 
     fn fsyncdir(
