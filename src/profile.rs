@@ -1360,6 +1360,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn descendant_rule_after_deny_does_not_override_parent_deny() {
+        let p = parse_simple("~/**/.git deny\n~/**/.git/COMMIT_EDITMSG rw\n");
+        let env = HashMap::new();
+        let fs = MockFsCheck::new(&["/home/user/repo/.git"]);
+        let ctx = EvalContext {
+            exe: None,
+            env: &env,
+            fs: &fs,
+        };
+
+        assert_eq!(
+            p.visibility(Path::new("/home/user/repo/.git"), &ctx),
+            Visibility::Action(Action::Deny)
+        );
+        assert_eq!(
+            p.access_errno(Path::new("/home/user/repo/.git"), &ctx),
+            Some(EACCES)
+        );
+    }
+
     // ── condition: exe= ───────────────────────────────────────────────────────
 
     #[test]
