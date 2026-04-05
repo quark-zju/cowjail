@@ -68,7 +68,6 @@ fn run_namespace_supervisor(
     unshare_run_namespaces()?;
     write_current_user_namespace_maps(uid, gid)?;
     make_mounts_private()?;
-    ensure_pivot_root_mountpoint(&config.fuse_mount_root)?;
     apply_mount_plan_before_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan)?;
     run_pid_namespace_init_and_exec(config, uid, gid)
 }
@@ -273,15 +272,6 @@ fn bind_mount(source: &Path, target: &Path) -> Result<()> {
         });
     }
     Ok(())
-}
-
-fn ensure_pivot_root_mountpoint(new_root: &Path) -> Result<()> {
-    bind_mount(new_root, new_root).with_context(|| {
-        format!(
-            "self bind mount failed before applying mount plan: {}",
-            new_root.display()
-        )
-    })
 }
 
 fn remount_bind_read_only(target: &Path) -> Result<()> {
