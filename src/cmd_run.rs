@@ -190,6 +190,10 @@ mod tests {
 
     #[test]
     fn wait_for_fuse_mount_fails_on_non_fuse_mount() {
+        if !Path::new("/dev/fuse").exists() {
+            return;
+        }
+
         let tempdir = tempdir().expect("tempdir");
         let mountpoint = tempdir.path().join("mount");
         std::fs::create_dir(&mountpoint).expect("mkdir mountpoint");
