@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TTL: Duration = Duration::from_secs(1);
-const DEFAULT_NEGATIVE_DEPTH: usize = 3;
+const DEFAULT_NEGATIVE_DEPTH: usize = 10;
 const DEFAULT_MAX_ENTRIES: usize = 16_384;
 
 #[derive(Debug, Clone)]
