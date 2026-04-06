@@ -57,7 +57,7 @@ const AGENTS_PROFILE_SOURCE: &str = "\
 ~/.agents rw
 ~/.claude rw
 # .claude.json, .claude.json.tmp.*, claude.json.lock
-~/.claude.* rw
+~/.claude.json* rw
 ~/.codex rw
 ~/.copilot rw
 
@@ -94,11 +94,11 @@ const AGENTS_PROFILE_SOURCE: &str = "\
 ~/.zshrc* ro
 
 # shell, misc history
-~/.bash_history rw
+~/.bash_history* rw
 ~/.local/share/autojump rw
 ~/.python_history rw
 ~/.zdirs rw
-~/.zsh_history rw
+~/.zsh_history* rw
 ";
 
 const HOME_HIDE: &str = "\
