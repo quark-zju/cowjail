@@ -110,6 +110,7 @@ const HOME_HIDE: &str = "\
 const HOME_GIT_RW: &str = "\
 ~/**/.git/COMMIT_EDITMSG rw
 ~/**/.git rw when exe=git
+~/**/.git rw when exe=/usr/lib/git-core/git,os.id=debian
 ~/**/.git deny
 ~ rw when ancestor-has=.git
 ~ ro
