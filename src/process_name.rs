@@ -12,54 +12,55 @@ pub fn set_process_name(name: &str) -> Result<()> {
         return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NAME) failed");
     }
 
-    if let Err(err) = try_append_name_to_argv(name) {
-        warn!("process-name: failed to append argv suffix for {name}: {err:#}");
+    if let Err(err) = try_rewrite_argv0_in_place(name) {
+        warn!("process-name: failed to rewrite argv[0] for {name}: {err:#}");
     }
 
     Ok(())
 }
 
-fn try_append_name_to_argv(name: &str) -> Result<()> {
+fn try_rewrite_argv0_in_place(name: &str) -> Result<()> {
     let (arg_start, arg_end) = read_argv_bounds_from_proc_stat()?;
     if arg_end <= arg_start {
         bail!("invalid argv bounds in /proc/self/stat: arg_start={arg_start} arg_end={arg_end}");
     }
-    let capacity = arg_end - arg_start;
 
-    let mut cmdline = fs::read("/proc/self/cmdline").context("read /proc/self/cmdline failed")?;
+    let cmdline = fs::read("/proc/self/cmdline").context("read /proc/self/cmdline failed")?;
     if cmdline.is_empty() {
         bail!("/proc/self/cmdline is empty");
-    }
-    if cmdline.last().copied() != Some(0) {
-        cmdline.push(0);
     }
     let first_nul = cmdline
         .iter()
         .position(|byte| *byte == 0)
         .context("/proc/self/cmdline is missing argv[0] terminator")?;
+    if first_nul == 0 {
+        bail!("argv[0] is empty");
+    }
 
-    let mut rewritten = Vec::with_capacity(cmdline.len() + name.len() + 3);
-    rewritten.extend_from_slice(&cmdline[..first_nul]);
-    rewritten.extend_from_slice(b" [");
-    rewritten.extend_from_slice(name.as_bytes());
-    rewritten.extend_from_slice(b"]");
-    rewritten.push(0);
-    rewritten.extend_from_slice(&cmdline[first_nul + 1..]);
-
-    if rewritten.len() > capacity {
+    let rewritten = format!("leash[{name}]");
+    if rewritten.len() > first_nul {
         bail!(
-            "argv buffer too small for suffix: need {} bytes, have {} bytes",
+            "argv[0] buffer too small: need {} bytes, have {} bytes",
             rewritten.len(),
-            capacity
+            first_nul
+        );
+    }
+    if arg_start + first_nul >= arg_end {
+        bail!(
+            "argv[0] range out of bounds: arg_start={arg_start} first_nul={first_nul} arg_end={arg_end}"
         );
     }
 
+    let rewritten_bytes = rewritten.as_bytes();
+
     unsafe {
         let dst = arg_start as *mut u8;
-        std::ptr::copy_nonoverlapping(rewritten.as_ptr(), dst, rewritten.len());
-        if rewritten.len() < capacity {
-            std::ptr::write_bytes(dst.add(rewritten.len()), 0, capacity - rewritten.len());
-        }
+        std::ptr::copy_nonoverlapping(rewritten_bytes.as_ptr(), dst, rewritten_bytes.len());
+        std::ptr::write_bytes(
+            dst.add(rewritten_bytes.len()),
+            0,
+            first_nul - rewritten_bytes.len() + 1,
+        );
     }
     Ok(())
 }
