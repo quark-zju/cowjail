@@ -64,7 +64,7 @@ impl IntegrationPolicy {
 impl AccessController for IntegrationPolicy {
     fn check(&self, request: &AccessRequest<'_>) -> AccessDecision {
         if request.operation.is_write()
-            && request.caller.process_name.as_deref() != Some(self.allowed_writer.as_str())
+            && request.caller.process_name() != Some(self.allowed_writer.as_str())
         {
             return AccessDecision::Deny(libc::EACCES);
         }

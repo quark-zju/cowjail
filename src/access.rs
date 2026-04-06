@@ -1,15 +1,33 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Caller {
     pub pid: Option<u32>,
-    pub process_name: Option<String>,
+    process_name: Arc<OnceLock<Option<String>>>,
 }
 
 impl Caller {
     pub fn new(pid: Option<u32>, process_name: Option<String>) -> Self {
-        Self { pid, process_name }
+        let process_name_cell = OnceLock::new();
+        if process_name.is_some() || pid.is_none() {
+            let _ = process_name_cell.set(process_name);
+        }
+        Self {
+            pid,
+            process_name: Arc::new(process_name_cell),
+        }
+    }
+
+    pub fn process_name(&self) -> Option<&str> {
+        self.process_name.get().and_then(|name| name.as_deref())
+    }
+
+    pub fn process_name_or_init<F>(&self, init: F) -> Option<&str>
+    where
+        F: FnOnce() -> Option<String>,
+    {
+        self.process_name.get_or_init(init).as_deref()
     }
 }
 
