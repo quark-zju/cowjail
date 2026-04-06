@@ -64,7 +64,7 @@ fn run_namespace_supervisor(
     make_mounts_private()?;
     // Keep new_root as an explicit mountpoint for pivot_root(".", ".").
     ensure_pivot_root_mountpoint(&config.fuse_mount_root)?;
-    apply_mount_plan_before_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan)?;
+    apply_mount_plan_before_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan, gid)?;
     run_pid_namespace_init_and_exec(config, uid, gid)
 }
 
@@ -124,27 +124,35 @@ fn make_mounts_private() -> Result<()> {
 fn apply_mount_plan_before_pid_namespace_init(
     fuse_mount_root: &Path,
     plan: &[MountPlanEntry],
+    gid: libc::gid_t,
 ) -> Result<()> {
-    apply_mount_plan(fuse_mount_root, plan, MountPhase::BeforePidNamespaceInit)
+    apply_mount_plan(
+        fuse_mount_root,
+        plan,
+        MountPhase::BeforePidNamespaceInit,
+        gid,
+    )
 }
 
 fn apply_mount_plan_in_pid_namespace_init(
     fuse_mount_root: &Path,
     plan: &[MountPlanEntry],
+    gid: libc::gid_t,
 ) -> Result<()> {
-    apply_mount_plan(fuse_mount_root, plan, MountPhase::InPidNamespaceInit)
+    apply_mount_plan(fuse_mount_root, plan, MountPhase::InPidNamespaceInit, gid)
 }
 
 fn apply_mount_plan(
     fuse_mount_root: &Path,
     plan: &[MountPlanEntry],
     phase: MountPhase,
+    gid: libc::gid_t,
 ) -> Result<()> {
     for entry in plan {
         if mount_phase_for_entry(entry) != phase {
             continue;
         }
-        if let Err(err) = apply_mount_plan_entry(fuse_mount_root, entry) {
+        if let Err(err) = apply_mount_plan_entry(fuse_mount_root, entry, gid) {
             if is_best_effort_tmp_bind(entry) {
                 warn!("ignoring failed /tmp bind fast path: {err:#}");
                 continue;
@@ -178,7 +186,11 @@ fn is_best_effort_tmp_bind(entry: &MountPlanEntry) -> bool {
     )
 }
 
-fn apply_mount_plan_entry(fuse_mount_root: &Path, entry: &MountPlanEntry) -> Result<()> {
+fn apply_mount_plan_entry(
+    fuse_mount_root: &Path,
+    entry: &MountPlanEntry,
+    gid: libc::gid_t,
+) -> Result<()> {
     let target = mount_target_for_entry(fuse_mount_root, entry)?;
     match entry {
         MountPlanEntry::Bind { path, read_only } => {
@@ -203,7 +215,7 @@ fn apply_mount_plan_entry(fuse_mount_root: &Path, entry: &MountPlanEntry) -> Res
         }
         MountPlanEntry::DevPts { read_only, .. } => {
             ensure_mount_target_type(Path::new("/dev/pts"), &target)?;
-            mount_devpts(&target)?;
+            mount_devpts(&target, gid)?;
             if *read_only {
                 remount_read_only(&target)?;
             }
@@ -397,30 +409,38 @@ fn mount_virtual_fs(source: &str, fstype: &str, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn mount_devpts(target: &Path) -> Result<()> {
+fn mount_devpts(target: &Path, gid: libc::gid_t) -> Result<()> {
     let source_c = CString::new("devpts").expect("literal source does not contain NUL");
     let fstype_c = CString::new("devpts").expect("literal fstype does not contain NUL");
     let target_c = c_path(target).context("devpts target path contains interior NUL byte")?;
-    let opts = CString::new("newinstance,ptmxmode=666,mode=620,gid=5")
-        .expect("literal devpts options do not contain NUL");
-    debug!(
-        "userns-run: syscall mount(devpts, {}, devpts, 0, newinstance,ptmxmode=666,mode=620,gid=5)",
-        target.display()
-    );
-    let rc = unsafe {
-        libc::mount(
-            source_c.as_ptr(),
-            target_c.as_ptr(),
-            fstype_c.as_ptr(),
-            0,
-            opts.as_ptr().cast(),
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("mount devpts failed at {}", target.display()));
+    let options = [
+        format!("newinstance,ptmxmode=666,mode=620,gid={gid}"),
+        "newinstance,ptmxmode=666,mode=620".to_string(),
+    ];
+    let mut last_err = None;
+    for opts in options {
+        let opts_c = CString::new(opts.clone()).expect("literal devpts options do not contain NUL");
+        debug!(
+            "userns-run: syscall mount(devpts, {}, devpts, 0, {})",
+            target.display(),
+            opts
+        );
+        let rc = unsafe {
+            libc::mount(
+                source_c.as_ptr(),
+                target_c.as_ptr(),
+                fstype_c.as_ptr(),
+                0,
+                opts_c.as_ptr().cast(),
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        last_err = Some(std::io::Error::last_os_error());
     }
-    Ok(())
+    let err = last_err.unwrap_or_else(|| std::io::Error::other("unknown devpts mount error"));
+    Err(err).with_context(|| format!("mount devpts failed at {}", target.display()))
 }
 
 fn remount_read_only(target: &Path) -> Result<()> {
@@ -535,7 +555,7 @@ fn run_pid_namespace_init_and_exec(
 
     set_process_name("init")?;
     set_no_new_privs("pidns init")?;
-    apply_mount_plan_in_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan)?;
+    apply_mount_plan_in_pid_namespace_init(&config.fuse_mount_root, &config.mount_plan, gid)?;
     pivot_root_into(&config.fuse_mount_root)?;
     drop_to_target_ids(uid, gid)?;
     chdir_or_root(&config.cwd)?;
