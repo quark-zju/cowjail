@@ -196,7 +196,7 @@ impl<P: AccessController> MirrorFs<P> {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn caller_for_test(process_name: &str) -> Caller {
         Caller::with_process_name(None, Some(process_name.to_owned()))
     }
@@ -223,12 +223,6 @@ impl<P: AccessController> MirrorFs<P> {
             .map(PathBuf::as_path)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn host_path_for_ino(&self, ino: u64) -> Option<&Path> {
-        self.path_for_ino(ino)
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn link_for_test(
         &mut self,
         caller: &Caller,
@@ -327,11 +321,6 @@ impl<P: AccessController> MirrorFs<P> {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn unregister_path_for_test(&mut self, path: &Path) {
-        self.unregister_path(path);
-    }
-
     fn authorize(&self, caller: &Caller, path: &Path, operation: Operation) -> Result<()> {
         let mut caller_condition = caller;
         match self.policy.check(
@@ -427,16 +416,6 @@ impl<P: AccessController> MirrorFs<P> {
         Ok(self.attr_for_path(&path, &metadata))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn getattr_handle_for_test(&mut self, caller: &Caller, fh: u64) -> Result<FileAttr> {
-        let ino = self
-            .handles
-            .get(&fh)
-            .map(|handle| handle.ino)
-            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-        self.getattr_handle(caller, ino, fh)
-    }
-
     pub(crate) fn lookup_child(
         &mut self,
         caller: &Caller,
@@ -449,16 +428,6 @@ impl<P: AccessController> MirrorFs<P> {
         self.authorize(caller, &path, Operation::Lookup)?;
         let metadata = fs::symlink_metadata(&path)?;
         Ok(self.attr_for_path(&path, &metadata))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn list_children_for_test(
-        &mut self,
-        caller: &Caller,
-        path: &Path,
-    ) -> Result<Vec<(u64, FileType, std::ffi::OsString)>> {
-        self.authorize(caller, path, Operation::ReadDir)?;
-        self.list_children(caller, path)
     }
 
     fn list_children(
@@ -481,7 +450,7 @@ impl<P: AccessController> MirrorFs<P> {
         Ok(out)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn open_for_test(
         &mut self,
         caller: &Caller,
@@ -505,22 +474,6 @@ impl<P: AccessController> MirrorFs<P> {
         ensure_openable_node(path)?;
         let file = open_host_file(path, flags, false)?;
         Ok(self.allocate_handle(ino, file, operation.is_write()))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn read_for_test(
-        &mut self,
-        caller: &Caller,
-        fh: u64,
-        offset: i64,
-        size: u32,
-    ) -> Result<Vec<u8>> {
-        let ino = self
-            .handles
-            .get(&fh)
-            .map(|handle| handle.ino)
-            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-        self.read_handle(caller, ino, fh, offset, size)
     }
 
     fn read_handle(
@@ -547,31 +500,6 @@ impl<P: AccessController> MirrorFs<P> {
         let len = file.file.read(&mut buf)?;
         buf.truncate(len);
         Ok(buf)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn dup_handle_for_test(&self, fh: u64) -> Result<fs::File> {
-        let handle = self
-            .handles
-            .get(&fh)
-            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-        Ok(handle.file.try_clone()?)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn write_for_test(
-        &mut self,
-        caller: &Caller,
-        fh: u64,
-        offset: i64,
-        data: &[u8],
-    ) -> Result<u32> {
-        let ino = self
-            .handles
-            .get(&fh)
-            .map(|handle| handle.ino)
-            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?;
-        self.write_handle(caller, ino, fh, offset, data)
     }
 
     fn write_handle(
@@ -654,7 +582,6 @@ impl<P: AccessController> MirrorFs<P> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn release_for_test(&mut self, fh: u64) {
         let Some(handle) = self.handles.remove(&fh) else {
             return;

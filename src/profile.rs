@@ -1051,7 +1051,7 @@ impl ProfileController<RealFsCheck> {
 }
 
 impl<F: FsCheck> ProfileController<F> {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_fs(profile: Profile, fs: F) -> Self {
         Self {
             profile: ArcSwap::from_pointee(profile),
