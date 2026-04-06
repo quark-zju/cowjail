@@ -144,11 +144,14 @@ mod tests {
         reload_profile_with(&controller, || bail!("bad profile syntax"));
 
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &Caller::with_process_name(None, None),
-                path: Path::new("/tmp/file.txt"),
-                operation: Operation::Lookup,
-            }),
+            AccessController::check(
+                &controller,
+                &AccessRequest {
+                    caller: &Caller::with_process_name(None, None),
+                    path: Path::new("/tmp/file.txt"),
+                    operation: Operation::Lookup,
+                }
+            ),
             crate::access::AccessDecision::Allow
         );
     }

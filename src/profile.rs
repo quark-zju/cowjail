@@ -578,9 +578,14 @@ pub struct EvalContext<'a> {
     pub fs: &'a dyn FsCheck,
 }
 
+pub trait CallerCondition {
+    fn exe_match(&mut self, expected: &Path) -> bool;
+    fn env_match(&mut self, name: &str) -> bool;
+}
+
 trait RuntimeEvalContext {
-    fn exe(&mut self) -> Option<&Path>;
-    fn has_env(&mut self, name: &str) -> bool;
+    fn exe_match(&mut self, expected: &Path) -> bool;
+    fn env_match(&mut self, name: &str) -> bool;
     fn fs(&self) -> &dyn FsCheck;
     fn ancestor_has(&mut self, path: &Path, name: &str) -> bool;
 }
@@ -590,11 +595,11 @@ struct StaticRuntimeEvalContext<'a, 'b> {
 }
 
 impl RuntimeEvalContext for StaticRuntimeEvalContext<'_, '_> {
-    fn exe(&mut self) -> Option<&Path> {
-        self.ctx.exe
+    fn exe_match(&mut self, expected: &Path) -> bool {
+        self.ctx.exe == Some(expected)
     }
 
-    fn has_env(&mut self, name: &str) -> bool {
+    fn env_match(&mut self, name: &str) -> bool {
         self.ctx.env.contains_key(name)
     }
 
@@ -632,16 +637,13 @@ impl Rule {
 impl Condition {
     fn matches(&self, path: &Path, ctx: &mut dyn RuntimeEvalContext) -> bool {
         match self {
-            Condition::Exe(resolved) => match (resolved.as_deref(), ctx.exe()) {
-                // Name not found in PATH at parse time → never matches.
-                (None, _) => false,
-                (_, None) => false,
-                (Some(expected), Some(exe)) => exe == expected,
-            },
+            Condition::Exe(resolved) => resolved
+                .as_deref()
+                .is_some_and(|expected| ctx.exe_match(expected)),
 
             Condition::AncestorHas(name) => ctx.ancestor_has(path, name),
 
-            Condition::Env(var) => ctx.has_env(var),
+            Condition::Env(var) => ctx.env_match(var),
         }
     }
 }
@@ -1045,62 +1047,72 @@ fn parse_environ(raw: Vec<u8>) -> HashMap<String, String> {
     out
 }
 
-pub trait CallerDataSource {
-    fn exe(&self, pid: u32) -> Option<PathBuf>;
-    fn env(&self, pid: u32) -> HashMap<String, String>;
+pub struct ProcCallerCondition {
+    pid: Option<u32>,
+    exe_loaded: bool,
+    exe: Option<PathBuf>,
+    env_loaded: bool,
+    env: HashMap<String, String>,
 }
 
-pub struct ProcCallerDataSource;
-
-impl CallerDataSource for ProcCallerDataSource {
-    fn exe(&self, pid: u32) -> Option<PathBuf> {
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-    }
-
-    fn env(&self, pid: u32) -> HashMap<String, String> {
-        std::fs::read(format!("/proc/{pid}/environ"))
-            .map(parse_environ)
-            .unwrap_or_default()
+impl ProcCallerCondition {
+    fn from_pid(pid: Option<u32>) -> Self {
+        Self {
+            pid,
+            exe_loaded: false,
+            exe: None,
+            env_loaded: false,
+            env: HashMap::new(),
+        }
     }
 }
 
-pub struct ProfileController<F = RealFsCheck, C = ProcCallerDataSource> {
+impl CallerCondition for ProcCallerCondition {
+    fn exe_match(&mut self, expected: &Path) -> bool {
+        if !self.exe_loaded {
+            self.exe = self
+                .pid
+                .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok());
+            self.exe_loaded = true;
+        }
+        self.exe.as_deref() == Some(expected)
+    }
+
+    fn env_match(&mut self, name: &str) -> bool {
+        if !self.env_loaded {
+            self.env = self
+                .pid
+                .and_then(|pid| std::fs::read(format!("/proc/{pid}/environ")).ok())
+                .map(parse_environ)
+                .unwrap_or_default();
+            self.env_loaded = true;
+        }
+        self.env.contains_key(name)
+    }
+}
+
+pub struct ProfileController<F = RealFsCheck> {
     profile: ArcSwap<Profile>,
     fs: F,
-    caller_data: C,
     ancestor_has_cache: AncestorHasCache,
 }
 
-impl ProfileController<RealFsCheck, ProcCallerDataSource> {
+impl ProfileController<RealFsCheck> {
     pub fn new(profile: Profile) -> Self {
         Self {
             profile: ArcSwap::from_pointee(profile),
             fs: RealFsCheck,
-            caller_data: ProcCallerDataSource,
             ancestor_has_cache: AncestorHasCache::default(),
         }
     }
 }
 
-impl<F: FsCheck> ProfileController<F, ProcCallerDataSource> {
+impl<F: FsCheck> ProfileController<F> {
     #[allow(dead_code)]
     pub(crate) fn with_fs(profile: Profile, fs: F) -> Self {
         Self {
             profile: ArcSwap::from_pointee(profile),
             fs,
-            caller_data: ProcCallerDataSource,
-            ancestor_has_cache: AncestorHasCache::default(),
-        }
-    }
-}
-
-impl<F: FsCheck, C: CallerDataSource> ProfileController<F, C> {
-    #[allow(dead_code)]
-    pub(crate) fn with_sources(profile: Profile, fs: F, caller_data: C) -> Self {
-        Self {
-            profile: ArcSwap::from_pointee(profile),
-            fs,
-            caller_data,
             ancestor_has_cache: AncestorHasCache::default(),
         }
     }
@@ -1108,21 +1120,16 @@ impl<F: FsCheck, C: CallerDataSource> ProfileController<F, C> {
     pub fn replace_profile(&self, profile: Profile) {
         self.profile.store(Arc::new(profile));
     }
-}
 
-impl<F: FsCheck + Send + Sync + 'static, C: CallerDataSource + Send + Sync + 'static>
-    AccessController for ProfileController<F, C>
-{
-    fn check(&self, request: &AccessRequest<'_>) -> AccessDecision {
+    pub fn check<C: CallerCondition>(
+        &self,
+        request: &AccessRequest<'_>,
+        caller_condition: &mut C,
+    ) -> AccessDecision {
         let mut ctx = LazyRuntimeEvalContext {
-            pid: request.caller.pid,
             fs: &self.fs,
-            caller_data: &self.caller_data,
+            caller_condition,
             ancestor_has_cache: &self.ancestor_has_cache,
-            exe_loaded: false,
-            exe: None,
-            env_loaded: false,
-            env: HashMap::new(),
         };
         let profile = self.profile.load();
         let errno = if request.operation.is_write() {
@@ -1143,6 +1150,13 @@ impl<F: FsCheck + Send + Sync + 'static, C: CallerDataSource + Send + Sync + 'st
             Some(errno) => AccessDecision::Deny(errno),
         }
     }
+}
+
+impl<F: FsCheck + Send + Sync + 'static> AccessController for ProfileController<F> {
+    fn check(&self, request: &AccessRequest<'_>) -> AccessDecision {
+        let mut caller_condition = ProcCallerCondition::from_pid(request.caller.pid);
+        Self::check(self, request, &mut caller_condition)
+    }
 
     fn should_cache_readdir(&self, path: &Path) -> bool {
         let profile = self.profile.load();
@@ -1151,34 +1165,18 @@ impl<F: FsCheck + Send + Sync + 'static, C: CallerDataSource + Send + Sync + 'st
 }
 
 struct LazyRuntimeEvalContext<'a, F, C> {
-    pid: Option<u32>,
     fs: &'a F,
-    caller_data: &'a C,
+    caller_condition: &'a mut C,
     ancestor_has_cache: &'a AncestorHasCache,
-    exe_loaded: bool,
-    exe: Option<PathBuf>,
-    env_loaded: bool,
-    env: HashMap<String, String>,
 }
 
-impl<F: FsCheck, C: CallerDataSource> RuntimeEvalContext for LazyRuntimeEvalContext<'_, F, C> {
-    fn exe(&mut self) -> Option<&Path> {
-        if !self.exe_loaded {
-            self.exe = self.pid.and_then(|pid| self.caller_data.exe(pid));
-            self.exe_loaded = true;
-        }
-        self.exe.as_deref()
+impl<F: FsCheck, C: CallerCondition> RuntimeEvalContext for LazyRuntimeEvalContext<'_, F, C> {
+    fn exe_match(&mut self, expected: &Path) -> bool {
+        self.caller_condition.exe_match(expected)
     }
 
-    fn has_env(&mut self, name: &str) -> bool {
-        if !self.env_loaded {
-            self.env = self
-                .pid
-                .map(|pid| self.caller_data.env(pid))
-                .unwrap_or_default();
-            self.env_loaded = true;
-        }
-        self.env.contains_key(name)
+    fn env_match(&mut self, name: &str) -> bool {
+        self.caller_condition.env_match(name)
     }
 
     fn fs(&self) -> &dyn FsCheck {
@@ -1307,22 +1305,22 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MockCallerDataSource {
+    struct MockCallerCondition {
         exe: Option<PathBuf>,
         env: HashMap<String, String>,
         exe_reads: AtomicUsize,
         env_reads: AtomicUsize,
     }
 
-    impl CallerDataSource for MockCallerDataSource {
-        fn exe(&self, _pid: u32) -> Option<PathBuf> {
+    impl CallerCondition for MockCallerCondition {
+        fn exe_match(&mut self, expected: &Path) -> bool {
             self.exe_reads.fetch_add(1, Ordering::Relaxed);
-            self.exe.clone()
+            self.exe.as_deref() == Some(expected)
         }
 
-        fn env(&self, _pid: u32) -> HashMap<String, String> {
+        fn env_match(&mut self, name: &str) -> bool {
             self.env_reads.fetch_add(1, Ordering::Relaxed);
-            self.env.clone()
+            self.env.contains_key(name)
         }
     }
 
@@ -1442,55 +1440,65 @@ mod tests {
     #[test]
     fn profile_controller_skips_proc_reads_for_unconditional_path_match() {
         let profile = parse_simple("/workspace/project ro\n/workspace/project rw when env=TOKEN\n");
-        let caller_data = MockCallerDataSource::default();
-        let controller =
-            ProfileController::with_sources(profile, MockFsCheck::empty(), caller_data);
+        let controller = ProfileController::with_fs(profile, MockFsCheck::empty());
+        let mut caller_condition = MockCallerCondition::default();
 
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
-                path: Path::new("/workspace/project/file.txt"),
-                operation: Operation::Lookup,
-            }),
+            controller.check(
+                &AccessRequest {
+                    caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
+                    path: Path::new("/workspace/project/file.txt"),
+                    operation: Operation::Lookup,
+                },
+                &mut caller_condition
+            ),
             AccessDecision::Allow
         );
-        assert_eq!(controller.caller_data.exe_reads.load(Ordering::Relaxed), 0);
-        assert_eq!(controller.caller_data.env_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(caller_condition.exe_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(caller_condition.env_reads.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn profile_controller_reads_env_only_when_matching_rule_requires_it() {
         let profile = parse_simple("/workspace/project rw when env=TOKEN\n/workspace/project ro\n");
-        let caller_data = MockCallerDataSource::default();
-        let controller =
-            ProfileController::with_sources(profile, MockFsCheck::empty(), caller_data);
+        let controller = ProfileController::with_fs(profile, MockFsCheck::empty());
+        let mut caller_condition = MockCallerCondition::default();
 
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
-                path: Path::new("/workspace/project/file.txt"),
-                operation: Operation::Lookup,
-            }),
+            controller.check(
+                &AccessRequest {
+                    caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
+                    path: Path::new("/workspace/project/file.txt"),
+                    operation: Operation::Lookup,
+                },
+                &mut caller_condition
+            ),
             AccessDecision::Allow
         );
-        assert_eq!(controller.caller_data.exe_reads.load(Ordering::Relaxed), 0);
-        assert_eq!(controller.caller_data.env_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(caller_condition.exe_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(caller_condition.env_reads.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn profile_controller_caches_positive_ancestor_has_across_checks() {
         let profile = parse_simple("/repo rw when ancestor-has=.git\n/repo ro\n");
         let (fs, exists_reads) = CountingFsCheck::new(&["/repo/.git"]);
-        let controller =
-            ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
+        let controller = ProfileController::with_fs(profile, fs);
+        let mut caller_condition = MockCallerCondition::default();
         let request = AccessRequest {
             caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
             path: Path::new("/repo/src/main.rs"),
             operation: Operation::Lookup,
         };
 
-        assert_eq!(controller.check(&request), AccessDecision::Allow);
-        assert_eq!(controller.check(&request), AccessDecision::Allow);
+        assert_eq!(
+            controller.check(&request, &mut caller_condition),
+            AccessDecision::Allow
+        );
+        assert_eq!(
+            controller.check(&request, &mut caller_condition),
+            AccessDecision::Allow
+        );
 
         // first check probes /repo/src/.git then /repo/.git; second check hits cache.
         assert_eq!(exists_reads.load(Ordering::Relaxed), 2);
@@ -1500,16 +1508,22 @@ mod tests {
     fn profile_controller_caches_negative_ancestor_has_across_checks() {
         let profile = parse_simple("/repo rw when ancestor-has=.git\n/repo ro\n");
         let (fs, exists_reads) = CountingFsCheck::new(&[]);
-        let controller =
-            ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
+        let controller = ProfileController::with_fs(profile, fs);
+        let mut caller_condition = MockCallerCondition::default();
         let request = AccessRequest {
             caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
             path: Path::new("/repo/src/main.rs"),
             operation: Operation::Lookup,
         };
 
-        assert_eq!(controller.check(&request), AccessDecision::Allow);
-        assert_eq!(controller.check(&request), AccessDecision::Allow);
+        assert_eq!(
+            controller.check(&request, &mut caller_condition),
+            AccessDecision::Allow
+        );
+        assert_eq!(
+            controller.check(&request, &mut caller_condition),
+            AccessDecision::Allow
+        );
 
         // first check probes /repo/src/.git, /repo/.git, /.git; second check hits negative cache.
         assert_eq!(exists_reads.load(Ordering::Relaxed), 3);
@@ -1519,27 +1533,33 @@ mod tests {
     fn ancestor_negative_cache_does_not_shadow_deeper_positive_ancestor() {
         let profile = parse_simple("/project rw when ancestor-has=.git\n/project ro\n");
         let (fs, exists_reads) = CountingFsCheck::new(&["/project/repo/.git"]);
-        let controller =
-            ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
+        let controller = ProfileController::with_fs(profile, fs);
+        let mut caller_condition = MockCallerCondition::default();
         let caller = Caller::with_process_name(Some(123), Some("test".to_owned()));
 
         // Prime negative cache at /project and / with a path outside the git repo.
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &caller,
-                path: Path::new("/project/other/file.txt"),
-                operation: Operation::Lookup,
-            }),
+            controller.check(
+                &AccessRequest {
+                    caller: &caller,
+                    path: Path::new("/project/other/file.txt"),
+                    operation: Operation::Lookup,
+                },
+                &mut caller_condition
+            ),
             AccessDecision::Allow
         );
 
         // A deeper path with /project/repo/.git must still be writable.
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &caller,
-                path: Path::new("/project/repo/src/file.txt"),
-                operation: Operation::Create,
-            }),
+            controller.check(
+                &AccessRequest {
+                    caller: &caller,
+                    path: Path::new("/project/repo/src/file.txt"),
+                    operation: Operation::Create,
+                },
+                &mut caller_condition
+            ),
             AccessDecision::Allow
         );
         assert_eq!(exists_reads.load(Ordering::Relaxed), 5);
@@ -1547,30 +1567,36 @@ mod tests {
 
     #[test]
     fn profile_controller_replace_profile_updates_access_decisions() {
-        let controller = ProfileController::with_sources(
+        let controller = ProfileController::with_fs(
             parse_simple("/workspace/project ro\n"),
             MockFsCheck::empty(),
-            MockCallerDataSource::default(),
         );
+        let mut caller_condition = MockCallerCondition::default();
         let caller = Caller::with_process_name(Some(123), Some("test".to_owned()));
 
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &caller,
-                path: Path::new("/workspace/project/file.txt"),
-                operation: Operation::Create,
-            }),
+            controller.check(
+                &AccessRequest {
+                    caller: &caller,
+                    path: Path::new("/workspace/project/file.txt"),
+                    operation: Operation::Create,
+                },
+                &mut caller_condition
+            ),
             AccessDecision::Deny(EACCES)
         );
 
         controller.replace_profile(parse_simple("/workspace/project rw\n"));
 
         assert_eq!(
-            controller.check(&AccessRequest {
-                caller: &caller,
-                path: Path::new("/workspace/project/file.txt"),
-                operation: Operation::Create,
-            }),
+            controller.check(
+                &AccessRequest {
+                    caller: &caller,
+                    path: Path::new("/workspace/project/file.txt"),
+                    operation: Operation::Create,
+                },
+                &mut caller_condition
+            ),
             AccessDecision::Allow
         );
     }
