@@ -9,12 +9,16 @@ use fs_err as fs;
 
 use crate::cli::{ProfileAction, ProfileCommand};
 use crate::fuse_runtime;
+use crate::profile::{
+    EvalContext, ExeResolver, FsCheck, PathExeResolver, RealFsCheck, RuleMatchKind, Visibility,
+};
 use crate::profile_store;
 
 pub(crate) fn profile_command(command: ProfileCommand) -> Result<()> {
     match command.action {
         ProfileAction::Show => show_profile(),
         ProfileAction::Edit => edit_profile(),
+        ProfileAction::Test { path, exe } => test_profile_path(&path, exe.as_deref()),
     }
 }
 
@@ -78,6 +82,86 @@ fn write_temp_profile(content: &str) -> Result<PathBuf> {
     file.write_all(content.as_bytes())
         .with_context(|| format!("failed to seed temporary profile {}", path.display()))?;
     Ok(path)
+}
+
+fn test_profile_path(path: &Path, exe: Option<&str>) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let profile = profile_store::load_default_profile(&cwd)?;
+    let fs = RealFsCheck;
+    let env = std::collections::HashMap::new();
+    let exe_path = resolve_test_exe(exe)?;
+    let ctx = EvalContext {
+        exe: exe_path.as_deref(),
+        env: &env,
+        fs: &fs,
+    };
+
+    let report = profile.rule_match_report(path, &ctx);
+    println!("path: {}", path.display());
+    match exe_path.as_deref() {
+        Some(exe_path) => println!("exe: {}", exe_path.display()),
+        None => println!("exe: <none>"),
+    }
+    println!("visibility: {}", format_visibility(report.visibility));
+    println!("effective_action: {}", report.effective_action);
+    if fs.is_dir(path) {
+        println!("readdir_cache: {}", profile.should_cache_readdir(path));
+    } else {
+        println!("readdir_cache: n/a (path is not a directory)");
+    }
+
+    println!("matches:");
+    if report.entries.is_empty() {
+        println!("  (none)");
+        return Ok(());
+    }
+    for entry in report.entries {
+        let kind = match entry.kind {
+            RuleMatchKind::Explicit => "explicit",
+            RuleMatchKind::ImplicitAncestor => "implicit-ancestor",
+        };
+        let status = if entry.conditions_matched {
+            "matched"
+        } else {
+            "conditions-failed"
+        };
+        println!(
+            "  [rule {}] {} {} kind={} status={} exe_condition={}",
+            entry.rule_index + 1,
+            entry.pattern,
+            entry.action,
+            kind,
+            status,
+            entry.has_exe_condition
+        );
+    }
+
+    Ok(())
+}
+
+fn resolve_test_exe(exe: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(exe) = exe else {
+        return Ok(None);
+    };
+    if exe.starts_with('/') {
+        return Ok(Some(PathBuf::from(exe)));
+    }
+    if exe.contains('/') {
+        bail!("--exe must be a bare name or an absolute path");
+    }
+    let resolver = PathExeResolver;
+    let resolved = resolver
+        .resolve(exe)
+        .ok_or_else(|| anyhow::anyhow!("--exe bare name not found in PATH: {exe}"))?;
+    Ok(Some(resolved))
+}
+
+fn format_visibility(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Action(_) => "action",
+        Visibility::ImplicitAncestor => "implicit-ancestor",
+        Visibility::Hidden => "hidden",
+    }
 }
 
 fn temp_profile_path() -> PathBuf {

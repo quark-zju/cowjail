@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use pico_args::Arguments;
@@ -46,6 +47,7 @@ pub struct TailCommand {
 pub enum ProfileAction {
     Show,
     Edit,
+    Test { path: PathBuf, exe: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,16 +131,62 @@ fn parse_rules(mut args: Arguments) -> Result<Command> {
     if args.contains(["-h", "--help"]) {
         return Ok(help_command(HelpTopic::Rules, false));
     }
-    let extra = args.finish();
-    if extra.len() != 1 {
-        bail!("rules requires subcommand: show or edit");
-    }
-    let subcmd = extra[0]
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("rules subcommand must be valid UTF-8"))?;
-    let action = match subcmd {
-        "show" => ProfileAction::Show,
-        "edit" => ProfileAction::Edit,
+    let Some(subcmd) = args.subcommand()? else {
+        bail!("rules requires subcommand: show, edit, or test");
+    };
+    let action = match subcmd.as_str() {
+        "show" => {
+            if !args.finish().is_empty() {
+                bail!("rules show got unexpected trailing arguments");
+            }
+            ProfileAction::Show
+        }
+        "edit" => {
+            if !args.finish().is_empty() {
+                bail!("rules edit got unexpected trailing arguments");
+            }
+            ProfileAction::Edit
+        }
+        "test" => {
+            let mut exe: Option<String> = None;
+            let mut path: Option<PathBuf> = None;
+            let extra = args.finish();
+            let mut i = 0;
+            while i < extra.len() {
+                let token = &extra[i];
+                let token_str = token
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("rules test arguments must be valid UTF-8"))?;
+                if let Some(value) = token_str.strip_prefix("--exe=") {
+                    if exe.replace(value.to_owned()).is_some() {
+                        bail!("rules test got duplicate --exe option");
+                    }
+                    i += 1;
+                    continue;
+                }
+                if token_str == "--exe" {
+                    let Some(value) = extra.get(i + 1) else {
+                        bail!("rules test --exe requires a value");
+                    };
+                    let value = value.to_str().ok_or_else(|| {
+                        anyhow::anyhow!("rules test --exe value must be valid UTF-8")
+                    })?;
+                    if exe.replace(value.to_owned()).is_some() {
+                        bail!("rules test got duplicate --exe option");
+                    }
+                    i += 2;
+                    continue;
+                }
+                if path.replace(PathBuf::from(token.clone())).is_some() {
+                    bail!("rules test requires exactly one PATH argument");
+                }
+                i += 1;
+            }
+            let Some(path) = path else {
+                bail!("rules test requires exactly one PATH argument");
+            };
+            ProfileAction::Test { path, exe }
+        }
         other => bail!("unknown rules subcommand: {other}"),
     };
     Ok(Command::Profile(ProfileCommand { action }))
@@ -263,6 +311,28 @@ mod tests {
             parse_from(os(&["rules", "edit"])).expect("parse"),
             Command::Profile(ProfileCommand {
                 action: ProfileAction::Edit,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_rules_test_with_optional_exe() {
+        assert_eq!(
+            parse_from(os(&["rules", "test", "/tmp"])).expect("parse"),
+            Command::Profile(ProfileCommand {
+                action: ProfileAction::Test {
+                    path: PathBuf::from("/tmp"),
+                    exe: None,
+                },
+            })
+        );
+        assert_eq!(
+            parse_from(os(&["rules", "test", "--exe=git", "/tmp"])).expect("parse"),
+            Command::Profile(ProfileCommand {
+                action: ProfileAction::Test {
+                    path: PathBuf::from("/tmp"),
+                    exe: Some("git".to_owned()),
+                },
             })
         );
     }
