@@ -7,7 +7,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -92,13 +92,13 @@ struct BrokerFileState {
 }
 
 struct FuseMirrorFs<P> {
-    inner: Mutex<MirrorFs<P>>,
+    inner: RwLock<MirrorFs<P>>,
 }
 
 impl<P> FuseMirrorFs<P> {
     fn new(inner: MirrorFs<P>) -> Self {
         Self {
-            inner: Mutex::new(inner),
+            inner: RwLock::new(inner),
         }
     }
 }
@@ -166,6 +166,7 @@ impl<P: AccessController> MirrorFs<P> {
         let options = fuse_mount_options();
         let mut config = Config::default();
         config.mount_options = options;
+        config.n_threads = Some(2);
         fuser::mount2(FuseMirrorFs::new(self), mountpoint, &config).with_context(|| {
             format!(
                 "failed to mount mirror filesystem at {}",
@@ -178,6 +179,7 @@ impl<P: AccessController> MirrorFs<P> {
         let options = fuse_mount_options();
         let mut config = Config::default();
         config.mount_options = options;
+        config.n_threads = Some(2);
         fuser::spawn_mount2(FuseMirrorFs::new(self), mountpoint, &config).with_context(|| {
             format!(
                 "failed to mount mirror filesystem in background at {}",
@@ -1106,7 +1108,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let lookup_path = fs
             .path_for_ino(parent.0)
             .map(Path::to_path_buf)
@@ -1127,13 +1129,13 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         fs.forget_ino(ino.0, nlookup);
     }
 
     fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let result = match fh {
             Some(fh) => fs.getattr_handle(&caller, ino.0, fh.0),
             None => match fs.path_for_ino(ino.0).map(Path::to_path_buf) {
@@ -1163,7 +1165,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         mut reply: ReplyDirectory,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1220,7 +1222,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1248,7 +1250,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         let result = (|| -> Result<u64> {
             let path = fs
@@ -1290,7 +1292,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyData,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         match fs.read_handle(&caller, ino.0, fh.0, offset as i64, size) {
             Ok(data) => reply.data(&data),
             Err(err) => reply.error(Errno::from_i32(io_errno(&err))),
@@ -1299,7 +1301,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn readlink(&self, req: &Request, ino: INodeNo, reply: ReplyData) {
         let caller = caller_from_request(req);
-        let fs = self.inner.lock().unwrap();
+        let fs = self.inner.read().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1325,7 +1327,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyCreate,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(parent_path) = fs.path_for_ino(parent.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1383,7 +1385,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyWrite,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match fs.write_handle(&caller, ino.0, fh.0, offset as i64, data) {
             Ok(len) => reply.written(len),
@@ -1411,7 +1413,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEmpty,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         match fs.flush_for_test(&caller, fh.0) {
             Ok(()) => match fs.release_lock_owner_for_fuse(ino.0, lock_owner) {
                 Ok(()) => reply.ok(),
@@ -1431,7 +1433,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         fs.release_for_test(fh.0);
         match lock_owner {
             Some(lock_owner) => match fs.release_lock_owner_for_fuse(ino.0, lock_owner) {
@@ -1451,7 +1453,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEmpty,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let result = (|| -> std::io::Result<()> {
             let ino = fs
                 .handles
@@ -1488,7 +1490,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEntry,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(parent_path) = fs.path_for_ino(parent.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1520,7 +1522,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(path) = fs.resolve_child(parent.0, name) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1548,7 +1550,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(path) = fs.resolve_child(parent.0, name) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1580,7 +1582,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEntry,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(path) = fs.resolve_child(parent.0, name) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1616,7 +1618,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEntry,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(newparent_path) = fs.path_for_ino(newparent.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1653,7 +1655,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEmpty,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(from) = fs.resolve_child(parent.0, name) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1702,7 +1704,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             return;
         }
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1726,7 +1728,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn access(&self, req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
         let caller = caller_from_request(req);
-        let fs = self.inner.lock().unwrap();
+        let fs = self.inner.read().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1739,7 +1741,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn statfs(&self, req: &Request, ino: INodeNo, reply: ReplyStatfs) {
         let caller = caller_from_request(req);
-        let fs = self.inner.lock().unwrap();
+        let fs = self.inner.read().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1761,7 +1763,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
     fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
         let caller = caller_from_request(req);
-        let fs = self.inner.lock().unwrap();
+        let fs = self.inner.read().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1809,7 +1811,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEmpty,
     ) {
         let caller = caller_from_request(req);
-        let fs = self.inner.lock().unwrap();
+        let fs = self.inner.read().unwrap();
         let Some(path) = fs.path_for_ino(ino.0).map(Path::to_path_buf) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1844,7 +1846,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyLock,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match fs.getlk_for_fuse(&caller, ino.0, fh.0, lock_owner, start, end, typ) {
             Ok((start, end, typ, pid)) => {
@@ -1889,7 +1891,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
         reply: ReplyEmpty,
     ) {
         let caller = caller_from_request(req);
-        let mut fs = self.inner.lock().unwrap();
+        let mut fs = self.inner.write().unwrap();
         let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match fs.setlk_for_fuse(&caller, ino.0, fh.0, lock_owner, start, end, typ, sleep) {
             Ok(()) => {
