@@ -10,6 +10,7 @@
     rust_2018_idioms,
     unreachable_pub
 )]
+#![allow(dead_code)]
 
 use std::cmp::max;
 use std::cmp::min;
