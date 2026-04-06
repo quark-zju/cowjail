@@ -1,4 +1,5 @@
 use parking_lot::RwLock;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsStr};
 use std::fs::Metadata;
@@ -325,8 +326,9 @@ impl<P: AccessController> MirrorFs<P> {
     }
 
     fn authorize(&self, caller: &Caller, path: &Path, operation: Operation) -> Result<()> {
+        let caller_for_policy = caller_for_policy(caller, operation);
         match self.policy.check(&AccessRequest {
-            caller,
+            caller: &caller_for_policy,
             path,
             operation,
         }) {
@@ -336,8 +338,9 @@ impl<P: AccessController> MirrorFs<P> {
     }
 
     fn authorize_errno(&self, caller: &Caller, path: &Path, operation: Operation) -> Option<i32> {
+        let caller_for_policy = caller_for_policy(caller, operation);
         match self.policy.check(&AccessRequest {
-            caller,
+            caller: &caller_for_policy,
             path,
             operation,
         }) {
@@ -1932,9 +1935,17 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 
 fn caller_from_request(req: &Request) -> Caller {
     let pid = req.pid();
-    let process_name = read_process_name(pid);
-    debug!("mirrorfs request pid={} comm={:?}", pid, process_name);
-    Caller::new(Some(pid), process_name)
+    debug!("mirrorfs request pid={}", pid);
+    // Defer process-name probing from the request hot path.
+    Caller::new(Some(pid), None)
+}
+
+fn caller_for_policy<'a>(caller: &'a Caller, operation: Operation) -> Cow<'a, Caller> {
+    if !operation.is_write() || caller.process_name.is_some() {
+        return Cow::Borrowed(caller);
+    }
+    let process_name = caller.pid.and_then(read_process_name);
+    Cow::Owned(Caller::new(caller.pid, process_name))
 }
 
 fn read_process_name(pid: u32) -> Option<String> {
