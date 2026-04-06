@@ -394,6 +394,7 @@ impl Profile {
     fn readdir_self_visibility_is_exe_stable(&self, path: &Path) -> bool {
         let mut has_exe_visible_rule = false;
         let mut first_non_exe_action = None;
+        let mut first_non_exe_rule_index = None;
         let mut last_rule_index = None;
         for rule_index in self
             .match_globset
@@ -419,6 +420,7 @@ impl Profile {
                 continue;
             }
             first_non_exe_action = Some(rule.action);
+            first_non_exe_rule_index = Some(rule_index);
             break;
         }
 
@@ -427,9 +429,37 @@ impl Profile {
                 .map(Action::allows_visible_descendants)
                 .unwrap_or(false);
         }
+        if matches!(first_non_exe_action, Some(Action::Hide | Action::Deny)) {
+            return first_non_exe_rule_index.is_some_and(|rule_index| {
+                self.has_unconditional_implicit_ancestor_before_explicit(path, rule_index)
+            });
+        }
         first_non_exe_action
             .map(Action::allows_visible_descendants)
             .unwrap_or(true)
+    }
+
+    fn has_unconditional_implicit_ancestor_before_explicit(
+        &self,
+        path: &Path,
+        explicit_rule_index: usize,
+    ) -> bool {
+        for matched_idx in self.match_globset.matches(path) {
+            let matched = &self.match_entries[matched_idx];
+            if matched.kind == InternalRuleKind::Explicit
+                && matched.original_rule_index == explicit_rule_index
+            {
+                break;
+            }
+            if matched.kind == InternalRuleKind::ImplicitAncestor
+                && self.rules[matched.original_rule_index]
+                    .conditions
+                    .is_empty()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn rule_match_report(&self, path: &Path, ctx: &EvalContext<'_>) -> RuleMatchReport {
@@ -1979,6 +2009,9 @@ mod tests {
 
         let case7 = parse_simple("/a deny\n");
         assert!(!case7.should_cache_readdir(Path::new("/a")));
+
+        let case8 = parse_simple("/a/b ro\n/a hide\n");
+        assert!(case8.should_cache_readdir(Path::new("/a")));
     }
 
     #[test]
