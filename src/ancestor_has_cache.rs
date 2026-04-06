@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const DEFAULT_TTL: Duration = Duration::from_secs(1);
 const DEFAULT_NEGATIVE_DEPTH: usize = 3;
+const DEFAULT_MAX_ENTRIES: usize = 16_384;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -14,7 +16,9 @@ struct CacheEntry {
 pub struct AncestorHasCache {
     ttl: Duration,
     negative_depth: usize,
+    max_entries: usize,
     entries: papaya::HashMap<String, papaya::HashMap<PathBuf, CacheEntry>>,
+    entry_count: AtomicUsize,
 }
 
 impl Default for AncestorHasCache {
@@ -25,10 +29,16 @@ impl Default for AncestorHasCache {
 
 impl AncestorHasCache {
     pub fn new(ttl: Duration, negative_depth: usize) -> Self {
+        Self::with_limits(ttl, negative_depth, DEFAULT_MAX_ENTRIES)
+    }
+
+    pub fn with_limits(ttl: Duration, negative_depth: usize, max_entries: usize) -> Self {
         Self {
             ttl,
             negative_depth,
+            max_entries,
             entries: papaya::HashMap::new(),
+            entry_count: AtomicUsize::new(0),
         }
     }
 
@@ -38,6 +48,10 @@ impl AncestorHasCache {
 
     pub fn negative_depth(&self) -> usize {
         self.negative_depth
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
     }
 
     /// Looks up a cached ancestor-has decision for `path`.
@@ -96,7 +110,19 @@ impl AncestorHasCache {
         let entry = CacheEntry { value, expires_at };
         let names = self.entries.pin();
         let per_name = names.get_or_insert_with(name.to_owned(), papaya::HashMap::new);
-        per_name.pin().insert(path.to_path_buf(), entry);
+        let replaced = per_name.pin().insert(path.to_path_buf(), entry).is_some();
+        if !replaced {
+            let size = self.entry_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if size > self.max_entries {
+                names.clear();
+                self.entry_count.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn entry_count_for_test(&self) -> usize {
+        self.entry_count.load(Ordering::Relaxed)
     }
 }
 
@@ -194,5 +220,22 @@ mod tests {
             cache.lookup(".marker", Path::new("/any/deep/path/file"), now),
             Some(true)
         );
+    }
+
+    #[test]
+    fn clears_all_entries_when_size_exceeds_limit() {
+        let cache = AncestorHasCache::with_limits(Duration::from_secs(10), 3, 2);
+        let now = t0();
+
+        cache.record_positive(".git", Path::new("/repo/a"), now);
+        cache.record_positive(".git", Path::new("/repo/b"), now);
+        assert_eq!(cache.entry_count_for_test(), 2);
+
+        // third unique insert exceeds max_entries and clears all cached entries.
+        cache.record_positive(".git", Path::new("/repo/c"), now);
+        assert_eq!(cache.entry_count_for_test(), 0);
+        assert_eq!(cache.lookup(".git", Path::new("/repo/a/file"), now), None);
+        assert_eq!(cache.lookup(".git", Path::new("/repo/b/file"), now), None);
+        assert_eq!(cache.lookup(".git", Path::new("/repo/c/file"), now), None);
     }
 }
