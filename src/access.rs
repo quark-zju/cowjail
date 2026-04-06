@@ -1,33 +1,39 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Debug, Clone)]
+pub type ProcessNameGetter = fn(u32) -> Option<String>;
+
+#[derive(Debug)]
 pub struct Caller {
     pub pid: Option<u32>,
-    process_name: Arc<OnceLock<Option<String>>>,
+    process_name: OnceLock<Option<String>>,
+    get_name: ProcessNameGetter,
 }
 
 impl Caller {
-    pub fn new(pid: Option<u32>, process_name: Option<String>) -> Self {
-        let process_name_cell = OnceLock::new();
-        if process_name.is_some() || pid.is_none() {
-            let _ = process_name_cell.set(process_name);
-        }
+    pub fn new(pid: Option<u32>, get_name: ProcessNameGetter) -> Self {
         Self {
             pid,
-            process_name: Arc::new(process_name_cell),
+            process_name: OnceLock::new(),
+            get_name,
+        }
+    }
+
+    pub fn with_process_name(pid: Option<u32>, process_name: Option<String>) -> Self {
+        let process_name_cell = OnceLock::new();
+        let _ = process_name_cell.set(process_name);
+        Self {
+            pid,
+            process_name: process_name_cell,
+            get_name: |_| None,
         }
     }
 
     pub fn process_name(&self) -> Option<&str> {
-        self.process_name.get().and_then(|name| name.as_deref())
-    }
-
-    pub fn process_name_or_init<F>(&self, init: F) -> Option<&str>
-    where
-        F: FnOnce() -> Option<String>,
-    {
-        self.process_name.get_or_init(init).as_deref()
+        let pid = self.pid?;
+        self.process_name
+            .get_or_init(|| (self.get_name)(pid))
+            .as_deref()
     }
 }
 

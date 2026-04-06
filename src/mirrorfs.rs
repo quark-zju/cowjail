@@ -198,7 +198,7 @@ impl<P: AccessController> MirrorFs<P> {
 
     #[allow(dead_code)]
     pub(crate) fn caller_for_test(process_name: &str) -> Caller {
-        Caller::new(None, Some(process_name.to_owned()))
+        Caller::with_process_name(None, Some(process_name.to_owned()))
     }
 
     pub(crate) fn ensure_ino(&mut self, path: &Path) -> u64 {
@@ -333,9 +333,6 @@ impl<P: AccessController> MirrorFs<P> {
     }
 
     fn authorize(&self, caller: &Caller, path: &Path, operation: Operation) -> Result<()> {
-        if operation.is_write() {
-            let _ = caller.process_name_or_init(|| caller.pid.and_then(read_process_name));
-        }
         match self.policy.check(&AccessRequest {
             caller,
             path,
@@ -347,9 +344,6 @@ impl<P: AccessController> MirrorFs<P> {
     }
 
     fn authorize_errno(&self, caller: &Caller, path: &Path, operation: Operation) -> Option<i32> {
-        if operation.is_write() {
-            let _ = caller.process_name_or_init(|| caller.pid.and_then(read_process_name));
-        }
         match self.policy.check(&AccessRequest {
             caller,
             path,
@@ -1962,8 +1956,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
 fn caller_from_request(req: &Request) -> Caller {
     let pid = req.pid();
     debug!("mirrorfs request pid={}", pid);
-    // Defer process-name probing from the request hot path.
-    Caller::new(Some(pid), None)
+    Caller::new(Some(pid), read_process_name)
 }
 
 fn read_process_name(pid: u32) -> Option<String> {

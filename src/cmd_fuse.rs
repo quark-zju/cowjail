@@ -145,7 +145,7 @@ mod tests {
 
         assert_eq!(
             controller.check(&AccessRequest {
-                caller: &Caller::new(None, None),
+                caller: &Caller::with_process_name(None, None),
                 path: Path::new("/tmp/file.txt"),
                 operation: Operation::Lookup,
             }),

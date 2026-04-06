@@ -1448,7 +1448,7 @@ mod tests {
 
         assert_eq!(
             controller.check(&AccessRequest {
-                caller: &Caller::new(Some(123), Some("test".to_owned())),
+                caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
                 path: Path::new("/workspace/project/file.txt"),
                 operation: Operation::Lookup,
             }),
@@ -1467,7 +1467,7 @@ mod tests {
 
         assert_eq!(
             controller.check(&AccessRequest {
-                caller: &Caller::new(Some(123), Some("test".to_owned())),
+                caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
                 path: Path::new("/workspace/project/file.txt"),
                 operation: Operation::Lookup,
             }),
@@ -1484,7 +1484,7 @@ mod tests {
         let controller =
             ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
         let request = AccessRequest {
-            caller: &Caller::new(Some(123), Some("test".to_owned())),
+            caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
             path: Path::new("/repo/src/main.rs"),
             operation: Operation::Lookup,
         };
@@ -1503,7 +1503,7 @@ mod tests {
         let controller =
             ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
         let request = AccessRequest {
-            caller: &Caller::new(Some(123), Some("test".to_owned())),
+            caller: &Caller::with_process_name(Some(123), Some("test".to_owned())),
             path: Path::new("/repo/src/main.rs"),
             operation: Operation::Lookup,
         };
@@ -1521,7 +1521,7 @@ mod tests {
         let (fs, exists_reads) = CountingFsCheck::new(&["/project/repo/.git"]);
         let controller =
             ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
-        let caller = Caller::new(Some(123), Some("test".to_owned()));
+        let caller = Caller::with_process_name(Some(123), Some("test".to_owned()));
 
         // Prime negative cache at /project and / with a path outside the git repo.
         assert_eq!(
@@ -1552,7 +1552,7 @@ mod tests {
             MockFsCheck::empty(),
             MockCallerDataSource::default(),
         );
-        let caller = Caller::new(Some(123), Some("test".to_owned()));
+        let caller = Caller::with_process_name(Some(123), Some("test".to_owned()));
 
         assert_eq!(
             controller.check(&AccessRequest {
