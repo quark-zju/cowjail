@@ -14,6 +14,7 @@ Read `README.md` to understand project overview.
 
 - Always run `cargo fmt` before committing.
 
-## Codex Environment Note
+## Sandbox Environment Note
 
-- In the Codex environment, running tests or related commands may require permission escalation.
+- In the Codex environment, running integration tests or benchmark (`make bench`) may require permission escalation.
+- In the `leash` environment (`findmnt /` shows `leash-mirror`), integration tests are unavailable due to the lack of `/dev/fuse`.
