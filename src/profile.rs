@@ -1340,6 +1340,36 @@ mod tests {
     }
 
     #[test]
+    fn ancestor_negative_cache_does_not_shadow_deeper_positive_ancestor() {
+        let profile = parse_simple("/project rw when ancestor-has=.git\n/project ro\n");
+        let (fs, exists_reads) = CountingFsCheck::new(&["/project/repo/.git"]);
+        let controller =
+            ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
+        let caller = Caller::new(Some(123), Some("test".to_owned()));
+
+        // Prime negative cache at /project and / with a path outside the git repo.
+        assert_eq!(
+            controller.check(&AccessRequest {
+                caller: &caller,
+                path: Path::new("/project/other/file.txt"),
+                operation: Operation::Lookup,
+            }),
+            AccessDecision::Allow
+        );
+
+        // A deeper path with /project/repo/.git must still be writable.
+        assert_eq!(
+            controller.check(&AccessRequest {
+                caller: &caller,
+                path: Path::new("/project/repo/src/file.txt"),
+                operation: Operation::Create,
+            }),
+            AccessDecision::Allow
+        );
+        assert_eq!(exists_reads.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
     fn profile_controller_replace_profile_updates_access_decisions() {
         let controller = ProfileController::with_sources(
             parse_simple("/workspace/project ro\n"),

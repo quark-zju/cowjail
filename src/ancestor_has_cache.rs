@@ -71,7 +71,15 @@ impl AncestorHasCache {
         while let Some(dir) = current {
             if let Some(entry) = per_name.get(dir) {
                 if entry.expires_at > now {
-                    return Some(entry.value);
+                    if entry.value {
+                        return Some(true);
+                    }
+                    // Negative entries are only safe to reuse for the exact
+                    // queried parent directory. Reusing ancestor negatives for
+                    // deeper paths can produce false negatives.
+                    if dir == parent {
+                        return Some(false);
+                    }
                 }
             }
             current = dir.parent();
@@ -237,5 +245,17 @@ mod tests {
         assert_eq!(cache.lookup(".git", Path::new("/repo/a/file"), now), None);
         assert_eq!(cache.lookup(".git", Path::new("/repo/b/file"), now), None);
         assert_eq!(cache.lookup(".git", Path::new("/repo/c/file"), now), None);
+    }
+
+    #[test]
+    fn ancestor_negative_is_not_reused_for_deeper_parent() {
+        let cache = AncestorHasCache::new(Duration::from_secs(10), 3);
+        let now = t0();
+
+        cache.record_negative(".git", Path::new("/a/b"), now);
+        assert_eq!(
+            cache.lookup(".git", Path::new("/a/b/c/file.txt"), now),
+            None
+        );
     }
 }
