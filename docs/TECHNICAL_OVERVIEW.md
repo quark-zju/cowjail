@@ -71,6 +71,21 @@ paths when the source exists and is a character device or directory.
 Missing `/dev` bind sources are skipped so environments with a reduced `/dev`
 layout, such as some `bwrap` setups, remain usable.
 
+PTY paths are special-cased:
+
+- `/dev/pts` is mounted as a fresh `devpts` instance in the run namespace
+  instead of being bind-mounted from the host
+- `/dev/ptmx` is then bind-mounted from the namespace-local `/dev/pts/ptmx`
+- mount-plan ordering is normalized so `/dev/pts` is applied before `/dev/ptmx`
+
+This avoids host/jail PTY wiring mismatches where `stat("/dev/ptmx")` succeeds
+but `open("/dev/ptmx")` fails with `ENOENT` because the visible `ptmx` node is
+not attached to a usable `devpts` instance for that namespace.
+
+For compatibility in user namespaces, `devpts` mount options use the current
+mapped GID first and fall back to an option set without `gid=...` if the kernel
+rejects the explicit group mapping.
+
 `/proc` is mounted inside the child PID namespace after the PID namespace fork.
 
 `/sys` is not mounted specially anymore; access goes through the FUSE mirror
