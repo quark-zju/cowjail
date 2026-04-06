@@ -1,6 +1,8 @@
 #![allow(unused)]
 #[path = "../src/access.rs"]
 mod access;
+#[path = "../src/ancestor_has_cache.rs"]
+mod ancestor_has_cache;
 #[path = "../src/fuse_runtime.rs"]
 mod fuse_runtime;
 #[path = "../src/mirrorfs.rs"]

@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use libc::{EACCES, ENOENT, EPERM};
@@ -33,6 +34,7 @@ use libc::{EACCES, ENOENT, EPERM};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::access::{AccessController, AccessDecision, AccessRequest};
+use crate::ancestor_has_cache::AncestorHasCache;
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
@@ -425,6 +427,7 @@ trait RuntimeEvalContext {
     fn exe(&mut self) -> Option<&Path>;
     fn has_env(&mut self, name: &str) -> bool;
     fn fs(&self) -> &dyn FsCheck;
+    fn ancestor_has(&mut self, path: &Path, name: &str) -> bool;
 }
 
 struct StaticRuntimeEvalContext<'a, 'b> {
@@ -442,6 +445,10 @@ impl RuntimeEvalContext for StaticRuntimeEvalContext<'_, '_> {
 
     fn fs(&self) -> &dyn FsCheck {
         self.ctx.fs
+    }
+
+    fn ancestor_has(&mut self, path: &Path, name: &str) -> bool {
+        ancestor_has(path, name, self.ctx.fs)
     }
 }
 
@@ -463,7 +470,7 @@ impl Condition {
                 (Some(expected), Some(exe)) => exe == expected,
             },
 
-            Condition::AncestorHas(name) => ancestor_has(path, name, ctx.fs()),
+            Condition::AncestorHas(name) => ctx.ancestor_has(path, name),
 
             Condition::Env(var) => ctx.has_env(var),
         }
@@ -890,6 +897,7 @@ pub struct ProfileController<F = RealFsCheck, C = ProcCallerDataSource> {
     profile: ArcSwap<Profile>,
     fs: F,
     caller_data: C,
+    ancestor_has_cache: AncestorHasCache,
 }
 
 impl ProfileController<RealFsCheck, ProcCallerDataSource> {
@@ -898,6 +906,7 @@ impl ProfileController<RealFsCheck, ProcCallerDataSource> {
             profile: ArcSwap::from_pointee(profile),
             fs: RealFsCheck,
             caller_data: ProcCallerDataSource,
+            ancestor_has_cache: AncestorHasCache::default(),
         }
     }
 }
@@ -909,6 +918,7 @@ impl<F: FsCheck> ProfileController<F, ProcCallerDataSource> {
             profile: ArcSwap::from_pointee(profile),
             fs,
             caller_data: ProcCallerDataSource,
+            ancestor_has_cache: AncestorHasCache::default(),
         }
     }
 }
@@ -920,6 +930,7 @@ impl<F: FsCheck, C: CallerDataSource> ProfileController<F, C> {
             profile: ArcSwap::from_pointee(profile),
             fs,
             caller_data,
+            ancestor_has_cache: AncestorHasCache::default(),
         }
     }
 
@@ -936,6 +947,7 @@ impl<F: FsCheck + Send + Sync + 'static, C: CallerDataSource + Send + Sync + 'st
             pid: request.caller.pid,
             fs: &self.fs,
             caller_data: &self.caller_data,
+            ancestor_has_cache: &self.ancestor_has_cache,
             exe_loaded: false,
             exe: None,
             env_loaded: false,
@@ -966,6 +978,7 @@ struct LazyRuntimeEvalContext<'a, F, C> {
     pid: Option<u32>,
     fs: &'a F,
     caller_data: &'a C,
+    ancestor_has_cache: &'a AncestorHasCache,
     exe_loaded: bool,
     exe: Option<PathBuf>,
     env_loaded: bool,
@@ -995,6 +1008,33 @@ impl<F: FsCheck, C: CallerDataSource> RuntimeEvalContext for LazyRuntimeEvalCont
     fn fs(&self) -> &dyn FsCheck {
         self.fs
     }
+
+    fn ancestor_has(&mut self, path: &Path, name: &str) -> bool {
+        let now = Instant::now();
+        if let Some(cached) = self.ancestor_has_cache.lookup(name, path, now) {
+            return cached;
+        }
+
+        let Some(start_dir) = path.parent() else {
+            return false;
+        };
+
+        let mut dir = start_dir.to_path_buf();
+        loop {
+            if self.fs.exists(&dir.join(name)) {
+                self.ancestor_has_cache.record_positive(name, &dir, now);
+                return true;
+            }
+            match dir.parent() {
+                Some(parent) if parent != dir => dir = parent.to_path_buf(),
+                _ => {
+                    self.ancestor_has_cache
+                        .record_negative(name, start_dir, now);
+                    return false;
+                }
+            }
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1004,6 +1044,7 @@ mod tests {
     use super::*;
     use crate::access::{Caller, Operation};
     use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -1057,6 +1098,35 @@ mod tests {
 
         fn is_dir(&self, path: &Path) -> bool {
             self.0.contains(path)
+        }
+    }
+
+    struct CountingFsCheck {
+        existing: HashSet<PathBuf>,
+        exists_reads: Arc<AtomicUsize>,
+    }
+
+    impl CountingFsCheck {
+        fn new(paths: &[&str]) -> (Self, Arc<AtomicUsize>) {
+            let counter = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    existing: paths.iter().map(|p| PathBuf::from(p)).collect(),
+                    exists_reads: Arc::clone(&counter),
+                },
+                counter,
+            )
+        }
+    }
+
+    impl FsCheck for CountingFsCheck {
+        fn exists(&self, path: &Path) -> bool {
+            self.exists_reads.fetch_add(1, Ordering::Relaxed);
+            self.existing.contains(path)
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.existing.contains(path)
         }
     }
 
@@ -1229,6 +1299,44 @@ mod tests {
         );
         assert_eq!(controller.caller_data.exe_reads.load(Ordering::Relaxed), 0);
         assert_eq!(controller.caller_data.env_reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn profile_controller_caches_positive_ancestor_has_across_checks() {
+        let profile = parse_simple("/repo rw when ancestor-has=.git\n/repo ro\n");
+        let (fs, exists_reads) = CountingFsCheck::new(&["/repo/.git"]);
+        let controller =
+            ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
+        let request = AccessRequest {
+            caller: &Caller::new(Some(123), Some("test".to_owned())),
+            path: Path::new("/repo/src/main.rs"),
+            operation: Operation::Lookup,
+        };
+
+        assert_eq!(controller.check(&request), AccessDecision::Allow);
+        assert_eq!(controller.check(&request), AccessDecision::Allow);
+
+        // first check probes /repo/src/.git then /repo/.git; second check hits cache.
+        assert_eq!(exists_reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn profile_controller_caches_negative_ancestor_has_across_checks() {
+        let profile = parse_simple("/repo rw when ancestor-has=.git\n/repo ro\n");
+        let (fs, exists_reads) = CountingFsCheck::new(&[]);
+        let controller =
+            ProfileController::with_sources(profile, fs, MockCallerDataSource::default());
+        let request = AccessRequest {
+            caller: &Caller::new(Some(123), Some("test".to_owned())),
+            path: Path::new("/repo/src/main.rs"),
+            operation: Operation::Lookup,
+        };
+
+        assert_eq!(controller.check(&request), AccessDecision::Allow);
+        assert_eq!(controller.check(&request), AccessDecision::Allow);
+
+        // first check probes /repo/src/.git, /repo/.git, /.git; second check hits negative cache.
+        assert_eq!(exists_reads.load(Ordering::Relaxed), 3);
     }
 
     #[test]
