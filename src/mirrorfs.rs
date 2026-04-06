@@ -1119,10 +1119,6 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let caller = caller_from_request(req);
         let mut fs = self.inner.write();
-        let lookup_path = fs
-            .path_for_ino(parent.0)
-            .map(Path::to_path_buf)
-            .map(|parent_path| parent_path.join(name));
         match fs.lookup_child(&caller, parent.0, name) {
             Ok(attr) => {
                 fs.note_lookup(attr.ino.0, 1);
@@ -1131,6 +1127,10 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if errno == ENOENT {
+                    let lookup_path = fs
+                        .path_for_ino(parent.0)
+                        .map(Path::to_path_buf)
+                        .map(|parent_path| parent_path.join(name));
                     fs.emit_tail_event(EventKind::LookupMiss, lookup_path, Some(errno), None);
                 }
                 reply.error(Errno::from_i32(errno));
@@ -1153,12 +1153,12 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
                 None => Err(std::io::Error::from_raw_os_error(ENOENT).into()),
             },
         };
-        let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match result {
             Ok(attr) => reply.attr(&TTL, &attr),
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
+                    let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
                     fs.emit_tail_event(EventKind::OpenDenied, path_for_event, Some(errno), None);
                 }
                 reply.error(Errno::from_i32(errno));
@@ -1184,7 +1184,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             if is_access_denied_errno(errno) {
                 fs.emit_tail_event(
                     EventKind::OpenDenied,
-                    Some(path.clone()),
+                    Some(path),
                     Some(errno),
                     Some("op=opendir".to_owned()),
                 );
@@ -1261,7 +1261,6 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let caller = caller_from_request(req);
         let mut fs = self.inner.write();
-        let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         let result = (|| -> Result<u64> {
             let path = fs
                 .path_for_ino(ino.0)
@@ -1283,6 +1282,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if matches!(errno, libc::EACCES | libc::EPERM) {
+                    let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
                     fs.emit_tail_event(EventKind::OpenDenied, path_for_event, Some(errno), None);
                 }
                 reply.error(Errno::from_i32(errno));
@@ -1396,12 +1396,12 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     ) {
         let caller = caller_from_request(req);
         let mut fs = self.inner.write();
-        let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match fs.write_handle(&caller, ino.0, fh.0, offset as i64, data) {
             Ok(len) => reply.written(len),
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
+                    let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
                     fs.emit_tail_event(
                         EventKind::MutationDenied,
                         path_for_event,
@@ -1541,7 +1541,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             if is_access_denied_errno(errno) {
                 fs.emit_tail_event(
                     EventKind::MutationDenied,
-                    Some(path.clone()),
+                    Some(path),
                     Some(errno),
                     Some("op=unlink".to_owned()),
                 );
@@ -1569,7 +1569,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             if is_access_denied_errno(errno) {
                 fs.emit_tail_event(
                     EventKind::MutationDenied,
-                    Some(path.clone()),
+                    Some(path),
                     Some(errno),
                     Some("op=rmdir".to_owned()),
                 );
@@ -1601,7 +1601,7 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             if is_access_denied_errno(errno) {
                 fs.emit_tail_event(
                     EventKind::MutationDenied,
-                    Some(path.clone()),
+                    Some(path),
                     Some(errno),
                     Some("op=symlink".to_owned()),
                 );
