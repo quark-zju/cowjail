@@ -153,7 +153,15 @@ impl<P: AccessController> MirrorFs<P> {
         errno: Option<i32>,
         detail: Option<String>,
     ) {
+        self.emit_tail_event_lazy(kind, || (path, errno, detail));
+    }
+
+    fn emit_tail_event_lazy<F>(&self, kind: EventKind, build: F)
+    where
+        F: FnOnce() -> (Option<PathBuf>, Option<i32>, Option<String>),
+    {
         if let Some(sink) = &self.tail_sink {
+            let (path, errno, detail) = build();
             sink.emit(tail_ipc::Event {
                 kind,
                 path,
@@ -1127,11 +1135,13 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if errno == ENOENT {
-                    let lookup_path = fs
-                        .path_for_ino(parent.0)
-                        .map(Path::to_path_buf)
-                        .map(|parent_path| parent_path.join(name));
-                    fs.emit_tail_event(EventKind::LookupMiss, lookup_path, Some(errno), None);
+                    fs.emit_tail_event_lazy(EventKind::LookupMiss, || {
+                        let lookup_path = fs
+                            .path_for_ino(parent.0)
+                            .map(Path::to_path_buf)
+                            .map(|parent_path| parent_path.join(name));
+                        (lookup_path, Some(errno), None)
+                    });
                 }
                 reply.error(Errno::from_i32(errno));
             }
@@ -1158,8 +1168,13 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
-                    let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
-                    fs.emit_tail_event(EventKind::OpenDenied, path_for_event, Some(errno), None);
+                    fs.emit_tail_event_lazy(EventKind::OpenDenied, || {
+                        (
+                            fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                            Some(errno),
+                            None,
+                        )
+                    });
                 }
                 reply.error(Errno::from_i32(errno));
             }
@@ -1282,8 +1297,13 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if matches!(errno, libc::EACCES | libc::EPERM) {
-                    let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
-                    fs.emit_tail_event(EventKind::OpenDenied, path_for_event, Some(errno), None);
+                    fs.emit_tail_event_lazy(EventKind::OpenDenied, || {
+                        (
+                            fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                            Some(errno),
+                            None,
+                        )
+                    });
                 }
                 reply.error(Errno::from_i32(errno));
             }
@@ -1401,13 +1421,13 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
-                    let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
-                    fs.emit_tail_event(
-                        EventKind::MutationDenied,
-                        path_for_event,
-                        Some(errno),
-                        Some("op=write".to_owned()),
-                    );
+                    fs.emit_tail_event_lazy(EventKind::MutationDenied, || {
+                        (
+                            fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                            Some(errno),
+                            Some("op=write".to_owned()),
+                        )
+                    });
                 }
                 reply.error(Errno::from_i32(errno));
             }
@@ -1679,12 +1699,13 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
             Err(err) => {
                 let errno = io_errno(&err);
                 if is_access_denied_errno(errno) {
-                    fs.emit_tail_event(
-                        EventKind::MutationDenied,
-                        Some(from),
-                        Some(errno),
-                        Some(format!("op=rename to={}", to.display())),
-                    );
+                    fs.emit_tail_event_lazy(EventKind::MutationDenied, move || {
+                        (
+                            Some(from),
+                            Some(errno),
+                            Some(format!("op=rename to={}", to.display())),
+                        )
+                    });
                 }
                 reply.error(Errno::from_i32(errno));
             }
@@ -1857,31 +1878,32 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     ) {
         let caller = caller_from_request(req);
         let mut fs = self.inner.write();
-        let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match fs.getlk_for_fuse(&caller, ino.0, fh.0, lock_owner, start, end, typ) {
             Ok((start, end, typ, pid)) => {
-                fs.emit_tail_event(
-                    EventKind::Lock,
-                    path_for_event,
-                    None,
-                    Some(format!(
-                        "op=getlk start={start} end={end} typ={typ} owner={} pid={pid}",
-                        lock_owner.0
-                    )),
-                );
+                fs.emit_tail_event_lazy(EventKind::Lock, || {
+                    (
+                        fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                        None,
+                        Some(format!(
+                            "op=getlk start={start} end={end} typ={typ} owner={} pid={pid}",
+                            lock_owner.0
+                        )),
+                    )
+                });
                 reply.locked(start, end, typ, pid)
             }
             Err(err) => {
                 let errno = io_errno(&err);
-                fs.emit_tail_event(
-                    EventKind::Lock,
-                    path_for_event,
-                    Some(errno),
-                    Some(format!(
-                        "op=getlk start={start} end={end} typ={typ} owner={}",
-                        lock_owner.0
-                    )),
-                );
+                fs.emit_tail_event_lazy(EventKind::Lock, || {
+                    (
+                        fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                        Some(errno),
+                        Some(format!(
+                            "op=getlk start={start} end={end} typ={typ} owner={}",
+                            lock_owner.0
+                        )),
+                    )
+                });
                 reply.error(Errno::from_i32(errno))
             }
         }
@@ -1902,31 +1924,32 @@ impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
     ) {
         let caller = caller_from_request(req);
         let mut fs = self.inner.write();
-        let path_for_event = fs.path_for_ino(ino.0).map(Path::to_path_buf);
         match fs.setlk_for_fuse(&caller, ino.0, fh.0, lock_owner, start, end, typ, sleep) {
             Ok(()) => {
-                fs.emit_tail_event(
-                    EventKind::Lock,
-                    path_for_event,
-                    None,
-                    Some(format!(
-                        "op=setlk start={start} end={end} typ={typ} owner={} sleep={sleep}",
-                        lock_owner.0
-                    )),
-                );
+                fs.emit_tail_event_lazy(EventKind::Lock, || {
+                    (
+                        fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                        None,
+                        Some(format!(
+                            "op=setlk start={start} end={end} typ={typ} owner={} sleep={sleep}",
+                            lock_owner.0
+                        )),
+                    )
+                });
                 reply.ok()
             }
             Err(err) => {
                 let errno = io_errno(&err);
-                fs.emit_tail_event(
-                    EventKind::Lock,
-                    path_for_event,
-                    Some(errno),
-                    Some(format!(
-                        "op=setlk start={start} end={end} typ={typ} owner={} sleep={sleep}",
-                        lock_owner.0
-                    )),
-                );
+                fs.emit_tail_event_lazy(EventKind::Lock, || {
+                    (
+                        fs.path_for_ino(ino.0).map(Path::to_path_buf),
+                        Some(errno),
+                        Some(format!(
+                            "op=setlk start={start} end={end} typ={typ} owner={} sleep={sleep}",
+                            lock_owner.0
+                        )),
+                    )
+                });
                 reply.error(Errno::from_i32(errno))
             }
         }
