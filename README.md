@@ -20,14 +20,17 @@ cargo install --path .
 leash run bash  # or codex, opencode, etc
 ```
 
-## Profiles
+## Rules
 
-[Profile](docs/PROFILE.md) decides what paths can be accessed.
+Show, test, and edit rules:
 
 ```bash
-leash rules show  # show rules
-leash rules edit  # edit rules
+leash rules show                # show rules
+leash rules test ~/.ssh/config  # test a path against rules
+leash rules edit                # edit rules
 ```
+
+See [this doc](docs/PROFILE.md) for the syntax of rules.
 
 ## More docs
 
