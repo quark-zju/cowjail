@@ -383,20 +383,22 @@ impl Profile {
     }
 
     fn readdir_self_visibility_is_exe_stable(&self, path: &Path) -> bool {
-        let mut seen = vec![false; self.rules.len()];
-        let mut explicit_rule_indices = Vec::new();
-        for matched_idx in self.match_globset.matches(path) {
-            let matched = &self.match_entries[matched_idx];
-            if matched.kind != InternalRuleKind::Explicit || seen[matched.original_rule_index] {
-                continue;
-            }
-            seen[matched.original_rule_index] = true;
-            explicit_rule_indices.push(matched.original_rule_index);
-        }
-
         let mut has_exe_visible_rule = false;
         let mut first_non_exe_action = None;
-        for rule_index in explicit_rule_indices {
+        let mut last_rule_index = None;
+        for rule_index in self
+            .match_globset
+            .matches(path)
+            .into_iter()
+            .filter_map(|matched_idx| {
+                let matched = &self.match_entries[matched_idx];
+                (matched.kind == InternalRuleKind::Explicit).then_some(matched.original_rule_index)
+            })
+        {
+            if last_rule_index == Some(rule_index) {
+                continue;
+            }
+            last_rule_index = Some(rule_index);
             let rule = &self.rules[rule_index];
             if rule.has_exe_condition() {
                 if matches!(rule.action, Action::Hide | Action::Deny) {
