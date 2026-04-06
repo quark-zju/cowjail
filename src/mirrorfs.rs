@@ -1960,10 +1960,10 @@ fn caller_from_request(req: &Request) -> Caller {
 }
 
 fn read_process_name(pid: u32) -> Option<String> {
-    let path = PathBuf::from(format!("/proc/{pid}/comm"));
-    let raw = fs::read_to_string(path).ok()?;
-    let name = raw.trim().to_owned();
-    if name.is_empty() { None } else { Some(name) }
+    let path = PathBuf::from(format!("/proc/{pid}/exe"));
+    let target = fs::read_link(path).ok()?;
+    let exe = target.to_string_lossy().into_owned();
+    if exe.is_empty() { None } else { Some(exe) }
 }
 
 fn filetype_from_metadata(metadata: &Metadata) -> FileType {

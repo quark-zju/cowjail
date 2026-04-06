@@ -89,7 +89,7 @@ struct MountedSuite {
 
 impl MountedSuite {
     fn new() -> Result<Self> {
-        let process_name = current_process_name()?;
+        let process_name = current_process_exe()?;
         Self::with_policy(IntegrationPolicy::new(process_name))
     }
 
@@ -235,13 +235,14 @@ fn test_cases() -> Vec<TestCase> {
     ]
 }
 
-fn current_process_name() -> Result<String> {
-    let raw = fs::read_to_string("/proc/self/comm")?;
-    let name = raw.trim().to_owned();
-    if name.is_empty() {
-        bail!("current process name is empty");
+fn current_process_exe() -> Result<String> {
+    let exe = fs::read_link("/proc/self/exe")?
+        .to_string_lossy()
+        .into_owned();
+    if exe.is_empty() {
+        bail!("current process exe is empty");
     }
-    Ok(name)
+    Ok(exe)
 }
 
 fn path_has_component(path: &Path, needle: &str) -> bool {
