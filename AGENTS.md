@@ -1,4 +1,8 @@
-# AGENTS Instructions for /home/quark/src/leash
+# AGENTS Instructions for leash
+
+## Overview
+
+Read `README.md` to understand project overview.
 
 ## Testing
 
