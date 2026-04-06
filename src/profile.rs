@@ -418,7 +418,9 @@ impl Profile {
                 .map(Action::allows_visible_descendants)
                 .unwrap_or(false);
         }
-        true
+        first_non_exe_action
+            .map(Action::allows_visible_descendants)
+            .unwrap_or(true)
     }
 
     pub fn rule_match_report(&self, path: &Path, ctx: &EvalContext<'_>) -> RuleMatchReport {
@@ -1995,6 +1997,9 @@ mod tests {
         let case6 = parse_simple("/a/b deny when env=SECRET\n/a ro\n");
         assert!(case6.should_cache_readdir(Path::new("/a")));
         assert!(!case6.should_cache_readdir(Path::new("/a/b")));
+
+        let case7 = parse_simple("/a deny\n");
+        assert!(!case7.should_cache_readdir(Path::new("/a")));
     }
 
     #[test]
