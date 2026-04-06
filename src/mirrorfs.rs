@@ -1100,7 +1100,7 @@ fn fuse_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .clamp(1, 4)
+        .clamp(1, 2)
 }
 
 impl<P: AccessController> Filesystem for FuseMirrorFs<P> {
