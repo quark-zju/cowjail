@@ -69,6 +69,7 @@ const AGENTS_PROFILE_SOURCE: &str = "\
 
 # programming language package, environment management
 ~/.bun rw
+~/.cache/uv rw
 ~/.cargo rw
 ~/.npm rw
 ~/.pyenv rw
@@ -99,6 +100,9 @@ const AGENTS_PROFILE_SOURCE: &str = "\
 ~/.python_history rw
 ~/.zdirs rw
 ~/.zsh_history* rw
+
+# tokscale
+~/.config/tokscale rw
 ";
 
 const HOME_HIDE: &str = "\
