@@ -56,13 +56,13 @@ impl Caller {
 
     #[cfg(test)]
     pub fn process_name(&self) -> Option<&str> {
-        self.exe
-            .get()
-            .and_then(|path| path.as_ref())
-            .and_then(|path| path.to_str())
+        self.exe().and_then(|path| path.to_str())
     }
 
     fn exe(&self) -> Option<&Path> {
+        if let Some(cached) = self.exe.get() {
+            return cached.as_deref();
+        }
         let pid = self.pid?;
         self.exe
             .get_or_init(|| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
@@ -210,5 +210,13 @@ mod tests {
         let expected = HashSet::from([PathBuf::from("/usr/bin/leash-test")]);
         assert!(caller_condition.exe_match(&expected));
         assert!(caller_condition.exe_match(&expected));
+    }
+
+    #[test]
+    fn process_name_loads_exe_for_new_caller() {
+        let caller = Caller::new(Some(std::process::id()));
+        let expected = std::fs::read_link("/proc/self/exe").expect("read self exe");
+
+        assert_eq!(caller.process_name(), expected.to_str());
     }
 }
