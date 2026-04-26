@@ -22,6 +22,22 @@ pub(crate) fn profile_command(command: ProfileCommand) -> Result<()> {
 }
 
 fn show_profile() -> Result<()> {
+    if log::log_enabled!(log::Level::Debug) {
+        match std::env::current_dir() {
+            Ok(cwd) => {
+                if let Err(err) = profile_store::load_default_profile(&cwd) {
+                    log::debug!(
+                        "rules show: debug profile parse failed (continuing with source rendering): {err:#}"
+                    );
+                }
+            }
+            Err(err) => {
+                log::debug!(
+                    "rules show: unable to read current directory for debug profile parse: {err:#}"
+                );
+            }
+        }
+    }
     let text = profile_store::render_default_profile_source_for_show()?;
     print!("{text}");
     if !text.ends_with('\n') {
