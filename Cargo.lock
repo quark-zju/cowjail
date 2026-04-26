@@ -221,6 +221,7 @@ dependencies = [
  "papaya",
  "parking_lot",
  "pico-args",
+ "smallvec",
  "tempfile",
  "thiserror",
 ]

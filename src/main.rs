@@ -13,6 +13,7 @@ mod mount_plan;
 mod process_name;
 mod profile;
 mod profile_store;
+mod sparse_bitset;
 mod tail_ipc;
 mod userns_run;
 
