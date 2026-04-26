@@ -740,7 +740,7 @@ impl Profile {
         match self.visibility(path, ctx) {
             Visibility::Action(action) => action.access_errno(),
             Visibility::ImplicitAncestor {
-                blocked_action: Some(action),
+                blocked_action: Some(_),
             } if ctx.fs.is_dir(path) => None,
             Visibility::ImplicitAncestor {
                 blocked_action: Some(action),
@@ -760,7 +760,7 @@ impl Profile {
         match self.visibility(path, ctx) {
             Visibility::Action(action) => action.mutation_errno(),
             Visibility::ImplicitAncestor {
-                blocked_action: Some(action),
+                blocked_action: Some(_),
             } if ctx.fs.is_dir(path) => None,
             Visibility::ImplicitAncestor {
                 blocked_action: Some(action),
@@ -1446,7 +1446,7 @@ impl<F: FsCheck> ProfileController<F> {
             match profile.visibility_with_runtime(request.path, &mut ctx) {
                 Visibility::Action(action) => action.mutation_errno(),
                 Visibility::ImplicitAncestor {
-                    blocked_action: Some(action),
+                    blocked_action: Some(_),
                 } if ctx.fs().is_dir(request.path) => None,
                 Visibility::ImplicitAncestor {
                     blocked_action: Some(action),
@@ -1463,7 +1463,7 @@ impl<F: FsCheck> ProfileController<F> {
             match profile.visibility_with_runtime(request.path, &mut ctx) {
                 Visibility::Action(action) => action.access_errno(),
                 Visibility::ImplicitAncestor {
-                    blocked_action: Some(action),
+                    blocked_action: Some(_),
                 } if ctx.fs().is_dir(request.path) => None,
                 Visibility::ImplicitAncestor {
                     blocked_action: Some(action),
