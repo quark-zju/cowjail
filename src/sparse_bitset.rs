@@ -11,6 +11,10 @@ pub struct SparseBitset {
 }
 
 impl SparseBitset {
+    pub fn word_len(&self) -> usize {
+        self.words.len()
+    }
+
     pub fn set(&mut self, bit: usize) {
         let (word_index, mask) = split_bit(bit);
         if self.words.len() <= word_index {
@@ -66,6 +70,7 @@ mod tests {
         bits.set(700);
         assert!(bits.test(700));
         assert!(!bits.test(699));
+        assert!(bits.word_len() > 8);
     }
 
     #[test]

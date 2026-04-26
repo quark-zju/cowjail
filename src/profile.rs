@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use libc::{EACCES, ENOENT, EPERM};
+use log::debug;
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
@@ -445,6 +446,7 @@ pub struct RuleMatchReport {
 struct ConditionMatchCache {
     seen: SparseBitset,
     matched: SparseBitset,
+    seen_word_len_peak: usize,
 }
 
 impl ConditionMatchCache {
@@ -457,11 +459,16 @@ impl ConditionMatchCache {
 
     fn set(&mut self, rule_index: usize, matched: bool) {
         self.seen.set(rule_index);
+        self.seen_word_len_peak = self.seen_word_len_peak.max(self.seen.word_len());
         if matched {
             self.matched.set(rule_index);
         } else {
             self.matched.clear(rule_index);
         }
+    }
+
+    fn seen_word_len_peak(&self) -> usize {
+        self.seen_word_len_peak
     }
 }
 
@@ -500,8 +507,11 @@ impl Profile {
             ) {
                 continue;
             }
-            return Some(self.rules[matched.original_rule_index].action);
+            let result = Some(self.rules[matched.original_rule_index].action);
+            debug_condition_cache_peak(path, &cached_conditions);
+            return result;
         }
+        debug_condition_cache_peak(path, &cached_conditions);
         None
     }
 
@@ -545,10 +555,13 @@ impl Profile {
             }
         }
         if implicit_ancestor_visible {
-            return Visibility::ImplicitAncestor {
+            let result = Visibility::ImplicitAncestor {
                 blocked_action: None,
             };
+            debug_condition_cache_peak(path, &cached_conditions);
+            return result;
         }
+        debug_condition_cache_peak(path, &cached_conditions);
         Visibility::Hidden
     }
 
@@ -677,7 +690,7 @@ impl Profile {
                     } else {
                         Visibility::Action(rule.action)
                     };
-                    return RuleMatchReport {
+                    let report = RuleMatchReport {
                         visibility,
                         effective_action: match visibility {
                             Visibility::Action(action) => action,
@@ -691,6 +704,8 @@ impl Profile {
                         },
                         entries,
                     };
+                    debug_condition_cache_peak(path, &cached_conditions);
+                    return report;
                 }
             }
         }
@@ -702,7 +717,7 @@ impl Profile {
         } else {
             Visibility::Hidden
         };
-        RuleMatchReport {
+        let report = RuleMatchReport {
             visibility,
             effective_action: match visibility {
                 Visibility::Action(action) => action,
@@ -715,7 +730,9 @@ impl Profile {
                 | Visibility::Hidden => Action::Hide,
             },
             entries,
-        }
+        };
+        debug_condition_cache_peak(path, &cached_conditions);
+        report
     }
 
     #[cfg(test)]
@@ -784,9 +801,11 @@ impl Profile {
                 ctx,
                 &mut cached_conditions,
             ) {
+                debug_condition_cache_peak(path, &cached_conditions);
                 return true;
             }
         }
+        debug_condition_cache_peak(path, &cached_conditions);
         false
     }
 
@@ -1010,6 +1029,19 @@ fn parse_with_os_id_resolver(
     let (match_globset, match_entries) = build_internal_rule_index(&rules)?;
     let caller_conditioned_hide_ancestor_globset =
         build_caller_conditioned_hide_ancestor_globset(&rules)?;
+    let max_rule_index = rules.len().checked_sub(1);
+    let max_match_entry_rule_index = match_entries
+        .iter()
+        .map(|entry| entry.original_rule_index)
+        .max();
+    debug!(
+        "profile-compile: rules_len={} max_rule_index={:?} match_entries_len={} max_match_entry_rule_index={:?} caller_conditioned_hide_ancestor_globs={} sparse_bitset_inline_words=8 sparse_bitset_inline_bits=512",
+        rules.len(),
+        max_rule_index,
+        match_entries.len(),
+        max_match_entry_rule_index,
+        caller_conditioned_hide_ancestor_globset.len()
+    );
     Ok(Profile {
         rules,
         match_globset,
@@ -1356,6 +1388,16 @@ fn build_caller_conditioned_hide_ancestor_globset(rules: &[Rule]) -> Result<Glob
     builder
         .build()
         .map_err(|e| ParseError::BadGlob("<internal>".to_owned(), e.to_string()))
+}
+
+fn debug_condition_cache_peak(path: &Path, cache: &ConditionMatchCache) {
+    if cache.seen_word_len_peak() > 8 {
+        debug!(
+            "profile-cond-cache: path={} seen_word_len_peak={} inline_words=8",
+            path.display(),
+            cache.seen_word_len_peak()
+        );
+    }
 }
 
 pub struct ProfileController<F = RealFsCheck> {
