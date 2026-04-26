@@ -105,6 +105,9 @@ Important behavior:
 - hidden entries disappear from `readdir`
 - if a deeper visible rule requires traversal through a hidden directory, the
   hidden ancestors become implicitly visible directories
+- this implicit-ancestor traversal also applies when the explicit ancestor rule
+  is `deny`; the directory can be traversed to reach the allowed descendant,
+  while unmatched siblings still behave as hidden entries
 - if no rule matches a path, it is hidden by default
 
 ## Conditions

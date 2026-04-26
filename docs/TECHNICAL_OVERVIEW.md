@@ -58,6 +58,9 @@ Important details:
   rejects same-name creation with a mutation error.
 - If a hidden directory has allowed descendants because of a deeper glob rule,
   ancestor directories are implicitly visible so the path remains traversable.
+- The same implicit-ancestor traversal rule applies when the explicit ancestor
+  action is `deny`; traversal to explicitly allowed descendants still works, and
+  unmatched siblings remain hidden.
 - `.` and relative path patterns are intentionally rejected because the shared
   daemon can reload the profile without a per-command CWD context.
 - `exe` and `env` conditions are loaded lazily from `/proc/<pid>` only when a
@@ -75,19 +78,8 @@ results are caller-stable:
 
 - if an applicable caller-conditioned `hide` or `deny` rule can directly affect
   the directory's own visibility decision, caching is disabled
-- exception: an implicit-ancestor traversal case can still be cached for the
-  exact directory path when all of these hold:
-  - an unconditional implicit-ancestor match appears before the first
-    unconditional explicit result
-  - caller-conditioned visible descendants exist (for example `rw when exe=...`)
-  - the first unconditional explicit result at this directory is an exact
-    `hide`/`deny` match
 - caller-conditioned `hide` rules affecting descendant names also disable
   caching for ancestor directories, because child lists can vary by caller
-
-This allows patterns like `.git` to cache at the `.git` directory itself in the
-implicit-visible case, while keeping deeper directories such as `.git/refs`
-uncached when stability cannot be guaranteed.
 
 ## Mount Plan Rules
 
