@@ -23,6 +23,22 @@ cargo install --path .
 leash run bash  # or codex, opencode, etc
 ```
 
+### Symlink Shims
+
+将 `leash` 符号链接到其他命令名，运行该链接即等价于 `leash run <command>`：
+
+```bash
+# 假定 ~/.local/bin 在 PATH 中
+ln -s $(which leash) ~/.local/bin/codex
+ln -s $(which leash) ~/.local/bin/bash
+
+# 以下两行等价：
+codex foo bar    # 等价于: leash run codex foo bar
+bash -c 'ls'     # 等价于: leash run bash -c 'ls'
+```
+
+链接名（argv[0]）会被用来在 PATH 中搜索真正的二进制（跳过 leash 自身），所有参数透传给目标命令。
+
 ## Rules
 
 Show, test, and edit rules:
