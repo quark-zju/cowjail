@@ -11,6 +11,7 @@ use log::{info, warn};
 use crate::cli::LowLevelFuseCommand;
 use crate::fuse_runtime::{self, MountState};
 use crate::mirrorfs::MirrorFs;
+use crate::process_name::set_process_name;
 use crate::profile::ProfileController;
 use crate::profile_store;
 use crate::tail_ipc;
@@ -20,6 +21,7 @@ const PROFILE_RELOAD_POLL: Duration = Duration::from_millis(100);
 static PROFILE_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn fuse_command(_command: LowLevelFuseCommand) -> Result<()> {
+    set_process_name("fuse")?;
     let mountpoint = fuse_runtime::ensure_global_mountpoint()?;
     let state = fuse_runtime::read_global_mount_state(&mountpoint)?;
     match state {
