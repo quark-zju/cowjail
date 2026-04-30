@@ -27,7 +27,7 @@ pub fn try_handle_arg0(args: &[OsString]) -> Result<Option<i32>> {
         return Ok(None);
     }
 
-    let found = path_search::find_in_path_excluding_current_exe(basename)
+    let found = path_search::find_in_path_excluding_current_exe(std::ffi::OsStr::new(basename))
         .with_context(|| format!("{basename}: command not found"))?;
 
     let remaining: Vec<OsString> = args[1..].to_vec();

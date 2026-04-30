@@ -118,7 +118,7 @@ pub struct PathExeResolver;
 
 impl ExeResolver for PathExeResolver {
     fn resolve(&self, name: &str) -> Option<PathBuf> {
-        path_search::find_in_path(name)
+        path_search::find_in_path(std::ffi::OsStr::new(name))
     }
 }
 

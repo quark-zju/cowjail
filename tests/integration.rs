@@ -8,10 +8,10 @@ mod ancestor_has_cache;
 mod fuse_runtime;
 #[path = "../src/mirrorfs.rs"]
 mod mirrorfs;
-#[path = "../src/process_name.rs"]
-mod process_name;
 #[path = "../src/path_search.rs"]
 mod path_search;
+#[path = "../src/process_name.rs"]
+mod process_name;
 #[path = "../src/profile.rs"]
 mod profile;
 #[path = "../src/sparse_bitset.rs"]

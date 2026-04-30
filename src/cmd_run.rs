@@ -40,7 +40,7 @@ fn resolve_run_program(program: &std::ffi::OsStr) -> Option<std::ffi::OsString> 
         return Some(program.to_os_string());
     }
 
-    path_search::find_in_path_excluding_current_exe(&program.to_string_lossy())
+    path_search::find_in_path_excluding_current_exe(program)
         .map(|resolved| resolved.into_os_string())
 }
 
