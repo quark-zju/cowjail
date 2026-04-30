@@ -42,6 +42,7 @@ use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::access::{AccessController, AccessDecision, AccessRequest, CallerCondition};
 use crate::ancestor_has_cache::AncestorHasCache;
+use crate::path_search;
 use crate::sparse_bitset::SparseBitset;
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -117,15 +118,7 @@ pub struct PathExeResolver;
 
 impl ExeResolver for PathExeResolver {
     fn resolve(&self, name: &str) -> Option<PathBuf> {
-        let path_var = std::env::var("PATH").ok()?;
-        for dir in path_var.split(':') {
-            let candidate = Path::new(dir).join(name);
-            if candidate.is_file() {
-                let candidate = candidate.canonicalize().unwrap_or(candidate);
-                return Some(candidate);
-            }
-        }
-        None
+        path_search::find_in_path(name)
     }
 }
 

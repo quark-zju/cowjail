@@ -10,6 +10,8 @@ mod fuse_runtime;
 mod mirrorfs;
 #[path = "../src/process_name.rs"]
 mod process_name;
+#[path = "../src/path_search.rs"]
+mod path_search;
 #[path = "../src/profile.rs"]
 mod profile;
 #[path = "../src/sparse_bitset.rs"]

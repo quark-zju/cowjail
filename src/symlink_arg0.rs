@@ -1,9 +1,9 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
 use crate::cli::RunCommand;
+use crate::path_search;
 
 /// If `argv[0]` basename is not "leash" (e.g. invoked via a symlink like
 /// `/usr/local/bin/codex` -> `leash`), search PATH for the real binary and
@@ -27,8 +27,8 @@ pub fn try_handle_arg0(args: &[OsString]) -> Result<Option<i32>> {
         return Ok(None);
     }
 
-    let found =
-        search_path_for(basename).with_context(|| format!("{basename}: command not found"))?;
+    let found = path_search::find_in_path_excluding_current_exe(basename)
+        .with_context(|| format!("{basename}: command not found"))?;
 
     let remaining: Vec<OsString> = args[1..].to_vec();
     crate::cmd_run::run_command(RunCommand {
@@ -37,25 +37,4 @@ pub fn try_handle_arg0(args: &[OsString]) -> Result<Option<i32>> {
         args: remaining,
     })
     .map(Some)
-}
-
-/// Search PATH for a binary named `name`, skipping the current executable
-/// (to avoid matching a symlink back to ourselves).
-fn search_path_for(name: &str) -> Option<PathBuf> {
-    let current_exe = std::env::current_exe().ok()?;
-    let current = current_exe
-        .canonicalize()
-        .unwrap_or_else(|_| current_exe.clone());
-    let path_var = std::env::var("PATH").ok()?;
-    for dir in path_var.split(':') {
-        let candidate = std::path::Path::new(dir).join(name);
-        if candidate.is_file() {
-            match candidate.canonicalize() {
-                Ok(c) if c == current => continue,
-                Ok(c) => return Some(c),
-                Err(_) => return Some(candidate),
-            }
-        }
-    }
-    None
 }

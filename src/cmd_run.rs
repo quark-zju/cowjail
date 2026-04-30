@@ -13,6 +13,7 @@ use log::debug;
 use crate::cli::RunCommand;
 use crate::fuse_runtime::{self, MountState};
 use crate::mount_plan;
+use crate::path_search;
 use crate::profile_store;
 use crate::userns_run::{self, UsernsRunConfig};
 
@@ -20,20 +21,27 @@ const FUSE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const FUSE_STARTUP_POLL: Duration = Duration::from_millis(20);
 
 pub(crate) fn run_command(run: RunCommand) -> Result<i32> {
+    let program = resolve_run_program(&run.program)
+        .with_context(|| format!("{}: command not found", run.program.to_string_lossy()))?;
     let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
     let profile = profile_store::load_default_profile(&cwd)?;
     let mount_plan =
         mount_plan::build_mount_plan(&profile).context("failed to build mount plan")?;
     let fuse_mount_root = ensure_fuse_daemon_running(run.verbose)?;
 
-    let config = UsernsRunConfig::new(
-        fuse_mount_root,
-        cwd,
-        run.program.clone(),
-        run.args.clone(),
-        mount_plan,
-    );
+    let config = UsernsRunConfig::new(fuse_mount_root, cwd, program, run.args.clone(), mount_plan);
     userns_run::run_in_user_namespace(&config)
+}
+
+fn resolve_run_program(program: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    use std::path::Path;
+
+    if Path::new(program).components().count() > 1 {
+        return Some(program.to_os_string());
+    }
+
+    path_search::find_in_path_excluding_current_exe(&program.to_string_lossy())
+        .map(|resolved| resolved.into_os_string())
 }
 
 fn ensure_fuse_daemon_running(verbose: bool) -> Result<std::path::PathBuf> {
