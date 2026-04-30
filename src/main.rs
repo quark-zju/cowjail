@@ -14,6 +14,7 @@ mod process_name;
 mod profile;
 mod profile_store;
 mod sparse_bitset;
+mod symlink_arg0;
 mod tail_ipc;
 mod userns_run;
 
@@ -33,7 +34,13 @@ fn main() {
 }
 
 fn try_main() -> Result<i32> {
-    let command = cli::parse_env()?;
+    let args: Vec<_> = std::env::args_os().collect();
+
+    if let Some(status) = symlink_arg0::try_handle_arg0(&args)? {
+        return Ok(status);
+    }
+
+    let command = cli::parse_from(args.into_iter().skip(1))?;
     init_logging(command_verbose(&command));
 
     match command {

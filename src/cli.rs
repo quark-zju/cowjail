@@ -55,10 +55,6 @@ pub struct LowLevelFuseCommand {
     pub verbose: bool,
 }
 
-pub fn parse_env() -> Result<Command> {
-    parse_from(std::env::args_os().skip(1))
-}
-
 pub fn parse_from<I>(argv: I) -> Result<Command>
 where
     I: IntoIterator<Item = OsString>,
