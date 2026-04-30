@@ -25,19 +25,14 @@ leash run bash  # or codex, opencode, etc
 
 ### Symlink Shims
 
-将 `leash` 符号链接到其他命令名，运行该链接即等价于 `leash run <command>`：
-
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ln -s $(which leash) ~/.local/bin/codex
 ln -s $(which leash) ~/.local/bin/opencode
 
-# 以下等价：
-codex resume     # 等价于: leash run codex resume
-opencode web     # 等价于: leash run opencode web
+codex resume     # same as: leash run codex resume
+opencode web     # same as: leash run opencode web
 ```
-
-链接名（argv[0]）会被用来在 PATH 中搜索真正的二进制（跳过 leash 自身），所有参数透传给目标命令。
 
 ## Rules
 
