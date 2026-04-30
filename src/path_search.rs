@@ -16,9 +16,9 @@ pub fn find_in_path_excluding_current_exe(name: &OsStr) -> Option<PathBuf> {
 }
 
 fn find_in_path_with(name: &OsStr, skip: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join(name);
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
         if candidate.is_file() && !skip(&candidate) {
             return Some(candidate.canonicalize().unwrap_or(candidate));
         }
