@@ -1,5 +1,11 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+static CURRENT_EXE_CANONICAL: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    let current_exe = std::env::current_exe().ok()?;
+    Some(current_exe.canonicalize().unwrap_or(current_exe))
+});
 
 /// Resolve a bare executable name from PATH, returning the first file match.
 pub fn find_in_path(name: &OsStr) -> Option<PathBuf> {
@@ -9,9 +15,8 @@ pub fn find_in_path(name: &OsStr) -> Option<PathBuf> {
 /// Resolve a bare executable name from PATH while skipping candidates that
 /// point to the currently-running executable.
 pub fn find_in_path_excluding_current_exe(name: &OsStr) -> Option<PathBuf> {
-    let current_exe = std::env::current_exe().ok();
     find_in_path_with(name, |candidate| {
-        is_same_executable(candidate, current_exe.as_deref())
+        is_same_executable(candidate, CURRENT_EXE_CANONICAL.as_deref())
     })
 }
 
@@ -26,15 +31,17 @@ fn find_in_path_with(name: &OsStr, skip: impl Fn(&Path) -> bool) -> Option<PathB
     None
 }
 
-fn is_same_executable(candidate: &Path, current_exe: Option<&Path>) -> bool {
-    let Some(current_exe) = current_exe else {
+fn is_same_executable(candidate: &Path, current_exe_canonical: Option<&Path>) -> bool {
+    let Some(current_exe_canonical) = current_exe_canonical else {
         return false;
     };
-    let current = current_exe
-        .canonicalize()
-        .unwrap_or_else(|_| current_exe.to_path_buf());
-    let candidate = candidate
+
+    if candidate == current_exe_canonical {
+        return true;
+    }
+
+    let candidate_canonical = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.to_path_buf());
-    candidate == current
+    candidate_canonical == current_exe_canonical
 }
