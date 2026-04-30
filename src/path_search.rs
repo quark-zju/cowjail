@@ -40,8 +40,8 @@ fn is_same_executable(candidate: &Path, current_exe_canonical: Option<&Path>) ->
         return true;
     }
 
-    let candidate_canonical = candidate
-        .canonicalize()
-        .unwrap_or_else(|_| candidate.to_path_buf());
+    let Ok(candidate_canonical) = candidate.canonicalize() else {
+        return false;
+    };
     candidate_canonical == current_exe_canonical
 }
