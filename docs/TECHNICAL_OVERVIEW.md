@@ -3,6 +3,9 @@
 This document keeps implementation-level details that are intentionally kept
 short in `README.md`.
 
+For a proposed directory-level incremental policy engine, see
+[目录级增量规则匹配设计](INCREMENTAL_RULE_MATCHING.md) (design only; not implemented).
+
 ## Scope
 
 `leash` currently focuses on a single shared mirror-style FUSE filesystem plus
